@@ -35,13 +35,48 @@ Do not treat IDs or transition events as authority tokens.
 Four model-free integration test cases are authored, not executed.
 No new dependencies or lockfile changes are needed for Part 01.
 
+## Part 02 — tool registry and validation
+
+The registry starts empty and rejects unknown or unregistered identifiers.
+It can register the six fixed MVP contracts; registration declares a contract,
+not the presence of a native adapter or user permission. Later runtime
+integration must register only capabilities it can actually execute.
+
+Each contract has input and output JSON Schema descriptions, risk,
+permission requirement, cooperative timeout, output bound and side-effect
+description. Typed Serde validation and explicit byte/semantic checks are
+authoritative; the schemas are model guidance, not the enforcement engine.
+All proposal fields are checked, with raw argument JSON retained to reject
+duplicate keys. No text scanning or fenced JSON extraction is performed.
+The future inference adapter must call this parser only for a complete
+dedicated tool decision, never ordinary chat, reasoning, or partial output.
+
+A validated call is immutable through its public interface and is not an
+approval. Scope and application identifiers are opaque ASCII identifiers
+of up to 64 bytes; trusted native adapters allocate and resolve them.
+File paths are lexical relative paths only; the native layer still needs
+descriptor-relative containment and file-type checks. File search defaults
+to 100 results and depth 8 (depth zero means immediate entries).
+File reading accepts a file scope or a directory scope plus relative path,
+with a 64 KiB source-file limit and up to 4096 bytes of UTF-8 preview.
+The entire serialized observation must fit 8192 bytes, including escaping;
+adapters must shorten previews/lists with explicit truncation or fail closed.
+The tool result type must match the validated call. Launch success means
+dispatch accepted, not confirmation of an opened window or completed task.
+
+The only dependency change is a direct reference to the already locked
+serde_json 1.0.154 with its raw_value feature. The existing package checksum
+and transitive dependencies are unchanged; the agent-core dependency list
+in Cargo.lock was updated at source level, not resolved by Cargo.
+Five regression tests are authored, not executed.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
 | --- | --- | --- |
 | 00 | Pinned baseline review | Source reviewed |
 | 01 | Domain, lifecycle, errors, budgets | Implemented; unverified |
-| 02 | Tool registry and validation | Pending |
+| 02 | Tool registry and validation | Implemented; unverified |
 | 03 | Permission engine | Pending |
 | 04 | Calculator and device tools | Pending |
 | 05 | Linux filesystem tools | Pending |
@@ -53,6 +88,6 @@ No new dependencies or lockfile changes are needed for Part 01.
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-No tool, policy enforcement, UI integration, or model-driven execution exists
-as a result of Part 01. Later parts must connect these contracts before the
+No native tool execution, policy enforcement, UI integration, or model-driven execution exists
+as a result of Parts 01–02. Later parts must connect these contracts before the
 agent can perform any action.
