@@ -1,8 +1,8 @@
 # local-first-ai-agent
 
-A local-first personal AI agent project. Milestone **v0.0.2** adds a Linux
-desktop screen for testing local GGUF inference. The release embeds its UI and
-runs llama.cpp on the CPU.
+A local-first personal AI agent project. Milestone **v0.0.3** adds saved offline
+conversations to the Linux desktop app. The release embeds its UI, runs
+llama.cpp on the CPU, and keeps chat history in SQLite on the device.
 
 ## Development on Linux
 
@@ -50,16 +50,25 @@ On a resource-constrained Linux machine, set `CARGO_BUILD_JOBS=1` and
 Clang resource headers installed, bindgen can use the installed GCC headers
 via `export BINDGEN_EXTRA_CLANG_ARGS="-idirafter $(gcc -print-file-name=include)"`.
 
-## Try local inference
+## Start a conversation
 
 Run `./target/release/local-first-ai-agent` in a Linux graphical session.
-Choose a trusted local GGUF model with an embedded chat template, then select
-**Load model**. Enter a prompt and select **Generate**. Select **Stop** to cancel
-the run or **Unload model** to free the model. The default settings are 4 CPU
-threads, a 2048-token context, 256 output tokens, temperature 0.7, top-p 0.8, and
-top-k 20. The context must fit both the formatted prompt and requested output.
-The **Enable thinking** control appears when the loaded model's template
-exposes that mode. Thinking is off by default and shares the output token budget.
+Open **Model controls**, choose a local GGUF file, and select **Load model**.
+Create a conversation, enter a message, and send it. Enter sends and
+Shift+Enter inserts a line break by default. Stop interrupts a response and
+Regenerate adds another attempt for the latest user message. Earlier attempts
+remain saved. The model loads on demand after restart.
+
+The default uses 4 CPU threads, a 2048-token context, 256 output tokens,
+temperature 0.7, top-p 0.8, and top-k 20. Thinking is available for models
+whose embedded template supports it and shares the output budget. Model
+controls retain the context, sampling, load, and unload controls and chat
+responses show generation statistics.
+
+Settings shows the database location and saves appearance, model defaults,
+and composer behavior. The SQLite database uses the OS local application
+data directory and is **not encrypted at rest**. Keep local backups in a
+location appropriate for the sensitivity of the chats.
 
 The reference fixture is Qwen's Apache-2.0
 `Qwen3-0.6B-Q4_K_M.gguf` (396,704,416 bytes). Its official upload is pinned to
@@ -90,7 +99,8 @@ For a network-isolated Linux runtime check, first compile the test with
 `unshare --user --map-current-user --net`. Keep the model path in
 `AGENT_TEST_MODEL`.
 
-See [the architecture notes](docs/architecture.md) for the provider contract
-and permission boundaries, and [the v0.0.2 verification report](docs/verification-v0.0.2.md)
-for observed results and benchmark commands. The milestone covers single-prompt CPU inference.
-Linux is the verified target. License selection is deferred.
+Read [the architecture notes](docs/architecture.md) for data and permission
+boundaries. See [v0.0.3 verification](docs/verification-v0.0.3.md) for desktop
+acceptance and [v0.0.2 verification](docs/verification-v0.0.2.md) for CPU
+inference benchmark results. The [roadmap](docs/roadmap.md) records milestone
+scope. Linux is the verified target. Project license selection is deferred.

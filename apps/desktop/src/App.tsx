@@ -1,142 +1,339 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState } from "react";
 import {
-  appendDelta, errorMessage,
-  type GenerationStats, type ModelConfig, type ModelInfo, type Output, type Phase, type Status, type TextDelta,
-} from "./inference";
+  useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type FormEvent, type KeyboardEvent,
+} from "react";
+import {
+  applyChatEvent, earlierReplies, splitReasoning,
+  type Bootstrap, type ChatEvent, type Conversation, type ConversationSummary, type Message,
+} from "./chat";
+import { Dialog, ModelDialog, SettingsDialog } from "./Dialogs";
+import { errorMessage } from "./inference";
+import MarkdownMessage, { CopyButton } from "./MarkdownMessage";
 
-const field = "w-full rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-slate-100";
-const button = "rounded-md border border-slate-600 px-4 py-2 font-medium enabled:hover:bg-slate-700 disabled:opacity-45";
-const primary = "rounded-md bg-teal-300 px-4 py-2 font-semibold text-slate-950 enabled:hover:bg-teal-200 disabled:opacity-45";
-const panel = "rounded-xl border border-slate-700 bg-slate-900 p-5";
+type Modal = "model" | "settings" | "rename" | "delete" | "instructions";
+type Operation = "opening" | "creating" | "saving" | "generating";
 
-const phaseLabel: Record<Phase, string> = {
-  empty: "No model loaded",
-  loading: "Loading model…",
-  ready: "Model ready",
-  generating: "Generating…",
-  unloading: "Unloading model…",
-};
-
-const finishLabel: Record<GenerationStats["reason"], string> = {
-  end_of_generation: "Complete",
-  token_limit: "Token limit reached",
+const messageStatus: Record<Message["state"], string> = {
+  streaming: "Generating…",
+  complete: "",
   cancelled: "Stopped",
+  interrupted: "Interrupted",
+  failed: "Generation failed",
+  truncated: "Token limit reached",
 };
 
-function NumberField({ label, value, onChange, min, max, step = 1 }: {
-  label: string;
-  value: number;
-  onChange: (value: number) => void;
-  min: number;
-  max: number;
-  step?: number;
-}) {
+function ChatMessage({ message, earlier }: { message: Message; earlier: boolean }) {
+  const { answer, reasoning, reasoningComplete } = message.role === "assistant"
+    ? splitReasoning(message.content, message.state === "streaming")
+    : { answer: message.content, reasoning: null, reasoningComplete: false };
+  const stats = message.stats;
+  const name = message.role === "user" ? "You" : message.role === "system" ? "System" : "Assistant";
+
   return (
-    <label className="grid gap-1 text-sm text-slate-300">
-      {label}
-      <input className={field} type="number" value={Number.isNaN(value) ? "" : value}
-        min={min} max={max} step={step} onChange={(event) => onChange(event.currentTarget.valueAsNumber)} />
-    </label>
+    <article className={`message message-${message.role}${earlier ? " earlier-message" : ""}`} aria-label={name}>
+      <header className="message-heading">
+        <div>
+          <strong>{name}</strong>
+          {earlier && <span className="message-label" role="note">Earlier reply</span>}
+          {messageStatus[message.state] && <span className="message-label" role="status">{messageStatus[message.state]}</span>}
+        </div>
+        {message.content && <CopyButton label="Copy message" text={message.content} />}
+      </header>
+      {reasoning !== null && (
+        <details className="reasoning">
+          <summary>
+            {reasoningComplete ? "Reasoning" : message.state === "streaming" ? "Thinking…" : "Incomplete reasoning"}
+          </summary>
+          <div className="reasoning-body">
+            {reasoning ? <MarkdownMessage text={reasoning} /> : <p className="hint">Waiting for reasoning text.</p>}
+          </div>
+        </details>
+      )}
+      {answer && (message.role === "assistant"
+        ? <MarkdownMessage text={answer} />
+        : <p className="user-content">{answer}</p>)}
+      {!answer && reasoning === null && message.role === "assistant" && message.state === "streaming" && (
+        <p className="hint">Waiting for the first token…</p>
+      )}
+      {stats && (
+        <div className="generation-stats">
+          <span>{stats.generatedTokens} tokens</span>
+          <span>{stats.tokensPerSecond.toFixed(1)} tokens/s</span>
+          {stats.timeToFirstTokenMs !== null && <span>First token {stats.timeToFirstTokenMs} ms</span>}
+          {stats.promptTokensPerSecond !== null && <span>Prompt {stats.promptTokensPerSecond.toFixed(1)} tokens/s</span>}
+          {stats.excludedTurns > 0 && <span role="status">{stats.excludedTurns} earlier {stats.excludedTurns === 1 ? "turn" : "turns"} omitted from context</span>}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function EditConversationDialog({
+  modal, conversation, onSubmit, onClose, busy, error,
+}: {
+  modal: "rename" | "delete" | "instructions";
+  conversation: Conversation;
+  onSubmit: (value: string) => void;
+  onClose: () => void;
+  busy: boolean;
+  error: string | null;
+}) {
+  const [value, setValue] = useState(modal === "rename" ? conversation.title : conversation.systemPrompt);
+  const title = modal === "rename" ? "Rename conversation" : modal === "delete" ? "Delete conversation" : "Conversation instructions";
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!busy && (modal !== "rename" || value.trim())) onSubmit(value);
+  }
+
+  return (
+    <Dialog title={title} onClose={onClose} busy={busy}>
+      <form className="dialog-form" onSubmit={submit}>
+        {modal === "rename" && (
+          <label className="field">
+            <span>Conversation title</span>
+            <input value={value} maxLength={100} required disabled={busy}
+              onChange={(event) => setValue(event.currentTarget.value)} />
+          </label>
+        )}
+        {modal === "instructions" && (
+          <label className="field">
+            <span>System instructions</span>
+            <textarea rows={5} maxLength={8192} value={value} disabled={busy}
+              onChange={(event) => setValue(event.currentTarget.value)} />
+            <span className="hint">Applies to future replies in this conversation.</span>
+          </label>
+        )}
+        {modal === "delete" && (
+          <p>Delete <strong>{conversation.title}</strong> and its saved messages?</p>
+        )}
+        {error && <p className="error" role="alert">{error}</p>}
+        <div className="dialog-actions">
+          <button className={modal === "delete" ? "danger" : "primary"}
+            type="submit" disabled={busy || (modal === "rename" && !value.trim())}>
+            {modal === "rename" ? "Save title" : modal === "delete" ? "Confirm deletion" : "Save instructions"}
+          </button>
+        </div>
+      </form>
+    </Dialog>
   );
 }
 
 export default function App() {
-  const [phase, setPhase] = useState<Phase | "initializing" | "choosing">("initializing");
-  const [selected, setSelected] = useState<string | null>(null);
-  const [model, setModel] = useState<ModelInfo | null>(null);
-  const [threads, setThreads] = useState(4);
-  const [contextLength, setContextLength] = useState(2048);
-  const [maxTokens, setMaxTokens] = useState(256);
-  const [temperature, setTemperature] = useState(0.7);
-  const [topP, setTopP] = useState(0.8);
-  const [topK, setTopK] = useState(20);
-  const [enableThinking, setEnableThinking] = useState(false);
-  const [prompt, setPrompt] = useState("");
-  const [output, setOutput] = useState<Output>({ id: 0, text: "" });
-  const [stats, setStats] = useState<GenerationStats | null>(null);
+  const [snapshot, setSnapshot] = useState<Bootstrap | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [query, setQuery] = useState("");
+  const [refresh, setRefresh] = useState(0);
+  const [draft, setDraft] = useState("");
+  const [modal, setModal] = useState<Modal | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [operation, setOperation] = useState<Operation | null>(null);
+  const operationRef = useRef<Operation | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
   const [stopping, setStopping] = useState(false);
-  const nextId = useRef(0);
+  const request = useRef(0);
+  const scroll = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  const [showJump, setShowJump] = useState(false);
+  const composer = useRef<HTMLTextAreaElement>(null);
+  const focusComposer = useRef(false);
+  const selectedId = conversation?.id;
+  const initialized = snapshot !== null;
+  const appearance = snapshot?.preferences.appearance ?? "system";
 
   useEffect(() => {
     let active = true;
-    void invoke<Status>("inference_status").then((status) => {
-      if (!active) return;
-      setPhase(status.phase);
-      setModel(status.model);
-      if (status.model) {
-        setSelected(status.model.fileName);
-        setThreads(status.model.config.threads);
-        setContextLength(status.model.config.contextLength);
+    const start = async () => {
+      try {
+        const [initial, list] = await Promise.all([
+          invoke<Bootstrap>("bootstrap"),
+          invoke<ConversationSummary[]>("list_conversations", { query: "" }),
+        ]);
+        const latest = list[0]
+          ? await invoke<Conversation>("get_conversation", { id: list[0].id })
+          : null;
+        if (!active) return;
+        setSnapshot(initial);
+        setSelectedModelId(initial.activeModelId ?? initial.models[0]?.id ?? null);
+        setSummaries(list);
+        setConversation(latest);
+      } catch (failure) {
+        if (active) setError(errorMessage(failure));
       }
-    }).catch((failure: unknown) => {
-      if (!active) return;
-      setError(errorMessage(failure));
-      setPhase("empty");
-    });
+    };
+    void start();
     return () => { active = false; };
   }, []);
 
-  async function choose() {
+  useEffect(() => {
+    if (!initialized) return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void invoke<ConversationSummary[]>("list_conversations", { query: query.trim() })
+        .then((list) => {
+          if (!active) return;
+          setSummaries(list);
+          setSearchError(null);
+        })
+        .catch((failure: unknown) => {
+          if (active) setSearchError(errorMessage(failure));
+        });
+    }, query ? 160 : 0);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [initialized, query, refresh]);
+
+  useEffect(() => {
+    document.documentElement.dataset.appearance = appearance;
+  }, [appearance]);
+
+  useEffect(() => {
+    if (operation === null && focusComposer.current) {
+      focusComposer.current = false;
+      composer.current?.focus();
+    }
+  }, [operation]);
+
+  useLayoutEffect(() => {
+    follow.current = true;
+    setShowJump(false);
+  }, [selectedId]);
+
+  useLayoutEffect(() => {
+    const node = scroll.current;
+    if (node && follow.current) node.scrollTop = node.scrollHeight;
+  }, [conversation?.messages, selectedId]);
+
+  function onScroll() {
+    const node = scroll.current;
+    if (!node) return;
+    follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 64;
+    setShowJump(!follow.current);
+  }
+
+  function jumpToLatest() {
+    follow.current = true;
+    setShowJump(false);
+    if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+  }
+
+  function begin(next: Operation) {
+    if (operationRef.current !== null) return false;
+    operationRef.current = next;
+    setOperation(next);
     setError(null);
-    setPhase("choosing");
+    return true;
+  }
+
+  function finish() {
+    operationRef.current = null;
+    setOperation(null);
+  }
+
+  function select(next: Conversation | null) {
+    focusComposer.current = next !== null;
+    setConversation(next);
+    setDraft("");
+    setSidebarOpen(false);
+  }
+
+  async function openConversation(id: number) {
+    if (id === conversation?.id) {
+      setSidebarOpen(false);
+      return;
+    }
+    if (!begin("opening")) return;
     try {
-      const name = await invoke<string | null>("choose_model");
-      if (name) setSelected(name);
+      select(await invoke<Conversation>("get_conversation", { id }));
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
-      setPhase("empty");
+      finish();
     }
   }
 
-  async function load() {
-    setError(null);
-    setPhase("loading");
+  async function newConversation() {
+    if (!snapshot || !begin("creating")) return;
     try {
-      const config: ModelConfig = { contextLength, threads };
-      setModel(await invoke<ModelInfo>("load_model", { config }));
-      setEnableThinking(false);
-      setOutput({ id: nextId.current, text: "" });
-      setStats(null);
-      setPhase("ready");
+      select(await invoke<Conversation>("create_conversation"));
+      setQuery("");
+      setRefresh((tick) => tick + 1);
     } catch (failure) {
       setError(errorMessage(failure));
-      setPhase("empty");
+    } finally {
+      finish();
     }
   }
 
-  async function unload() {
-    setError(null);
-    setPhase("unloading");
+  async function editConversation(value: string) {
+    if (!conversation || !begin("saving")) return;
+    const id = conversation.id;
+
     try {
-      await invoke("unload_model");
-      setModel(null);
-      setPhase("empty");
+      if (modal === "delete") {
+        await invoke("delete_conversation", { id });
+        select(null);
+      } else {
+        if (modal === "rename") await invoke("rename_conversation", { id, title: value.trim() });
+        if (modal === "instructions") await invoke("set_system_prompt", { id, systemPrompt: value });
+        setConversation(await invoke<Conversation>("get_conversation", { id }));
+      }
+      setModal(null);
+      setRefresh((tick) => tick + 1);
     } catch (failure) {
       setError(errorMessage(failure));
-      setPhase("ready");
+    } finally {
+      finish();
     }
   }
 
-  async function generate() {
-    setError(null);
-    setStats(null);
-    setPhase("generating");
-    const id = ++nextId.current;
-    setOutput({ id, text: "" });
-    const tokens = new Channel<TextDelta>((delta) => {
-      setOutput((previous) => appendDelta(previous, id, delta));
+  async function generate(kind: "send" | "regenerate") {
+    if (!snapshot || snapshot.inference.phase !== "ready" || !conversation) return;
+    const content = draft;
+    if (kind === "send" && !content.trim()) return;
+    if (!begin("generating")) return;
+    const id = conversation.id;
+    const generation = ++request.current;
+    const events = new Channel<ChatEvent>((event) => {
+      if (request.current !== generation) return;
+      if (event.kind === "started" && event.user && kind === "send") setDraft("");
+      setConversation((current) => current?.id === id
+        ? { ...current, messages: applyChatEvent(current.messages, event) }
+        : current);
     });
+    let failureMessage: string | null = null;
+    let sent = false;
     try {
-      const request = { prompt, maxTokens, temperature, topP, topK, enableThinking };
-      setStats(await invoke<GenerationStats>("generate", { request, tokens }));
+      await invoke<Message>(kind === "send" ? "send_message" : "regenerate", kind === "send"
+        ? { id, content, events }
+        : { id, events });
+      sent = kind === "send";
     } catch (failure) {
-      setError(errorMessage(failure));
+      failureMessage = errorMessage(failure);
     } finally {
+      request.current++;
+      // A rejected request may still have saved the user message and partial reply.
+      try {
+        const saved = await invoke<Conversation>("get_conversation", { id });
+        setConversation(saved);
+        if (kind === "send" && (sent || saved.messages.some((message) =>
+          message.role === "user" && message.content === content
+          && !conversation.messages.some((previous) => previous.id === message.id),
+        ))) setDraft("");
+      } catch (failure) {
+        if (!failureMessage) failureMessage = errorMessage(failure);
+      }
+      if (failureMessage) setError(failureMessage);
+      setRefresh((tick) => tick + 1);
       setStopping(false);
-      setPhase("ready");
+      focusComposer.current = true;
+      finish();
     }
   }
 
@@ -150,84 +347,149 @@ export default function App() {
     }
   }
 
-  const validModelConfig = Number.isInteger(threads) && threads >= 1 && threads <= 32
-    && Number.isInteger(contextLength) && contextLength >= 128 && contextLength <= 32768;
-  const validGeneration = Number.isInteger(maxTokens) && maxTokens >= 1 && maxTokens <= 4096
-    && temperature >= 0 && temperature <= 2 && topP > 0 && topP <= 1
-    && Number.isInteger(topK) && topK >= 1 && topK <= 200;
+  function onComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (!snapshot?.preferences.enterToSend || event.nativeEvent.isComposing
+      || event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+    event.preventDefault();
+    void generate("send");
+  }
+
+  function openModal(next: Modal) {
+    setError(null);
+    setModal(next);
+  }
+
+  const busy = operation !== null;
+  const generating = operation === "generating";
+  const canStop = generating && conversation?.messages.at(-1)?.state === "streaming" && !stopping;
+  const modelReady = snapshot?.inference.phase === "ready";
+  const sendEnabled = !!conversation && !!modelReady && !busy && !!draft.trim();
+  const canRegenerate = !!conversation?.messages.some((message) => message.role === "user")
+    && !!modelReady && !busy;
+  const earlier = useMemo(() => earlierReplies(conversation?.messages ?? []), [conversation?.messages]);
+  const editing = modal === "rename" || modal === "delete" || modal === "instructions";
 
   return (
-    <main className="min-h-screen bg-slate-950 px-4 py-6 text-slate-100 sm:px-7">
-      <div className="mx-auto grid max-w-3xl gap-4">
-        <h1 className="text-2xl font-semibold">Local inference</h1>
-
-        <section aria-labelledby="model-heading" className={panel}>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h2 id="model-heading" className="font-semibold">GGUF model</h2>
-              <p className="mt-1 break-all text-sm text-slate-300">{selected ?? "Choose a local GGUF file"}</p>
-            </div>
-            <p role="status" className="text-sm text-teal-200">
-              {phase === "initializing" ? "Starting…" : phase === "choosing" ? "Choosing model…" : phaseLabel[phase]}
-            </p>
-          </div>
-          <fieldset disabled={phase !== "empty"} className="mt-4 grid grid-cols-2 gap-3">
-            <NumberField label="Context length" value={contextLength} onChange={setContextLength} min={128} max={32768} />
-            <NumberField label="CPU threads" value={threads} onChange={setThreads} min={1} max={32} />
-          </fieldset>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button className={button} type="button" disabled={phase !== "empty"} onClick={choose}>Choose model</button>
-            <button className={button} type="button" disabled={phase !== "empty" || !selected || !validModelConfig} onClick={load}>Load model</button>
-            <button className={button} type="button" disabled={phase !== "ready"} onClick={unload}>Unload model</button>
-          </div>
-          {model && (
-            <p className="mt-3 break-words text-sm text-slate-300">
-              {model.name} · {model.architecture} · {(model.fileBytes / 1024 ** 2).toFixed(1)} MiB · loaded in {model.loadMs} ms
-            </p>
+    <div className="workspace">
+      {sidebarOpen && <button type="button" className="mobile-dismiss" aria-label="Close conversations"
+        onClick={() => setSidebarOpen(false)} />}
+      <aside className={`sidebar${sidebarOpen ? " sidebar-open" : ""}`} aria-label="Conversations">
+        <header className="sidebar-heading">
+          <h1>Conversations</h1>
+          <button className="quiet mobile-only" type="button" aria-label="Hide conversations"
+            onClick={() => setSidebarOpen(false)}>Close</button>
+        </header>
+        <button className="primary new-conversation" type="button" onClick={() => void newConversation()}
+          disabled={!snapshot || busy}>New conversation</button>
+        <label className="field search-field">
+          <span className="sr-only">Search conversations</span>
+          <input type="search" placeholder="Search conversations" maxLength={200} value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)} />
+        </label>
+        <nav className="conversation-list" aria-label="Saved conversations">
+          {searchError && <p role="alert" className="error">{searchError}</p>}
+          {!summaries.length && !searchError && (
+            <p className="hint">{query.trim() ? "No matching conversations." : "No conversations yet."}</p>
           )}
-        </section>
+          {summaries.map(({ id, title }) => (
+            <button type="button" key={id} className="conversation-link"
+              aria-current={id === conversation?.id ? "page" : undefined} disabled={busy}
+              onClick={() => void openConversation(id)} title={title}>{title}</button>
+          ))}
+        </nav>
+        <footer className="sidebar-footer">
+          <button type="button" className="quiet" disabled={!snapshot || busy}
+            onClick={() => openModal("settings")}>Settings</button>
+        </footer>
+      </aside>
 
-        <section aria-labelledby="prompt-heading" className={panel}>
-          <h2 id="prompt-heading" className="font-semibold">Prompt</h2>
-          <textarea aria-label="Prompt" className={`${field} mt-3 min-h-24 resize-y`} value={prompt}
-            maxLength={65536} disabled={phase === "generating"} onChange={(event) => setPrompt(event.currentTarget.value)} />
-          <fieldset disabled={phase === "generating"} className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min={1} max={4096} />
-            <NumberField label="Temperature" value={temperature} onChange={setTemperature} min={0} max={2} step={0.05} />
-            <NumberField label="Top-p" value={topP} onChange={setTopP} min={0.01} max={1} step={0.01} />
-            <NumberField label="Top-k" value={topK} onChange={setTopK} min={1} max={200} />
-          </fieldset>
-          {model?.supportsThinking && (
-            <label className="mt-3 flex items-center gap-2 text-sm text-slate-300">
-              <input type="checkbox" checked={enableThinking} disabled={phase !== "ready"}
-                onChange={(event) => setEnableThinking(event.currentTarget.checked)} />
-              Enable thinking
-            </label>
-          )}
-          <div className="mt-4 flex gap-2">
-            <button className={primary} type="button" disabled={phase !== "ready" || !prompt.trim() || !validGeneration} onClick={generate}>Generate</button>
-            <button className={button} type="button" disabled={phase !== "generating" || stopping} onClick={stop}>
-              {stopping ? "Stopping…" : "Stop"}
+      <main className="chat" aria-label="Chat">
+        <header className="chat-header">
+          <div className="chat-title">
+            <button type="button" className="quiet mobile-only" aria-label="Show conversations"
+              aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}>Conversations</button>
+            <h2>{conversation?.title ?? "Chat"}</h2>
+            <span className="local-indicator"><span aria-hidden="true" />Local inference</span>
+          </div>
+          <div className="header-actions">
+            <button type="button" disabled={!snapshot || busy} onClick={() => openModal("model")}>
+              Model controls
             </button>
+            {conversation && (
+              <>
+                <button type="button" className="quiet" disabled={busy}
+                  onClick={() => openModal("instructions")}>Conversation instructions</button>
+                <button type="button" className="quiet" disabled={busy}
+                  onClick={() => openModal("rename")}>Rename conversation</button>
+                <button type="button" className="quiet" disabled={busy}
+                  onClick={() => openModal("delete")}>Delete conversation</button>
+              </>
+            )}
           </div>
-          {error && <p role="alert" className="mt-3 text-sm text-red-300">{error}</p>}
-        </section>
+        </header>
 
-        <section aria-labelledby="response-heading" className={panel}>
-          <h2 id="response-heading" className="font-semibold">Response</h2>
-          <div tabIndex={0} aria-label="Generated text"
-            className="mt-3 max-h-96 min-h-20 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3">
-            {output.text}
+        <div className="model-line" role="status">
+          {generating ? "Generating…" : snapshot?.inference.model
+            ? `Model ready · ${snapshot.inference.model.name}`
+            : !snapshot && !error ? "Starting…" : "No model loaded"}
+        </div>
+
+        <div className="thread-scroll" ref={scroll} onScroll={onScroll} tabIndex={0} aria-label="Conversation messages">
+          <div className="thread">
+            {operation === "opening" ? <p className="empty-state" role="status">Opening conversation…</p>
+              : !snapshot && !error ? <p className="empty-state" role="status">Loading local conversations…</p>
+                : !conversation ? (
+                  <section className="empty-state">
+                    <h3>Start a conversation</h3>
+                    <p>Choose a conversation in the sidebar or create a new one.</p>
+                  </section>
+                ) : !conversation.messages.length ? (
+                  <section className="empty-state">
+                    <h3>Ready to chat</h3>
+                    <p>{modelReady ? "Send a message to begin." : "Load a local GGUF model, then send a message."}</p>
+                  </section>
+                ) : conversation.messages.map((message) => (
+                  <ChatMessage key={message.id} message={message} earlier={earlier.has(message.id)} />
+                ))}
           </div>
-          {stats && (
-            <p role="status" className="mt-3 text-sm text-slate-300">
-              {finishLabel[stats.reason]} · {stats.generatedTokens} tokens · {stats.tokensPerSecond.toFixed(1)} tokens/s
-              {stats.timeToFirstTokenMs !== null && ` · first token in ${stats.timeToFirstTokenMs} ms`}
-              {stats.promptTokensPerSecond !== null && ` · prompt ${stats.promptTokensPerSecond.toFixed(1)} tokens/s`}
-            </p>
-          )}
-        </section>
-      </div>
-    </main>
+        </div>
+
+        <div className="composer-wrap">
+          {showJump && <button type="button" className="jump quiet" onClick={jumpToLatest}>Jump to latest message</button>}
+          {error && !editing && <p className="error" role="alert">{error}</p>}
+          <form className="composer" onSubmit={(event) => { event.preventDefault(); void generate("send"); }}>
+            <label className="sr-only" htmlFor="composer">Message</label>
+            <textarea id="composer" ref={composer} rows={3} maxLength={65536} value={draft}
+              disabled={!conversation || busy}
+              placeholder={!conversation ? "Start a conversation to write a message" : "Write a message"}
+              onChange={(event) => setDraft(event.currentTarget.value)} onKeyDown={onComposerKey} />
+            <div className="composer-actions">
+              <p className="hint">{snapshot?.preferences.enterToSend ? "Enter to send · Shift+Enter for a new line" : "Enter adds a new line"}</p>
+              <div>
+                <button type="button" className="quiet" disabled={!canRegenerate}
+                  onClick={() => void generate("regenerate")}>Regenerate</button>
+                {generating ? (
+                  <button type="button" className="primary" disabled={!canStop}
+                    onClick={() => void stop()}>{stopping ? "Stopping…" : "Stop"}</button>
+                ) : <button type="submit" className="primary" disabled={!sendEnabled}>Send</button>}
+              </div>
+            </div>
+          </form>
+        </div>
+      </main>
+
+      {snapshot && modal === "settings" && (
+        <SettingsDialog snapshot={snapshot} onSave={(preferences) => setSnapshot({ ...snapshot, preferences })}
+          onClose={() => setModal(null)} />
+      )}
+      {snapshot && modal === "model" && (
+        <ModelDialog snapshot={snapshot} selectedModelId={selectedModelId} onSelect={setSelectedModelId}
+          onModelChange={setSnapshot} onClose={() => setModal(null)} />
+      )}
+      {conversation && editing && (
+        <EditConversationDialog modal={modal} conversation={conversation} error={error} busy={busy}
+          onSubmit={(value) => void editConversation(value)} onClose={() => { setError(null); setModal(null); }} />
+      )}
+    </div>
   );
 }

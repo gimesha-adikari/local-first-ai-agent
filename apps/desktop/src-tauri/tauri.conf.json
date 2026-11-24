@@ -13,14 +13,16 @@
       {
         "label": "main",
         "title": "local-first-ai-agent",
-        "width": 900,
-        "height": 760,
+        "width": 1120,
+        "height": 780,
         "minWidth": 320,
         "minHeight": 360
       }
     ],
     "security": {
-      "capabilities": ["main"],
+      "capabilities": [
+        "main"
+      ],
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'",
       "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:1420; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'"
     }

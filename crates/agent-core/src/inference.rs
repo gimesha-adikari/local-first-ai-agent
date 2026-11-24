@@ -27,6 +27,8 @@ pub enum ErrorCode {
     StreamClosed,
     WorkerStopped,
     PickerFailed,
+    Storage,
+    NotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,6 +101,8 @@ pub struct GenerationRequest {
     pub seed: Option<u32>,
     #[serde(default)]
     pub enable_thinking: bool,
+    #[serde(skip)]
+    pub history: crate::chat::ChatHistory,
 }
 
 impl GenerationRequest {
@@ -111,6 +115,7 @@ impl GenerationRequest {
             top_k: 20,
             seed: None,
             enable_thinking: false,
+            history: crate::chat::ChatHistory::default(),
         }
     }
 
@@ -152,7 +157,7 @@ pub struct ModelInfo {
     pub load_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     EndOfGeneration,
@@ -160,7 +165,7 @@ pub enum FinishReason {
     Cancelled,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationStats {
     pub reason: FinishReason,
@@ -170,6 +175,7 @@ pub struct GenerationStats {
     pub time_to_first_token_ms: Option<u64>,
     pub elapsed_ms: u64,
     pub tokens_per_second: f64,
+    pub excluded_turns: usize,
 }
 
 #[derive(Debug, Serialize)]

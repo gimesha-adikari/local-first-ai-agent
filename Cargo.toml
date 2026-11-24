@@ -1,9 +1,9 @@
 [workspace]
-members = ["apps/desktop/src-tauri", "crates/agent-core", "crates/inference"]
+members = ["apps/desktop/src-tauri", "crates/agent-core", "crates/inference", "crates/storage"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.100"
 

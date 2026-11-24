@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use agent_core::chat::{ChatHistory, CompletedTurn};
 use agent_core::inference::{
     ErrorCode, FinishReason, GenerationRequest, GenerationStats, InferenceError, ModelConfig,
 };
@@ -26,13 +27,63 @@ fn rejects_a_header_only_gguf_without_losing_worker() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidModel);
     assert_eq!(worker.status().unwrap().phase, Phase::Empty);
-    std::fs::remove_file(file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let missing = block_on(worker.load(file, ModelConfig::default()).unwrap())
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(missing.code, ErrorCode::InvalidPath);
+    assert_eq!(worker.status().unwrap().phase, Phase::Empty);
 }
 
 fn local_model() -> PathBuf {
     PathBuf::from(
         std::env::var_os("AGENT_TEST_MODEL").expect("set AGENT_TEST_MODEL to the local GGUF"),
     )
+}
+
+#[test]
+#[ignore = "requires the pinned local GGUF via AGENT_TEST_MODEL"]
+fn qwen_remembers_the_retained_turn_after_trimming() {
+    let worker = InferenceWorker::spawn(LlamaProvider::default).unwrap();
+    let config = ModelConfig {
+        context_length: 384,
+        ..ModelConfig::default()
+    };
+    block_on(worker.load(local_model(), config).unwrap())
+        .unwrap()
+        .unwrap();
+
+    let mut too_long = seeded("Please answer this message. ".repeat(160));
+    too_long.max_tokens = 64;
+    let rejected = block_on(worker.generate(too_long, |_| Ok(())).unwrap())
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(rejected.code, ErrorCode::ContextLimit);
+    assert_eq!(worker.status().unwrap().phase, Phase::Ready);
+
+    let mut request = seeded("What is my dog's name? Reply with the name only.");
+    request.max_tokens = 64;
+    request.history = ChatHistory {
+        system: "Answer with information from this conversation.".into(),
+        turns: vec![
+            CompletedTurn {
+                user: "A long unrelated passage. ".repeat(160),
+                assistant: "Understood.".into(),
+            },
+            CompletedTurn {
+                user: "My dog's name is Pico.".into(),
+                assistant: "I will remember that your dog's name is Pico.".into(),
+            },
+        ],
+    };
+    let (stats, chunks) = generate(&worker, request);
+    let answer = chunks.concat();
+    assert_eq!(stats.excluded_turns, 1);
+    assert!(answer.contains("Pico"), "{answer:?}");
+    println!(
+        "excluded_turns={}, prompt_tokens={}, response={answer:?}",
+        stats.excluded_turns, stats.prompt_tokens
+    );
 }
 
 fn seeded(prompt: impl Into<String>) -> GenerationRequest {

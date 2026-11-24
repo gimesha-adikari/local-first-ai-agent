@@ -37,7 +37,7 @@ jobs:
         working-directory: apps/desktop
         run: npm ci --engine-strict
 
-      - name: Test frontend streaming
+      - name: Test frontend streaming and Markdown handling
         working-directory: apps/desktop
         run: npm test
 
@@ -47,7 +47,7 @@ jobs:
       - name: Lint the Rust workspace
         run: cargo clippy --release --workspace --all-targets --locked -- -D warnings
 
-      - name: Test the Rust workspace
+      - name: Test the Rust workspace and SQLite storage
         run: cargo test --release --workspace --locked
 
       - name: Type-check and build the desktop application

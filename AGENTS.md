@@ -1,8 +1,9 @@
 # Development rules
 
 - Keep the app a modular monolith. Put platform-independent logic in
-  `crates/agent-core` and native inference in `crates/inference`. Keep Tauri IPC and window setup in
-  `apps/desktop/src-tauri`, and UI state and presentation in `apps/desktop/src`.
+  `crates/agent-core`, native inference in `crates/inference`, and SQLite in
+  `crates/storage`. Keep Tauri IPC in `apps/desktop/src-tauri`, and UI state
+  and presentation in `apps/desktop/src`.
 - Keep the core independent of Tauri, React, and operating-system UI APIs. Test
   shareable logic at its public Rust boundary with `cargo test -p agent-core --locked`.
 - Give Tauri commands explicit names and narrow input and output types. Validate
@@ -26,6 +27,11 @@
   run real-model tests only with an explicitly supplied local file.
 - Limit native build parallelism on constrained hardware. Reuse the release
   profile for checks when it avoids recompiling native dependencies.
-- Keep v0.0.2 scoped to CPU inference. Defer full chat, persistence, embeddings,
-  tools, Android, device networking, and GPU offloading.
+- Persist each user turn and its pending assistant response in one transaction.
+  Checkpoint streams in batches, keep interrupted responses explicit, and
+  test schema and lifecycle changes against a temporary database.
+- Keep saved history intact when trimming inference context. Model templates
+  and the tokenizer determine the actual context cost.
+- Keep v0.0.3 scoped to offline CPU chat. Defer embeddings, tools, Android,
+  device networking, and GPU offloading.
 - Get approval before pushing to GitHub or choosing a project license or brand.

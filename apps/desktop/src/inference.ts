@@ -23,6 +23,7 @@ export type GenerationStats = {
   timeToFirstTokenMs: number | null;
   elapsedMs: number;
   tokensPerSecond: number;
+  excludedTurns: number;
 };
 
 export type TextDelta = { text: string };

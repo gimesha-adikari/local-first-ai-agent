@@ -1,13 +1,25 @@
 {
   "identifier": "main",
-  "description": "Use the native model picker and local inference worker.",
-  "windows": ["main"],
+  "description": "Access saved conversations and the local inference worker.",
+  "windows": [
+    "main"
+  ],
   "permissions": [
+    "allow-bootstrap",
+    "allow-list-conversations",
+    "allow-get-conversation",
+    "allow-create-conversation",
+    "allow-rename-conversation",
+    "allow-set-system-prompt",
+    "allow-delete-conversation",
+    "allow-send-message",
+    "allow-regenerate",
+    "allow-stop-generation",
     "allow-choose-model",
-    "allow-inference-status",
     "allow-load-model",
+    "allow-save-model-settings",
     "allow-unload-model",
-    "allow-generate",
-    "allow-stop-generation"
+    "allow-save-preferences",
+    "allow-inference-status"
   ]
 }

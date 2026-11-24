@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use agent_core::chat::{MessageRole, PromptMessage, fit_context};
 use agent_core::inference::{
     Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats, InferenceError,
     InferenceProvider, ModelConfig, ModelInfo, Result, TextDelta,
@@ -140,6 +141,20 @@ fn unsupported_template() -> InferenceError {
 
 impl LoadedModel {
     fn render_prompt(&self, prompt: &str, enable_thinking: bool) -> Result<String> {
+        self.render_messages(
+            &[PromptMessage {
+                role: MessageRole::User,
+                content: prompt,
+            }],
+            enable_thinking,
+        )
+    }
+
+    fn render_messages(
+        &self,
+        messages: &[PromptMessage<'_>],
+        enable_thinking: bool,
+    ) -> Result<String> {
         let vocab = self.model.vocab();
         let special = |token: llama_cpp_2::token::LlamaToken| {
             if token.0 < 0 {
@@ -150,7 +165,7 @@ impl LoadedModel {
         };
         render_template(
             &self.template,
-            prompt,
+            messages,
             &special(vocab.bos()),
             &special(vocab.eos()),
             enable_thinking,
@@ -173,6 +188,7 @@ impl LoadedModel {
             time_to_first_token_ms: None,
             elapsed_ms: 0,
             tokens_per_second: 0.0,
+            excluded_turns: 0,
         };
         if cancel.is_cancelled() {
             return Ok(stats);
@@ -184,18 +200,21 @@ impl LoadedModel {
                 "The model's chat template does not expose a thinking mode.",
             ));
         }
-        let prompt = self.render_prompt(&request.prompt, request.enable_thinking)?;
         let vocab = self.model.vocab();
-        let tokens = vocab.tokenize(prompt.as_bytes(), false, true);
+        let (tokens, excluded_turns) = fit_context(
+            &request.history,
+            &request.prompt,
+            self.config.context_length,
+            request.max_tokens,
+            |messages| {
+                let prompt = self.render_messages(messages, request.enable_thinking)?;
+                let tokens = vocab.tokenize(prompt.as_bytes(), false, true);
+                let count = tokens.len();
+                Ok((tokens, count))
+            },
+        )?;
         stats.prompt_tokens = tokens.len();
-        if tokens.is_empty()
-            || tokens.len() + request.max_tokens as usize > self.config.context_length as usize
-        {
-            return Err(InferenceError::new(
-                ErrorCode::ContextLimit,
-                "The formatted prompt and requested output exceed the configured context length.",
-            ));
-        }
+        stats.excluded_turns = excluded_turns;
 
         let threads = self.config.threads as i32;
         let params = LlamaContextParams::default()
@@ -278,7 +297,7 @@ impl LoadedModel {
 
 fn render_template(
     template: &str,
-    prompt: &str,
+    messages: &[PromptMessage<'_>],
     bos: &str,
     eos: &str,
     enable_thinking: bool,
@@ -299,7 +318,9 @@ fn render_template(
     env.render_str(
         template,
         context! {
-            messages => [context! { role => "user", content => prompt }],
+            messages => messages.iter().map(|message| context! {
+                role => message.role.as_str(), content => message.content
+            }).collect::<Vec<_>>(),
             add_generation_prompt => true,
             enable_thinking => enable_thinking,
             bos_token => bos,
@@ -352,16 +373,20 @@ mod tests {
     #[test]
     fn renders_the_model_template_with_generation_prompt() {
         let template = "{{ bos_token }}{% for message in messages %}{{ message.role }}: {{ message.content.strip() }}{{ eos_token }}{% endfor %}{% if add_generation_prompt %}assistant: {% if not enable_thinking %}direct{% endif %}{% endif %}";
+        let messages = [PromptMessage {
+            role: MessageRole::User,
+            content: " Hi ",
+        }];
         assert_eq!(
-            render_template(template, " Hi ", "<start>", "<end>", false).unwrap(),
+            render_template(template, &messages, "<start>", "<end>", false).unwrap(),
             "<start>user: Hi<end>assistant: direct",
         );
         assert_eq!(
-            render_template(template, " Hi ", "<start>", "<end>", true).unwrap(),
+            render_template(template, &messages, "<start>", "<end>", true).unwrap(),
             "<start>user: Hi<end>assistant: ",
         );
         assert_eq!(
-            render_template("{% invalid %}", "Hi", "", "", false)
+            render_template("{% invalid %}", &messages, "", "", false)
                 .unwrap_err()
                 .code,
             ErrorCode::UnsupportedTemplate,

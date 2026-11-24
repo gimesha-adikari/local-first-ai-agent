@@ -81,6 +81,7 @@ impl InferenceProvider for Mock {
             time_to_first_token_ms: Some(1),
             elapsed_ms: 2,
             tokens_per_second: 1000.0,
+            excluded_turns: 0,
         })
     }
 }
