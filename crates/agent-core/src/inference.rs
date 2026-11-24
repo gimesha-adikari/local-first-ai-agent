@@ -3,6 +3,7 @@
 use std::{
     fmt,
     path::Path,
+    time::{Duration, Instant},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -184,15 +185,38 @@ pub struct TextDelta {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation {
+    cancelled: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+}
 
 impl Cancellation {
+    /// A child shares explicit cancellation but adds a local monotonic deadline.
+    /// Expiring the child does not change the parent's cancellation flag.
+    pub fn with_timeout(&self, duration: Duration) -> Self {
+        let deadline = Instant::now().checked_add(duration).unwrap_or_else(Instant::now);
+        Self {
+            cancelled: self.cancelled.clone(),
+            deadline: Some(self.deadline.map_or(deadline, |parent| parent.min(deadline))),
+        }
+    }
+
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Explicit user or host cancellation, excluding a local deadline.
+    pub fn is_explicitly_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Whether this cancellation view deadline has elapsed.
+    pub fn is_deadline_elapsed(&self) -> bool {
+        self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.is_explicitly_cancelled() || self.is_deadline_elapsed()
     }
 }
 
@@ -201,10 +225,40 @@ impl Cancellation {
 pub trait InferenceProvider: 'static {
     fn load(&mut self, path: &Path, config: ModelConfig) -> Result<ModelInfo>;
     fn unload(&mut self);
+
+    /// Separate, buffered agent decision path. Providers may opt out.
+    fn decide(
+        &mut self,
+        _request: &crate::agent::DecisionRequest,
+        _cancellation: &Cancellation,
+    ) -> Result<crate::agent::DecisionResponse> {
+        Err(InferenceError::new(ErrorCode::UnsupportedTemplate, "This provider does not support agent decisions."))
+    }
+
     fn generate(
         &mut self,
         request: &GenerationRequest,
         cancellation: &Cancellation,
         emit: &mut dyn FnMut(TextDelta) -> Result<()>,
     ) -> Result<GenerationStats>;
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn distinguishes_explicit_cancellation_from_deadline_expiry() {
+        let timed = Cancellation::default().with_timeout(Duration::ZERO);
+        assert!(!timed.is_explicitly_cancelled());
+        assert!(timed.is_deadline_elapsed());
+        assert!(timed.is_cancelled());
+
+        let parent = Cancellation::default();
+        parent.cancel();
+        let child = parent.with_timeout(Duration::from_secs(1));
+        assert!(child.is_explicitly_cancelled());
+        assert!(!child.is_deadline_elapsed());
+        assert!(child.is_cancelled());
+    }
 }

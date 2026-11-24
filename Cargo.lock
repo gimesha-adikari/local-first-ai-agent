@@ -13,6 +13,16 @@ name = "agent-core"
 version = "0.0.3"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-tools"
+version = "0.0.3"
+dependencies = [
+ "agent-core",
+ "gio",
+ "libc",
 ]
 
 [[package]]
@@ -2029,6 +2039,7 @@ name = "local-first-ai-agent"
 version = "0.0.3"
 dependencies = [
  "agent-core",
+ "agent-tools",
  "inference",
  "rfd",
  "serde",

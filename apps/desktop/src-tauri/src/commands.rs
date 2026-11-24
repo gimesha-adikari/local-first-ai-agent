@@ -2,7 +2,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -19,12 +19,14 @@ use inference::{InferenceWorker, Pending, Phase, Status};
 use serde::Serialize;
 use storage::SqliteStore;
 use tauri::{State, ipc::Channel};
+use crate::agent::AgentSession;
 
 pub struct Desktop {
-    pub worker: InferenceWorker,
+    pub worker: Arc<InferenceWorker>,
+    pub agent: Arc<AgentSession>,
     pub database: Arc<Mutex<SqliteStore>>,
     pub database_path: PathBuf,
-    pub operations: tauri::async_runtime::Mutex<()>,
+    pub operations: Arc<AtomicBool>,
     pub active_model: AtomicI64,
 }
 
@@ -37,16 +39,30 @@ fn database(db: &Mutex<SqliteStore>) -> Result<MutexGuard<'_, SqliteStore>> {
     })
 }
 
+pub(crate) struct OperationGuard(Arc<AtomicBool>);
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 impl Desktop {
-    fn reserve(&self) -> Result<impl Send + '_> {
-        self.operations.try_lock().map_err(|_| {
-            InferenceError::new(ErrorCode::Busy, "Wait for the current operation to finish.")
-        })
+    pub(crate) fn reserve(&self) -> Result<OperationGuard> {
+        self.operations.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| InferenceError::new(ErrorCode::Busy, "Wait for the current operation to finish."))?;
+        Ok(OperationGuard(Arc::clone(&self.operations)))
     }
 
     fn active_model(&self) -> Option<ModelId> {
         let id = self.active_model.load(Ordering::Acquire);
         (id > 0).then_some(id)
+    }
+}
+
+impl Drop for Desktop {
+    fn drop(&mut self) {
+        self.agent.shutdown(&self.worker);
     }
 }
 
@@ -360,5 +376,11 @@ pub async fn regenerate(
 
 #[tauri::command]
 pub fn stop_generation(state: State<'_, Desktop>) -> Result<bool> {
+    if state.agent.is_active() {
+        return Err(InferenceError::new(
+            ErrorCode::Busy,
+            "Cancel the active agent task from Agent mode.",
+        ));
+    }
     state.worker.cancel()
 }

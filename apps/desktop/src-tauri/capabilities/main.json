@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "Access saved conversations and the local inference worker.",
+  "description": "Access saved conversations, the local inference worker, and explicitly authorized local agent tools.",
   "windows": [
     "main"
   ],
@@ -20,6 +20,17 @@
     "allow-save-model-settings",
     "allow-unload-model",
     "allow-save-preferences",
-    "allow-inference-status"
+    "allow-inference-status",
+    "allow-start-agent-task",
+    "allow-cancel-agent-task",
+    "allow-respond-agent-approval",
+    "allow-list-agent-tasks",
+    "allow-get-agent-task",
+    "allow-choose-agent-file",
+    "allow-choose-agent-directory",
+    "allow-list-agent-scopes",
+    "allow-revoke-agent-scope",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }

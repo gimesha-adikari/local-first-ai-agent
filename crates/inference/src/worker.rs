@@ -137,6 +137,24 @@ impl InferenceWorker {
         )
     }
 
+    /// Shares the ordinary generation slot. Agent decisions are not streamed
+    /// to chat or the tool executor.
+    pub fn decide(
+        &self,
+        request: agent_core::agent::DecisionRequest,
+        cancellation: Cancellation,
+    ) -> Result<Pending<agent_core::agent::DecisionResponse>> {
+        let state = self.reserve(Phase::Generating, Phase::Ready)?;
+        let worker_cancellation = cancellation.clone();
+        self.submit(
+            state,
+            Phase::Generating,
+            Some(cancellation),
+            move |provider| provider.decide(&request, &worker_cancellation),
+            |_, _| {},
+        )
+    }
+
     pub fn cancel(&self) -> Result<bool> {
         let state = self.state()?;
         if let Some(cancellation) = &state.cancellation {

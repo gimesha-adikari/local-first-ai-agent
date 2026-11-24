@@ -13,7 +13,11 @@ use agent_core::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 1;
+mod agent;
+#[cfg(test)]
+mod agent_tests;
+
+const SCHEMA_VERSION: i64 = 2;
 const NEW_TITLE: &str = "New conversation";
 
 /// Local storage for one app instance. Exclusive locking protects crash recovery
@@ -39,26 +43,23 @@ impl SqliteStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Exclusive)
             .map_err(sql_error)?;
-        match transaction
+        let version = transaction
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-            .map_err(sql_error)?
-        {
-            0 => {
-                transaction
-                    .execute_batch(include_str!("../migrations/001_chat.sql"))
-                    .map_err(sql_error)?;
-                transaction
-                    .pragma_update(None, "user_version", SCHEMA_VERSION)
-                    .map_err(sql_error)?;
-            }
-            SCHEMA_VERSION => {}
-            _ => {
-                return Err(InferenceError::new(
-                    ErrorCode::Storage,
-                    "This chat database uses an unsupported schema version.",
-                ));
-            }
+            .map_err(sql_error)?;
+        if !(0..=SCHEMA_VERSION).contains(&version) {
+            return Err(InferenceError::new(
+                ErrorCode::Storage,
+                "This chat database uses an unsupported schema version.",
+            ));
         }
+        if version == 0 {
+            transaction.execute_batch(include_str!("../migrations/001_chat.sql")).map_err(sql_error)?;
+        }
+        if version < 2 {
+            transaction.execute_batch(include_str!("../migrations/002_agent.sql")).map_err(sql_error)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(sql_error)?;
+        }
+        agent::recover_interrupted(&transaction, None).map_err(|_| storage_error())?;
         transaction
             .execute(
                 "UPDATE messages SET state = 'interrupted' WHERE state = 'streaming'",
@@ -172,7 +173,8 @@ impl ChatStore for SqliteStore {
         let transaction = self.connection.transaction().map_err(sql_error)?;
         let generating: bool = transaction
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM messages WHERE state = 'streaming')",
+                "SELECT EXISTS (SELECT 1 FROM messages WHERE state = 'streaming')
+                    OR EXISTS (SELECT 1 FROM agent_tasks WHERE finalized = 0)",
                 [],
                 |row| row.get(0),
             )

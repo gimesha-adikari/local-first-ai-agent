@@ -1,0 +1,13 @@
+[package]
+name = "agent-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.191"
+gio = "=0.18.4"
