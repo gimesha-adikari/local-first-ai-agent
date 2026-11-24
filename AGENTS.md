@@ -35,3 +35,16 @@
 - Keep v0.0.3 scoped to offline CPU chat. Defer embeddings, tools, Android,
   device networking, and GPU offloading.
 - Get approval before pushing to GitHub or choosing a project license or brand.
+
+## v0.1.0 implementation-only branch
+
+On the feature/agent-v0.1.0 branch, the approved temporary workflow is
+source implementation and static review through GitHub. Write appropriate
+test source, but defer local compilation, formatting/lint execution, test
+execution, model evaluation and desktop acceptance to a separate Codex
+verification phase. Do not disable existing CI; it may run automatically.
+Treat changes as implemented, not runtime verified. Only update the dedicated
+feature branch, never main, and do not merge without approval. The existing
+v0.0.3 scope restriction describes the baseline; v0.1.0 adds only the bounded,
+permission-aware agent MVP. Existing privacy and platform boundaries remain
+in force.
