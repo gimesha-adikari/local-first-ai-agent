@@ -341,6 +341,29 @@ impl PermissionEngine {
         }
     }
 
+    /// Persist under the policy lock without losing records on a failed
+    /// transaction. The callback must be atomic/idempotent by session and
+    /// sequence and must not reenter the policy engine. Omitted events are
+    /// persisted too; a gap prevents the current task from dispatching.
+    pub fn flush_audit(
+        &mut self,
+        persist: impl FnOnce(&str, &PermissionAuditBatch) -> AgentResult<()>,
+    ) -> AgentResult<()> {
+        if self.audit.is_empty() && self.omitted == 0 {
+            return Ok(());
+        }
+        let batch = self.drain_audit();
+        if persist(&self.namespace, &batch).is_err() {
+            self.audit = batch.records;
+            self.omitted = batch.omitted;
+            return Err(AgentError::new(AgentErrorCode::StorageFailed, "Permission audit persistence failed."));
+        }
+        if batch.omitted != 0 {
+            return Err(AgentError::new(AgentErrorCode::StorageFailed, "Permission audit contains omitted records."));
+        }
+        Ok(())
+    }
+
     /// Call only after explicit native picker selection and successful secure
     /// handle acquisition. Register the native handle under the returned ID
     /// before making the scope visible to any model or UI.

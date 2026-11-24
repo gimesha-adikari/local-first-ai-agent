@@ -276,6 +276,52 @@ Four ordinary regression cases are authored, not executed. No dependencies
 or model downloads were added. Actual Qwen reliability and template
 compatibility remain unverified. This is not native Qwen tool calling.
 
+## Part 08 — bounded execution runtime
+
+The provider-independent synchronous run_task loop coordinates model decisions,
+strict parsing, budgets, task transitions, policy decisions and authorized
+native dispatch through a trusted RuntimeHost interface. The host must run it
+on a dedicated task worker, reserve the desktop operation for the whole task
+and bridge the existing inference worker and NativeTools. No policy lock is
+held across inference, approval or native execution. Persistence callbacks
+must commit atomically and not reenter policy; audit flushing serializes under
+the policy lock and retains failed batches for recovery. Omission counts are
+persisted and cause the current task to fail closed.
+
+The runtime journals task start, transitions, proposed/rejected tools,
+dispatch intent, actual outcomes and terminal state. Before dispatch it
+requires durable consumed-authorization audit and dispatch-intent records;
+failed persistence stops execution. A permit is consumed once. The report
+keeps known execution outcomes even if the result journal fails. An unresolved
+dispatch intent is uncertain after interruption, never an instruction to
+replay. The future store must use session namespace plus audit sequence for
+idempotence and record terminal recovery. Raw proposals, paths, contents
+and observations are not persisted by this interface; transient UI callbacks
+may display authorized data. A model-written final answer is not evidence of
+successful native execution; display authoritative execution records separately.
+
+Tool attempts are counted before authorization. Malformed proposals consume
+the existing retry budget; model invocation failures, denied operations and
+tool failures end the task instead of retrying automatically. One launch
+attempt at most is allowed per task, even for different application IDs.
+Launch errors are conservatively uncertain; known dispatch is recorded before
+cancellation/timeout checks. No missing scope can be granted by the model:
+the user must select a resource through a separate trusted picker and start a
+new task. Initial scope hints are a snapshot; the policy checks live grants
+at every authorization and dispatch. A deadline-limited cancellation child
+lets existing inference checks stop at the task deadline without changing
+ordinary chat behavior. Host callbacks and native blocking calls must
+cooperate; no forced termination or background work is added.
+
+Nine model-free regression cases are authored, not executed: successful
+ordering, malformed proposals, tool budgets, denial, persistence failures,
+launch cancellation/uncertainty/replay, deadline cancellation and retained
+audit records. No native actions are invoked by these fixtures.
+
+SQLite persistence and desktop/model-worker bridge remain pending. A runtime
+report with journal_incomplete is not durable verification. No dependencies
+were added; compilation and real execution remain unverified.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -288,13 +334,12 @@ compatibility remain unverified. This is not native Qwen tool calling.
 | 05 | Linux filesystem tools | Implemented; unverified |
 | 06 | Linux application tools | Implemented; unverified |
 | 07 | Model decision protocol | Implemented; unverified |
-| 08 | Bounded execution runtime | Pending |
+| 08 | Bounded execution runtime | Implemented; unverified |
 | 09 | SQLite task persistence | Pending |
 | 10 | Tauri commands and events | Pending |
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-All six Linux adapters and the model decision protocol exist as source, but UI integration,
-persistent permission audit and model-driven execution remain pending. The
-core policy and native dispatcher must be wired into the trusted runtime
-before any action is available in the application.
+The six Linux adapters, model protocol and bounded runtime exist as source.
+The trusted desktop host must bridge the runtime to inference, tools and durable
+SQLite storage before any agent action is available in the application.

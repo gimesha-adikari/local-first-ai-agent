@@ -299,6 +299,14 @@ impl ToolObservation {
         self.tool
     }
 
+    /// Recheck the trusted adapter's result against this exact request.
+    pub fn matches_call(&self, call: &ValidatedCall) -> bool {
+        self.tool == call.tool() && match &self.outcome {
+            ToolOutcome::Success { result } => result.valid_for(call),
+            ToolOutcome::Failure { .. } => true,
+        }
+    }
+
     pub fn outcome(&self) -> &ToolOutcome {
         &self.outcome
     }

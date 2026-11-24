@@ -74,13 +74,13 @@ fn invalid() -> AgentError {
 
 /// Only actual adapter observations belong in the transcript. Failed model
 /// proposals are represented by a fixed correction, never echoed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DecisionStep {
     Observation { call: ValidatedCall, observation: ToolObservation },
     InvalidProposal,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DecisionRequest {
     task: String,
     tools: String,
@@ -132,7 +132,7 @@ impl DecisionRequest {
             return Err(AgentError::new(AgentErrorCode::BudgetExhausted, "The decision transcript limit is reached."));
         }
         if let DecisionStep::Observation { call, observation } = &step {
-            if call.tool() != observation.tool() {
+            if !observation.matches_call(call) {
                 return Err(AgentError::new(AgentErrorCode::InvalidArguments, "The observation does not match the tool."));
             }
         }

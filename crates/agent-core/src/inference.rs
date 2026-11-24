@@ -3,6 +3,7 @@
 use std::{
     fmt,
     path::Path,
+    time::{Duration, Instant},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -184,15 +185,29 @@ pub struct TextDelta {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation {
+    cancelled: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+}
 
 impl Cancellation {
+    /// A child shares explicit cancellation but adds a local monotonic deadline.
+    /// Expiring the child does not change the parent's cancellation flag.
+    pub fn with_timeout(&self, duration: Duration) -> Self {
+        let deadline = Instant::now().checked_add(duration).unwrap_or_else(Instant::now);
+        Self {
+            cancelled: self.cancelled.clone(),
+            deadline: Some(self.deadline.map_or(deadline, |parent| parent.min(deadline))),
+        }
+    }
+
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.cancelled.store(true, Ordering::Release);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.cancelled.load(Ordering::Acquire)
+            || self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
     }
 }
 
