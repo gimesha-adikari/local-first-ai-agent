@@ -1,8 +1,8 @@
 # Development rules
 
 - Keep the app a modular monolith. Put platform-independent logic in
-  `crates/agent-core`, native inference in `crates/inference`, and SQLite in
-  `crates/storage`. Keep Tauri IPC in `apps/desktop/src-tauri`, and UI state
+  `crates/agent-core`, native inference in `crates/inference`, SQLite in
+  `crates/storage`, and native tool adapters in `crates/tools`. Keep Tauri IPC in `apps/desktop/src-tauri`, and UI state
   and presentation in `apps/desktop/src`.
 - Keep the core independent of Tauri, React, and operating-system UI APIs. Test
   shareable logic at its public Rust boundary with `cargo test -p agent-core --locked`.

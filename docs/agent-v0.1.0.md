@@ -111,6 +111,43 @@ Five integration and two unit test cases are authored, not executed.
 The tests cover replay, argument substitution, denial, resource kind,
 revocation, cancellation, expiration, audit capacity and engine teardown.
 
+## Part 04 — calculator and device tools
+
+The new agent-tools package lives in crates/tools. Its public dispatch
+takes ownership of a non-cloneable AuthorizedCall, checks dispatch liveness,
+and uses the registered timeout plus cooperative task checks before, during
+and after native work. The supported registry exposes only the calculator
+and, on Linux, device.info. A contract without an adapter cannot execute.
+The host must persist the authorization audit before dispatch and run native
+work off the UI thread. Native syscalls are not forcibly interrupted.
+
+The calculator accepts finite f64 arithmetic: decimal/scientific literals,
+parentheses, unary signs, +, -, *, / and % (remainder). It uses a bounded
+recursive-descent parser with 256 input bytes, depth 24 and 128 parse steps,
+rejects division by zero and non-finite intermediates, and does not execute
+code or support variables, functions or exponentiation operators. Floating
+point is approximate, not exact financial or arbitrary-precision arithmetic.
+
+Linux device.info uses fixed procfs entries and statvfs("/") without shell
+commands. It reports Linux and architecture, a descriptive CPU name when
+available, process-available logical parallelism, kernel memory totals and
+available memory when present, and root filesystem capacity/available space
+when obtainable. It does not enumerate private files, hostnames, serial
+numbers or machine IDs. GPU is explicitly unavailable (null) in this adapter;
+a reliable GPU naming source and detailed distro detection are deferred.
+Values describe the current execution environment, not necessarily the
+physical host or all mounted volumes.
+
+The workspace and Cargo.lock were updated at source level for agent-tools
+and its Linux-only direct use of the already locked libc 0.2.191. No new
+third-party package/checksum was introduced. The package inherits the
+baseline workspace version until the milestone version update. Cargo
+resolution, formatting and native build remain unverified.
+
+Nine ordinary test cases and one opt-in Linux hardware snapshot case are
+authored, not executed. The agent runtime and desktop are not yet wired to
+the adapters.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -119,7 +156,7 @@ revocation, cancellation, expiration, audit capacity and engine teardown.
 | 01 | Domain, lifecycle, errors, budgets | Implemented; unverified |
 | 02 | Tool registry and validation | Implemented; unverified |
 | 03 | Permission engine | Implemented; unverified |
-| 04 | Calculator and device tools | Pending |
+| 04 | Calculator and device tools | Implemented; unverified |
 | 05 | Linux filesystem tools | Pending |
 | 06 | Linux application tools | Pending |
 | 07 | Model decision protocol | Pending |
@@ -129,6 +166,7 @@ revocation, cancellation, expiration, audit capacity and engine teardown.
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-No native tool execution, UI integration, persistent permission audit, or
-model-driven execution exists as a result of Parts 01–03. The core policy
-must be wired into the trusted runtime before any action is available.
+The calculator and Linux device adapter exist as source, but UI integration,
+persistent permission audit and model-driven execution remain pending. The
+core policy and native dispatcher must be wired into the trusted runtime
+before any action is available in the application.
