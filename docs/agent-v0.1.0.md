@@ -148,6 +148,53 @@ Nine ordinary test cases and one opt-in Linux hardware snapshot case are
 authored, not executed. The agent runtime and desktop are not yet wired to
 the adapters.
 
+## Part 05 — Linux scoped filesystem tools
+
+NativeTools now owns a session FilesystemScopes registry. Trusted host code
+must use grant_selected only after a native picker and bind the resulting
+opaque policy ID to a pinned O_PATH descriptor. Revoke invalidates the
+policy lease and removes the stored handle; prune releases expired handles.
+The legacy stateless dispatch wrapper cannot access scoped resources.
+Linux now exposes four supported tools. Other platforms still expose only
+the calculator. The desktop picker and runtime wiring remain future work.
+
+All descendant paths use openat2 with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS,
+RESOLVE_NO_MAGICLINKS and RESOLVE_NO_XDEV; there is no weaker fallback.
+Selection requires an absolute non-root path with no symlink components.
+Only selected conventional filesystem types (ext, XFS, Btrfs, tmpfs,
+overlay, exFAT, FAT) are accepted. Network/FUSE/pseudo-filesystems are
+not supported. Files must be regular and singly linked. A candidate is
+pinned before opening for read, then reopened through a checked procfs
+descriptor directory and verified by device/inode/type/link count. No
+device, socket or FIFO is opened for data access. The process and its
+mount namespace/procfs are assumed trusted; this is not an OS sandbox.
+
+Search enumerates directory descriptors and re-resolves each candidate
+from the original root handle. It returns relative UTF-8 regular-file
+paths, with ASCII case-insensitive name/extension filters, at most 100
+results, depth 8, 10,000 visited entries and a bounded serialized result.
+Skipped inaccessible/unsafe entries, depth or size limits may mark results
+truncated. Search is not a snapshot; concurrent renames may omit results.
+The selected root/file remains the authorized object if renamed; a
+replacement at its old path is not authorized by a file grant.
+
+Read validates all source bytes (max 64 KiB), rejects invalid UTF-8 and
+control bytes other than tab/newline/carriage return, and returns a preview
+of at most 4096 bytes, shortened for JSON escaping with explicit truncation.
+Reads use the pinned regular descriptor; metadata changes during read are
+rejected on a best-effort basis. Concurrent writes, hard-link creation and
+renames cannot be treated as a content snapshot or absolute provenance
+guarantee. Cooperative checks bound work but cannot forcibly interrupt
+blocking syscalls. User-selected directories may contain sensitive files
+and their contents remain untrusted data; no instructions in them confer
+authority. Host must persist audit records, retain trusted scope ownership,
+and not log private paths or content.
+
+Linux openat2 availability, bind mounts, adversarial race tests and actual
+desktop behavior remain deferred to verification. Six integration test
+cases were authored, not executed; no additional dependency was added.
+Reference: https://man7.org/linux/man-pages/man2/openat2.2.html
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -157,7 +204,7 @@ the adapters.
 | 02 | Tool registry and validation | Implemented; unverified |
 | 03 | Permission engine | Implemented; unverified |
 | 04 | Calculator and device tools | Implemented; unverified |
-| 05 | Linux filesystem tools | Pending |
+| 05 | Linux filesystem tools | Implemented; unverified |
 | 06 | Linux application tools | Pending |
 | 07 | Model decision protocol | Pending |
 | 08 | Bounded execution runtime | Pending |
@@ -166,7 +213,7 @@ the adapters.
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-The calculator and Linux device adapter exist as source, but UI integration,
+The calculator, Linux device and scoped filesystem adapters exist as source, but UI integration,
 persistent permission audit and model-driven execution remain pending. The
 core policy and native dispatcher must be wired into the trusted runtime
 before any action is available in the application.

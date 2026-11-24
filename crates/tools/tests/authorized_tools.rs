@@ -25,7 +25,9 @@ fn registry_exposes_only_implemented_tools() {
     let registry = supported_registry().unwrap();
     assert!(registry.get(ToolId::Calculate).is_some());
     assert_eq!(registry.get(ToolId::DeviceInfo).is_some(), cfg!(target_os = "linux"));
-    for id in [ToolId::FileSearch, ToolId::FileRead, ToolId::AppsList, ToolId::AppLaunch] {
+    assert_eq!(registry.get(ToolId::FileSearch).is_some(), cfg!(target_os = "linux"));
+    assert_eq!(registry.get(ToolId::FileRead).is_some(), cfg!(target_os = "linux"));
+    for id in [ToolId::AppsList, ToolId::AppLaunch] {
         assert!(registry.get(id).is_none());
     }
 }
