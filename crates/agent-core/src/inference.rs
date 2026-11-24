@@ -97,6 +97,8 @@ pub struct GenerationRequest {
     pub top_p: f32,
     pub top_k: i32,
     pub seed: Option<u32>,
+    #[serde(default)]
+    pub enable_thinking: bool,
 }
 
 impl GenerationRequest {
@@ -108,6 +110,7 @@ impl GenerationRequest {
             top_p: 0.8,
             top_k: 20,
             seed: None,
+            enable_thinking: false,
         }
     }
 
@@ -144,6 +147,7 @@ pub struct ModelInfo {
     pub parameters: u64,
     pub file_bytes: u64,
     pub trained_context: u32,
+    pub supports_thinking: bool,
     pub config: ModelConfig,
     pub load_ms: u64,
 }
@@ -161,6 +165,7 @@ pub enum FinishReason {
 pub struct GenerationStats {
     pub reason: FinishReason,
     pub prompt_tokens: usize,
+    pub prompt_tokens_per_second: Option<f64>,
     pub generated_tokens: u32,
     pub time_to_first_token_ms: Option<u64>,
     pub elapsed_ms: u64,

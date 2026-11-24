@@ -51,6 +51,7 @@ export default function App() {
   const [temperature, setTemperature] = useState(0.7);
   const [topP, setTopP] = useState(0.8);
   const [topK, setTopK] = useState(20);
+  const [enableThinking, setEnableThinking] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [output, setOutput] = useState<Output>({ id: 0, text: "" });
   const [stats, setStats] = useState<GenerationStats | null>(null);
@@ -96,6 +97,7 @@ export default function App() {
     try {
       const config: ModelConfig = { contextLength, threads };
       setModel(await invoke<ModelInfo>("load_model", { config }));
+      setEnableThinking(false);
       setOutput({ id: nextId.current, text: "" });
       setStats(null);
       setPhase("ready");
@@ -128,7 +130,7 @@ export default function App() {
       setOutput((previous) => appendDelta(previous, id, delta));
     });
     try {
-      const request = { prompt, maxTokens, temperature, topP, topK };
+      const request = { prompt, maxTokens, temperature, topP, topK, enableThinking };
       setStats(await invoke<GenerationStats>("generate", { request, tokens }));
     } catch (failure) {
       setError(errorMessage(failure));
@@ -195,6 +197,13 @@ export default function App() {
             <NumberField label="Top-p" value={topP} onChange={setTopP} min={0.01} max={1} step={0.01} />
             <NumberField label="Top-k" value={topK} onChange={setTopK} min={1} max={200} />
           </fieldset>
+          {model?.supportsThinking && (
+            <label className="mt-3 flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" checked={enableThinking} disabled={phase !== "ready"}
+                onChange={(event) => setEnableThinking(event.currentTarget.checked)} />
+              Enable thinking
+            </label>
+          )}
           <div className="mt-4 flex gap-2">
             <button className={primary} type="button" disabled={phase !== "ready" || !prompt.trim() || !validGeneration} onClick={generate}>Generate</button>
             <button className={button} type="button" disabled={phase !== "generating" || stopping} onClick={stop}>
@@ -214,6 +223,7 @@ export default function App() {
             <p role="status" className="mt-3 text-sm text-slate-300">
               {finishLabel[stats.reason]} · {stats.generatedTokens} tokens · {stats.tokensPerSecond.toFixed(1)} tokens/s
               {stats.timeToFirstTokenMs !== null && ` · first token in ${stats.timeToFirstTokenMs} ms`}
+              {stats.promptTokensPerSecond !== null && ` · prompt ${stats.promptTokensPerSecond.toFixed(1)} tokens/s`}
             </p>
           )}
         </section>

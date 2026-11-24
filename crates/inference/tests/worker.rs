@@ -36,6 +36,7 @@ impl InferenceProvider for Mock {
             parameters: 1,
             file_bytes: 32,
             trained_context: 2048,
+            supports_thinking: false,
             config,
             load_ms: 0,
         })
@@ -75,6 +76,7 @@ impl InferenceProvider for Mock {
                 FinishReason::EndOfGeneration
             },
             prompt_tokens: 2,
+            prompt_tokens_per_second: Some(2000.0),
             generated_tokens: 2,
             time_to_first_token_ms: Some(1),
             elapsed_ms: 2,

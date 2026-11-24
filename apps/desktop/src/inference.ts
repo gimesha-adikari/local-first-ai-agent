@@ -7,6 +7,7 @@ export type ModelInfo = {
   parameters: number;
   fileBytes: number;
   trainedContext: number;
+  supportsThinking: boolean;
   config: ModelConfig;
   loadMs: number;
 };
@@ -17,6 +18,7 @@ export type Status = { phase: Phase; model: ModelInfo | null };
 export type GenerationStats = {
   reason: "end_of_generation" | "token_limit" | "cancelled";
   promptTokens: number;
+  promptTokensPerSecond: number | null;
   generatedTokens: number;
   timeToFirstTokenMs: number | null;
   elapsedMs: number;

@@ -58,6 +58,8 @@ Choose a trusted local GGUF model with an embedded chat template, then select
 the run or **Unload model** to free the model. The default settings are 4 CPU
 threads, a 2048-token context, 256 output tokens, temperature 0.7, top-p 0.8, and
 top-k 20. The context must fit both the formatted prompt and requested output.
+The **Enable thinking** control appears when the loaded model's template
+exposes that mode. Thinking is off by default and shares the output token budget.
 
 The reference fixture is Qwen's Apache-2.0
 `Qwen3-0.6B-Q4_K_M.gguf` (396,704,416 bytes). Its official upload is pinned to
@@ -66,9 +68,10 @@ revision `1eaf4d9657fe65ad10a51eab76a8db5b363bddaa`. The published SHA-256 is
 Keep this file outside the repository.
 [Qwen's pinned GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/blob/1eaf4d9657fe65ad10a51eab76a8db5b363bddaa/Qwen3-0.6B-Q4_K_M.gguf)
 
-The real-model test is opt-in and receives a local file path. It prints load
-time, time to first token, decode throughput, cancellation latency, and Linux
-peak RSS. The normal test suite never fetches model files.
+The opt-in real-model tests receive a local file path. They cover template
+rendering and the generation lifecycle. The Linux benchmark records prompt
+and decode throughput, first-token time, cancellation latency, and memory.
+The normal test suite never fetches model files.
 
 Load time covers native initialization, mapping, and template validation.
 Memory-mapped weights can page in during generation. Time to first token
@@ -88,5 +91,6 @@ For a network-isolated Linux runtime check, first compile the test with
 `AGENT_TEST_MODEL`.
 
 See [the architecture notes](docs/architecture.md) for the provider contract
-and permission boundaries. The milestone covers single-prompt CPU inference.
+and permission boundaries, and [the v0.0.2 verification report](docs/verification-v0.0.2.md)
+for observed results and benchmark commands. The milestone covers single-prompt CPU inference.
 Linux is the verified target. License selection is deferred.

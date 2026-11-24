@@ -30,6 +30,7 @@ struct LoadedModel {
     model: LlamaModel,
     config: ModelConfig,
     template: String,
+    supports_thinking: bool,
 }
 
 impl InferenceProvider for LlamaProvider {
@@ -72,13 +73,17 @@ impl InferenceProvider for LlamaProvider {
             .ok()
             .and_then(|template| template.to_string().ok())
             .ok_or_else(unsupported_template)?;
-        let loaded = LoadedModel {
+        let mut loaded = LoadedModel {
             model,
             config,
             template,
+            supports_thinking: false,
         };
         // Validate template compatibility before marking the model ready.
-        loaded.render_prompt("Template check")?;
+        let direct = loaded.render_prompt("Template check", false)?;
+        loaded.supports_thinking = loaded
+            .render_prompt("Template check", true)
+            .is_ok_and(|thinking| thinking != direct);
         let file_name = path
             .file_name()
             .unwrap_or_default()
@@ -97,6 +102,7 @@ impl InferenceProvider for LlamaProvider {
             file_name,
             file_bytes,
             trained_context,
+            supports_thinking: loaded.supports_thinking,
             config,
             load_ms: millis(start.elapsed()),
         };
@@ -133,7 +139,7 @@ fn unsupported_template() -> InferenceError {
 }
 
 impl LoadedModel {
-    fn render_prompt(&self, prompt: &str) -> Result<String> {
+    fn render_prompt(&self, prompt: &str, enable_thinking: bool) -> Result<String> {
         let vocab = self.model.vocab();
         let special = |token: llama_cpp_2::token::LlamaToken| {
             if token.0 < 0 {
@@ -147,6 +153,7 @@ impl LoadedModel {
             prompt,
             &special(vocab.bos()),
             &special(vocab.eos()),
+            enable_thinking,
         )
     }
 
@@ -161,6 +168,7 @@ impl LoadedModel {
         let mut stats = GenerationStats {
             reason: FinishReason::Cancelled,
             prompt_tokens: 0,
+            prompt_tokens_per_second: None,
             generated_tokens: 0,
             time_to_first_token_ms: None,
             elapsed_ms: 0,
@@ -170,7 +178,13 @@ impl LoadedModel {
             return Ok(stats);
         }
 
-        let prompt = self.render_prompt(&request.prompt)?;
+        if request.enable_thinking && !self.supports_thinking {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "The model's chat template does not expose a thinking mode.",
+            ));
+        }
+        let prompt = self.render_prompt(&request.prompt, request.enable_thinking)?;
         let vocab = self.model.vocab();
         let tokens = vocab.tokenize(prompt.as_bytes(), false, true);
         stats.prompt_tokens = tokens.len();
@@ -196,6 +210,7 @@ impl LoadedModel {
             .new_context(backend, params)
             .map_err(|_| generation_failed())?;
         let mut batch = LlamaBatch::new(PREFILL_BATCH, 1);
+        let prefill = Instant::now();
         for (chunk_index, chunk) in tokens.chunks(PREFILL_BATCH).enumerate() {
             if cancel.is_cancelled() {
                 stats.elapsed_ms = millis(started.elapsed());
@@ -210,6 +225,8 @@ impl LoadedModel {
             }
             ctx.decode(&mut batch).map_err(|_| generation_failed())?;
         }
+        stats.prompt_tokens_per_second =
+            Some(tokens.len() as f64 / prefill.elapsed().as_secs_f64().max(f64::EPSILON));
 
         let mut sampler = if request.temperature == 0.0 {
             LlamaSampler::greedy()
@@ -259,7 +276,13 @@ impl LoadedModel {
     }
 }
 
-fn render_template(template: &str, prompt: &str, bos: &str, eos: &str) -> Result<String> {
+fn render_template(
+    template: &str,
+    prompt: &str,
+    bos: &str,
+    eos: &str,
+    enable_thinking: bool,
+) -> Result<String> {
     let mut env = Environment::new();
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.set_fuel(Some(100_000));
@@ -278,7 +301,7 @@ fn render_template(template: &str, prompt: &str, bos: &str, eos: &str) -> Result
         context! {
             messages => [context! { role => "user", content => prompt }],
             add_generation_prompt => true,
-            enable_thinking => false,
+            enable_thinking => enable_thinking,
             bos_token => bos,
             eos_token => eos,
         },
@@ -330,14 +353,33 @@ mod tests {
     fn renders_the_model_template_with_generation_prompt() {
         let template = "{{ bos_token }}{% for message in messages %}{{ message.role }}: {{ message.content.strip() }}{{ eos_token }}{% endfor %}{% if add_generation_prompt %}assistant: {% if not enable_thinking %}direct{% endif %}{% endif %}";
         assert_eq!(
-            render_template(template, " Hi ", "<start>", "<end>").unwrap(),
+            render_template(template, " Hi ", "<start>", "<end>", false).unwrap(),
             "<start>user: Hi<end>assistant: direct",
         );
         assert_eq!(
-            render_template("{% invalid %}", "Hi", "", "")
+            render_template(template, " Hi ", "<start>", "<end>", true).unwrap(),
+            "<start>user: Hi<end>assistant: ",
+        );
+        assert_eq!(
+            render_template("{% invalid %}", "Hi", "", "", false)
                 .unwrap_err()
                 .code,
             ErrorCode::UnsupportedTemplate,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the pinned local GGUF via AGENT_TEST_MODEL"]
+    fn renders_pinned_qwen_template_in_both_modes() {
+        let mut provider = LlamaProvider::default();
+        let path = std::path::PathBuf::from(std::env::var_os("AGENT_TEST_MODEL").unwrap());
+        provider.load(&path, ModelConfig::default()).unwrap();
+        let model = provider.loaded.as_ref().unwrap();
+        let prefix = "<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n";
+        assert_eq!(model.render_prompt("你好", true).unwrap(), prefix);
+        assert_eq!(
+            model.render_prompt("你好", false).unwrap(),
+            format!("{prefix}<think>\n\n</think>\n\n"),
         );
     }
 

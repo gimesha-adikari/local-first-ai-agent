@@ -37,7 +37,9 @@ steps. Loading must finish before shutdown can complete.
 
 The provider renders the model's embedded Jinja chat template for one user
 message and an assistant generation prompt. It supplies special token strings
-and requests thinking to be disabled when the template supports that option.
+and checks whether switching `enable_thinking` changes the rendered probe at
+load time. The desktop exposes that switch for a compatible model. Thinking
+is off by default and reasoning tokens count toward the same generation limit.
 The template runs with a bounded evaluation budget and no file loader. Models
 without a supported template report an error. The tokenizer reads the rendered
 special tokens, and the vocab's end-of-generation token check stops sampling.
