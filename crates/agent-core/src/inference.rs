@@ -205,9 +205,18 @@ impl Cancellation {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    pub fn is_cancelled(&self) -> bool {
+    /// Explicit user or host cancellation, excluding a local deadline.
+    pub fn is_explicitly_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
-            || self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Whether this cancellation view deadline has elapsed.
+    pub fn is_deadline_elapsed(&self) -> bool {
+        self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.is_explicitly_cancelled() || self.is_deadline_elapsed()
     }
 }
 
@@ -232,4 +241,24 @@ pub trait InferenceProvider: 'static {
         cancellation: &Cancellation,
         emit: &mut dyn FnMut(TextDelta) -> Result<()>,
     ) -> Result<GenerationStats>;
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn distinguishes_explicit_cancellation_from_deadline_expiry() {
+        let timed = Cancellation::default().with_timeout(Duration::ZERO);
+        assert!(!timed.is_explicitly_cancelled());
+        assert!(timed.is_deadline_elapsed());
+        assert!(timed.is_cancelled());
+
+        let parent = Cancellation::default();
+        parent.cancel();
+        let child = parent.with_timeout(Duration::from_secs(1));
+        assert!(child.is_explicitly_cancelled());
+        assert!(!child.is_deadline_elapsed());
+        assert!(child.is_cancelled());
+    }
 }

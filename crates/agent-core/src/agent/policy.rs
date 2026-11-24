@@ -509,7 +509,14 @@ impl PermissionEngine {
             }
         };
         let task_deadline = self.active_task(task_id, now).map_err(|_| denied())?.lease.deadline;
-        let deadline = (now + wait).min(task_deadline);
+        // The shorter approval budget applies only to operations that need a
+        // human confirmation. Automatic/scoped reads remain valid until the
+        // task deadline.
+        let deadline = if permission == PermissionRequirement::ConfirmEveryLaunch {
+            (now + wait).min(task_deadline)
+        } else {
+            task_deadline
+        };
         let id = self.allocate("op")?;
         let confirmed = permission != PermissionRequirement::ConfirmEveryLaunch;
         let op = Operation { id: id.clone(), task_id, call: call.clone(), deadline, confirmed };
@@ -672,6 +679,40 @@ mod tests {
             AuthorizationDecision::Deny { reason: DenialReason::ApprovalExpired }
         ));
         assert!(policy.consume(&registry, task, &request.operation_id, &launch).is_err());
+    }
+
+    #[test]
+    fn automatic_authorization_uses_task_deadline_not_approval_timeout() {
+        let registry = ToolRegistry::mvp().unwrap();
+        let mut policy = PermissionEngine::new("test_session").unwrap();
+        let task = TaskId::new(1).unwrap();
+        policy.begin_task(task, Duration::from_secs(30), Cancellation::default()).unwrap();
+        let call = registry.validate(ToolId::Calculate, r#"{"expression":"2+2"}"#).unwrap();
+        let wait = Duration::from_millis(1);
+        let AuthorizationDecision::Allow { .. } =
+            policy.authorize(&registry, task, &call, wait).unwrap()
+        else {
+            panic!("expected automatic authorization");
+        };
+        let deadline = policy.pending.as_ref().unwrap().deadline;
+        assert!(deadline > Instant::now() + Duration::from_millis(100));
+    }
+
+    #[test]
+    fn application_approval_uses_the_shorter_approval_deadline() {
+        let registry = ToolRegistry::mvp().unwrap();
+        let mut policy = PermissionEngine::new("test_session").unwrap();
+        let task = TaskId::new(1).unwrap();
+        policy.begin_task(task, Duration::from_secs(30), Cancellation::default()).unwrap();
+        let call = registry.validate(ToolId::AppLaunch, r#"{"app_id":"app_1"}"#).unwrap();
+        let wait = Duration::from_millis(500);
+        let AuthorizationDecision::Confirm { .. } =
+            policy.authorize(&registry, task, &call, wait).unwrap()
+        else {
+            panic!("expected confirmation");
+        };
+        let deadline = policy.pending.as_ref().unwrap().deadline;
+        assert!(deadline <= Instant::now() + Duration::from_millis(600));
     }
 
     #[test]

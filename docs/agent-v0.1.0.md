@@ -430,6 +430,59 @@ typecheck, formatter or runtime command was executed. Event serialization,
 React typing, native dialog behavior and the end-to-end approval flow remain
 unverified until the later integration-review milestone.
 
+## Part 12 — static integration review and handoff
+
+A source-only review covered the task lifecycle and budgets, decision protocol,
+tool registry and authorization, Linux filesystem and application adapters,
+inference worker, SQLite journal and recovery, Tauri commands/events/capability,
+and the desktop Agent UI. No build, test, typecheck, formatter, model run or
+desktop launch was performed.
+
+Three integration corrections were made during the review:
+
+1. **Task-thread publication race.** A very short task could finish and release
+   the global operation lease before its `JoinHandle` was stored. A subsequent
+   start could therefore miss the previous handle, and later publication could
+   overwrite a newer handle. The task-thread slot is now locked across spawn
+   and handle publication; the next start cannot pass `join_previous` until
+   the handle is visible.
+2. **Approval timeout classification.** The approval host used a cancellation
+   view whose `is_cancelled` combined explicit cancellation with deadline
+   expiry. That made an expired approval wait appear to be user cancellation.
+   Cancellation now exposes separate explicit-cancel and deadline checks, and
+   the approval bridge reports deadline expiry as `TimedOut`.
+3. **Approval budget applied to automatic tools.** Authorization previously
+   applied the approval timeout to every operation, including automatic
+   calculator/device and scoped-read calls. Only confirmation-required
+   application launches now receive the shorter approval deadline; all other
+   operations use the task deadline.
+
+Focused regression test source was added for the cancellation distinction and
+the two authorization-deadline cases. These tests were not executed.
+
+**Remaining handoff items:**
+
+- The frontend does not reattach to an in-progress task or reconstruct a
+  pending application-approval dialog after a WebView-only reload. The backend
+  task remains protected by its operation lease and will eventually complete
+  or time out, but the reloaded UI cannot cancel or approve it. A full
+  application restart is different: SQLite startup recovery marks unfinished
+  tasks interrupted and unresolved dispatch intents uncertain.
+- The UI currently displays the latest 30 tasks and does not expose the
+  backend `before` pagination parameter.
+- Model decisions use a prompted strict-JSON protocol, not native
+  grammar-constrained or Qwen function calling. Prompt injection is not
+  eliminated; deterministic authorization remains the authority boundary.
+- Selected-file reads are bounded and descriptor-relative but are not
+  immutable content snapshots. SQLite is not encrypted at rest. A launched
+  desktop application may use its own network access.
+- Rust/React type compatibility, Tauri event serialization, Linux native
+  behavior, openat2/GIO integration, persistence durability and actual model
+  decisions remain unverified until the separate verification phase.
+
+Part 12 is complete as a source review and handoff, not as a verified release.
+The feature branch remains separate from `main`; no merge is performed.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -446,6 +499,6 @@ unverified until the later integration-review milestone.
 | 09 | SQLite task persistence | Implemented; unverified |
 | 10 | Tauri commands and events | Implemented; unverified |
 | 11 | Desktop agent UI | Implemented; unverified |
-| 12 | Static integration review and handoff | Pending |
+| 12 | Static integration review and handoff | Source reviewed; corrections committed; unverified |
 
-The Linux adapters, bounded runtime, SQLite journal, Tauri host bridge and desktop Agent UI now exist as source. Final static integration review remains pending.
+The Linux adapters, bounded runtime, SQLite journal, Tauri host bridge and desktop Agent UI now exist as source. Part 12 source review is complete; runtime verification remains deferred.

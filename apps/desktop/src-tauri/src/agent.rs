@@ -199,10 +199,6 @@ impl AgentSession {
         }
     }
 
-    fn store_thread(&self, handle: JoinHandle<()>) {
-        let mut slot = self.task_thread.lock().unwrap_or_else(|error| error.into_inner());
-        *slot = Some(handle);
-    }
 
     pub(crate) fn shutdown(&self, worker: &InferenceWorker) {
         let senders = {
@@ -405,9 +401,13 @@ impl RuntimeHost for DesktopAgentHost {
 
         let deadline = Instant::now().checked_add(wait).unwrap_or_else(Instant::now);
         let choice = loop {
-            if cancellation.is_cancelled() {
+            if cancellation.is_explicitly_cancelled() {
                 self.session.remove_approval(request.task_id, &request.operation_id);
                 return Err(cancelled_error());
+            }
+            if cancellation.is_deadline_elapsed() {
+                self.session.remove_approval(request.task_id, &request.operation_id);
+                return Err(AgentError::new(AgentErrorCode::TimedOut, "The approval deadline expired."));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -536,6 +536,11 @@ pub fn start_agent_task(app: AppHandle, state: State<'_, Desktop>, prompt: Strin
     let task_prompt = prompt;
     let operation_guard = operation;
     let app_handle = app.clone();
+    // Hold the slot lock across spawn and handle publication. A very short
+    // task can finish and release the operation lease before spawn returns;
+    // publishing under this lock prevents the next task from missing its join handle.
+    let mut task_thread = state.agent.task_thread.lock()
+        .unwrap_or_else(|error| error.into_inner());
     let spawned = thread::Builder::new().name("local-agent-task".into()).spawn(move || {
         let _operation = operation_guard;
         let _cleanup = TaskCleanup {
@@ -564,8 +569,9 @@ pub fn start_agent_task(app: AppHandle, state: State<'_, Desktop>, prompt: Strin
         }
     });
     match spawned {
-        Ok(handle) => state.agent.store_thread(handle),
+        Ok(handle) => *task_thread = Some(handle),
         Err(_) => {
+            drop(task_thread);
             state.agent.clear_active(id);
             if let Ok(mut database) = state.database.lock() {
                 let _ = database.interrupt_agent_task(id);
