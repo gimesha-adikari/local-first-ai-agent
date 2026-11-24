@@ -393,6 +393,43 @@ native adapters have not been compiled together through this bridge. UI
 approval rendering, event consumption, and live desktop behavior remain
 pending Part 11 and final static integration review.
 
+## Part 11 — desktop Agent UI
+
+The desktop frontend now includes a persistent Chat/Agent mode switch while
+keeping the existing conversation view mounted and unchanged. Agent mode
+subscribes to the app-scoped agent-event channel for the lifetime of the
+workspace; the listener is released on cleanup, and task start waits for
+listener registration so early progress and approval events are not lost.
+
+The Agent workspace provides a task composer, start/cancel controls, live
+task-state and tool-execution timeline, transient tool-result inspection,
+final answer/error and budget presentation, task history/detail, execution
+metadata and permission-audit history. Task IDs remain decimal strings.
+Task history intentionally contains metadata only: prompts, answers and raw
+observations are not persisted by the journal.
+
+Application-launch approvals use a modal showing the trusted desktop
+application name, desktop entry and executable. The user can approve that
+exact operation once or deny it; closing the dialog denies the request.
+If trusted target details are unavailable, approval is disabled. Pending
+approvals remain visible when switching back to Chat.
+
+The permission manager uses native file and folder pickers, lists active,
+expired and revoked scopes, and supports immediate revocation during an
+active agent task. The UI discloses the one-hour lifetime and that grants
+are not restored after restart. The backend remains authoritative for all
+permission checks; the UI is not an authorization boundary.
+
+The Chat view remains mounted when switching modes. Agent execution blocks
+new chat/model operations at the UI and backend operation gates. Existing
+chat controls, model dialogs and preferences are reused. No dependencies
+were added.
+
+Part 11 source implementation is committed but unverified. No build, test,
+typecheck, formatter or runtime command was executed. Event serialization,
+React typing, native dialog behavior and the end-to-end approval flow remain
+unverified until the later integration-review milestone.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -408,7 +445,7 @@ pending Part 11 and final static integration review.
 | 08 | Bounded execution runtime | Implemented; unverified |
 | 09 | SQLite task persistence | Implemented; unverified |
 | 10 | Tauri commands and events | Implemented; unverified |
-| 11 | Desktop agent UI | Pending |
+| 11 | Desktop agent UI | Implemented; unverified |
 | 12 | Static integration review and handoff | Pending |
 
-The Linux adapters, bounded runtime, SQLite journal and Tauri host bridge now exist as source. The desktop UI and final integration review remain pending.
+The Linux adapters, bounded runtime, SQLite journal, Tauri host bridge and desktop Agent UI now exist as source. Final static integration review remains pending.

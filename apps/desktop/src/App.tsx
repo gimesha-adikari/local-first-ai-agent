@@ -10,9 +10,11 @@ import {
 import { Dialog, ModelDialog, SettingsDialog } from "./Dialogs";
 import { errorMessage } from "./inference";
 import MarkdownMessage, { CopyButton } from "./MarkdownMessage";
+import AgentPanel from "./Agent";
 
 type Modal = "model" | "settings" | "rename" | "delete" | "instructions";
 type Operation = "opening" | "creating" | "saving" | "generating";
+type WorkspaceMode = "chat" | "agent";
 
 const messageStatus: Record<Message["state"], string> = {
   streaming: "Generating…",
@@ -122,6 +124,8 @@ function EditConversationDialog({
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<Bootstrap | null>(null);
+  const [mode, setMode] = useState<WorkspaceMode>("chat");
+  const [agentRunning, setAgentRunning] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [summaries, setSummaries] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -224,7 +228,7 @@ export default function App() {
   }
 
   function begin(next: Operation) {
-    if (operationRef.current !== null) return false;
+    if (operationRef.current !== null || agentRunning) return false;
     operationRef.current = next;
     setOperation(next);
     setError(null);
@@ -359,7 +363,7 @@ export default function App() {
     setModal(next);
   }
 
-  const busy = operation !== null;
+  const busy = operation !== null || agentRunning;
   const generating = operation === "generating";
   const canStop = generating && conversation?.messages.at(-1)?.state === "streaming" && !stopping;
   const modelReady = snapshot?.inference.phase === "ready";
@@ -371,6 +375,16 @@ export default function App() {
 
   return (
     <div className="workspace">
+      <header className="workspace-modebar">
+        <div className="workspace-brand"><strong>Local First AI</strong><span>Offline desktop</span></div>
+        <nav className="mode-switch" aria-label="Workspace mode">
+          <button type="button" aria-pressed={mode === "chat"} className={mode === "chat" ? "mode-active" : ""}
+            onClick={() => setMode("chat")}>Chat</button>
+          <button type="button" aria-pressed={mode === "agent"} className={mode === "agent" ? "mode-active" : ""}
+            onClick={() => setMode("agent")}>Agent</button>
+        </nav>
+        <span className="workspace-local">Local processing · no cloud requests</span>
+      </header>
       {sidebarOpen && <button type="button" className="mobile-dismiss" aria-label="Close conversations"
         onClick={() => setSidebarOpen(false)} />}
       <aside className={`sidebar${sidebarOpen ? " sidebar-open" : ""}`} aria-label="Conversations">
@@ -403,7 +417,7 @@ export default function App() {
         </footer>
       </aside>
 
-      <main className="chat" aria-label="Chat">
+      <main className={"chat" + (mode !== "chat" ? " view-hidden" : "")} aria-label="Chat">
         <header className="chat-header">
           <div className="chat-title">
             <button type="button" className="quiet mobile-only" aria-label="Show conversations"
@@ -477,6 +491,11 @@ export default function App() {
           </form>
         </div>
       </main>
+
+      <AgentPanel hidden={mode !== "agent"} modelReady={!!modelReady}
+        supportsAgent={!!snapshot?.inference.model?.supportsThinking}
+        modelName={snapshot?.inference.model?.name ?? null} blocked={operation !== null}
+        onOpenModel={() => openModal("model")} onRunningChange={setAgentRunning} />
 
       {snapshot && modal === "settings" && (
         <SettingsDialog snapshot={snapshot} onSave={(preferences) => setSnapshot({ ...snapshot, preferences })}
