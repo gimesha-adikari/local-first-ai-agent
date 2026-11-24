@@ -322,6 +322,37 @@ SQLite persistence and desktop/model-worker bridge remain pending. A runtime
 report with journal_incomplete is not durable verification. No dependencies
 were added; compilation and real execution remain unverified.
 
+## Part 09 — SQLite agent journal
+
+Schema version 2 adds agent_tasks, agent_task_events, agent_executions,
+permission_audit and permission_audit_batches. Fresh databases apply both
+migrations; existing v1 databases apply only 002_agent.sql. Migration and
+startup recovery share the existing exclusive transaction. Chat history,
+model references and preferences are preserved. Newer versions fail closed.
+
+The core AgentStore contract is implemented by SqliteStore. The host must
+allocate an ID before run_task, serialize database access through the same
+existing store, and call interrupt_agent_task for an unfinished allocation
+on startup/runtime errors. One unfinished agent task is permitted; chat generation and task allocation
+also reject a conflicting active operation. Events,
+state transitions, dispatch intents and outcomes are transactional. The
+store requires a matching consumed-authorization record for each intent.
+An outcome must match an existing pending intent for the same task/tool;
+finished tasks reject later events. Recovery finalizes unfinished tasks
+as interrupted, marks unresolved intents uncertain, and never replays them.
+Known outcomes are preserved. The history API is bounded and paginated by
+monotonic task ID. Agent task ID transport must be lossless in the UI.
+
+Audit records are keyed by session namespace and sequence; exact retries
+are idempotent, conflicting retries fail. Nonempty batches persist omitted
+counts atomically; an impossible empty batch with omissions fails closed.
+No grants or approvals are restored. No task prompts, answers, raw
+arguments, private paths or document contents are saved in this journal
+by design. History shows IDs, states, timestamps, usage and execution/audit
+metadata only. SQLite remains unencrypted and is not a tamper-proof log.
+Seven regression cases are authored, not executed. No new packages were added. Actual migration, recovery, disk durability,
+compilation and runtime behavior remain unverified.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -335,11 +366,11 @@ were added; compilation and real execution remain unverified.
 | 06 | Linux application tools | Implemented; unverified |
 | 07 | Model decision protocol | Implemented; unverified |
 | 08 | Bounded execution runtime | Implemented; unverified |
-| 09 | SQLite task persistence | Pending |
+| 09 | SQLite task persistence | Implemented; unverified |
 | 10 | Tauri commands and events | Pending |
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
 The six Linux adapters, model protocol and bounded runtime exist as source.
-The trusted desktop host must bridge the runtime to inference, tools and durable
-SQLite storage before any agent action is available in the application.
+The concrete SQLite journal now exists. The trusted desktop host must bridge
+runtime, inference, native tools and storage before agent actions are available.

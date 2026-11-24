@@ -8,6 +8,7 @@ mod registry;
 mod policy;
 mod decision;
 mod runtime;
+mod store;
 
 pub use budget::{AgentBudget, AgentLimits, BudgetUsage};
 pub use error::{AgentError, AgentErrorCode, AgentResult};
@@ -28,3 +29,5 @@ pub use policy::{
 pub use decision::{AgentDecision, DecisionRequest, DecisionResponse, DecisionStep, parse_decision};
 
 pub use runtime::{run_task, ApprovalChoice, ExecutionRecord, ExecutionStatus, RuntimeEvent, RuntimeHost, TaskReport, TaskRequest};
+
+pub use store::{AgentStore, StoredTask, StoredTaskDetail, StoredTaskEvent, StoredExecution, StoredAudit};
