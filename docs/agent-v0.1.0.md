@@ -70,6 +70,47 @@ and transitive dependencies are unchanged; the agent-core dependency list
 in Cargo.lock was updated at source level, not resolved by Cargo.
 Five regression tests are authored, not executed.
 
+## Part 03 — permission engine
+
+The core now has an in-memory permission engine with default-deny registry
+checks, session resource grants, resource-kind matching, a single active task,
+and a single pending exact operation. A trusted host must supply a fresh
+unpredictable session namespace and monotonically allocated task IDs. The
+engine generates non-reused scope and operation identifiers. Scope grants are
+read-only, limited to 128 per session and at most eight hours; they are not
+persisted or restored. Revoked IDs are retained until session end.
+
+Automatic and scoped-read operations receive one-use authorization tickets.
+Every application launch requires a separate explicit human confirmation.
+The engine stores the exact validated call and matches it again when the
+ticket is consumed; replacement arguments, replay, mismatched task IDs,
+expired grants and unconfirmed operations do not authorize dispatch.
+Approval is not a reusable application permission. Missing scope is denied;
+the host may separately offer an explicit native picker and retry with a
+new validated proposal after selection. No model input may grant a scope,
+respond to confirmation, or directly execute a tool.
+
+A consumed AuthorizedCall is non-cloneable and has cooperative liveness
+checks for task cancellation, task deadline, scope expiration and revocation.
+The trusted executor must take ownership, dispatch at most once, check_dispatch immediately before native access
+(including the original approval deadline), and check_live during bounded work, and report uncertain side
+effects accurately. Revocation cannot undo a dispatched action. The engine
+does not open files or implement native containment. The host must bind IDs
+to immutable native handles; application IDs must resolve to a stable trusted
+discovery target shown in the approval UI and revalidated before launch.
+
+Metadata-only audit records are held in a bounded 1024-record buffer.
+New authority fails closed when full; revocation and task closure are still
+effective, and any omitted events are counted. The host must serialize audit
+draining and persist the relevant records before dispatch, fail closed on
+persistence failure, and retain the omission count. No document contents,
+absolute paths or arguments are included. Audit persistence and host IPC
+wiring remain future work. No new dependencies were added.
+
+Five integration and two unit test cases are authored, not executed.
+The tests cover replay, argument substitution, denial, resource kind,
+revocation, cancellation, expiration, audit capacity and engine teardown.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -77,7 +118,7 @@ Five regression tests are authored, not executed.
 | 00 | Pinned baseline review | Source reviewed |
 | 01 | Domain, lifecycle, errors, budgets | Implemented; unverified |
 | 02 | Tool registry and validation | Implemented; unverified |
-| 03 | Permission engine | Pending |
+| 03 | Permission engine | Implemented; unverified |
 | 04 | Calculator and device tools | Pending |
 | 05 | Linux filesystem tools | Pending |
 | 06 | Linux application tools | Pending |
@@ -88,6 +129,6 @@ Five regression tests are authored, not executed.
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-No native tool execution, policy enforcement, UI integration, or model-driven execution exists
-as a result of Parts 01–02. Later parts must connect these contracts before the
-agent can perform any action.
+No native tool execution, UI integration, persistent permission audit, or
+model-driven execution exists as a result of Parts 01–03. The core policy
+must be wired into the trusted runtime before any action is available.
