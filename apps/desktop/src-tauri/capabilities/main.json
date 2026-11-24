@@ -1,6 +1,13 @@
 {
   "identifier": "main",
-  "description": "Allow the local desktop window to check shared core status.",
+  "description": "Use the native model picker and local inference worker.",
   "windows": ["main"],
-  "permissions": ["allow-core-status"]
+  "permissions": [
+    "allow-choose-model",
+    "allow-inference-status",
+    "allow-load-model",
+    "allow-unload-model",
+    "allow-generate",
+    "allow-stop-generation"
+  ]
 }

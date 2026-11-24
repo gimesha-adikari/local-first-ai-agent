@@ -1,0 +1,20 @@
+[package]
+name = "inference"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+llama = ["dep:llama-cpp-2", "dep:minijinja", "dep:minijinja-contrib"]
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+futures-channel = "0.3.34"
+serde.workspace = true
+llama-cpp-2 = { version = "=0.1.161", default-features = false, optional = true }
+minijinja = { version = "2", features = ["builtins", "json", "fuel"], optional = true }
+minijinja-contrib = { version = "2", features = ["pycompat"], optional = true }
+
+[dev-dependencies]
+futures-executor = "0.3.34"

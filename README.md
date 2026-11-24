@@ -1,9 +1,8 @@
 # local-first-ai-agent
 
-A local-first personal AI agent project. Milestone **v0.0.1** establishes the
-Linux desktop foundation. The app lets you check the connection between React
-and the shared Rust core. The release executable loads its UI from embedded
-assets and the status check runs locally.
+A local-first personal AI agent project. Milestone **v0.0.2** adds a Linux
+desktop screen for testing local GGUF inference. The release embeds its UI and
+runs llama.cpp on the CPU.
 
 ## Development on Linux
 
@@ -17,7 +16,8 @@ Install the native build dependencies on Ubuntu if needed. See the
 ```sh
 sudo apt-get update
 sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libxdo-dev \
-  libssl-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
+  libssl-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev \
+  libgtk-3-dev cmake clang libclang-dev
 ```
 
 From the repository root:
@@ -37,35 +37,56 @@ Run these commands from the repository root after installing dependencies:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo clippy --release --workspace --all-targets --locked -- -D warnings
+cargo test --release --workspace --locked
+npm --prefix apps/desktop test
 npm --prefix apps/desktop run tauri -- build --no-bundle -- --locked
 ```
 
-The last command also type-checks and bundles the frontend. Run the release
-binary with `./target/release/local-first-ai-agent` in a Linux graphical
-session. Select **Check core connection** and confirm the status reads
-**Agent core is ready.**
+The last command also type-checks and bundles the frontend. Use the release
+profile for Rust checks and the desktop build to reuse native build output.
+On a resource-constrained Linux machine, set `CARGO_BUILD_JOBS=1` and
+`CMAKE_BUILD_PARALLEL_LEVEL=1` before building. With libclang present and no
+Clang resource headers installed, bindgen can use the installed GCC headers
+via `export BINDGEN_EXTRA_CLANG_ARGS="-idirafter $(gcc -print-file-name=include)"`.
 
-Use `cargo fmt --all` to apply the default rustfmt style. Run
-`cargo test -p agent-core --locked` for core-only changes.
+## Try local inference
 
-## Architecture
+Run `./target/release/local-first-ai-agent` in a Linux graphical session.
+Choose a trusted local GGUF model with an embedded chat template, then select
+**Load model**. Enter a prompt and select **Generate**. Select **Stop** to cancel
+the run or **Unload model** to free the model. The default settings are 4 CPU
+threads, a 2048-token context, 256 output tokens, temperature 0.7, top-p 0.8, and
+top-k 20. The context must fit both the formatted prompt and requested output.
 
-| Path | Responsibility |
-| --- | --- |
-| `crates/agent-core` | Tauri-independent Rust logic and its contract test |
-| `apps/desktop/src-tauri` | Native desktop host and window-scoped IPC permissions |
-| `apps/desktop/src` | React UI with strict TypeScript and Tailwind CSS |
-| `.github/workflows/ci.yml` | Linux formatting, Clippy, tests, and release build on pushes and pull requests |
+The reference fixture is Qwen's Apache-2.0
+`Qwen3-0.6B-Q4_K_M.gguf` (396,704,416 bytes). Its official upload is pinned to
+revision `1eaf4d9657fe65ad10a51eab76a8db5b363bddaa`. The published SHA-256 is
+`b0638f08417a2d3c8652760462eb5407c6e30173cf9608ad0820757a281eea0e`.
+Keep this file outside the repository.
+[Qwen's pinned GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/blob/1eaf4d9657fe65ad10a51eab76a8db5b363bddaa/Qwen3-0.6B-Q4_K_M.gguf)
 
-This is a modular monolith. The UI invokes the parameterless `core_status`
-command on the main window. The command calls `agent_core::status()` and returns
-its string. The window capability grants only that command. The release content
-security policy permits local assets and Tauri IPC. Vite's development server
-binds to loopback.
+The real-model test is opt-in and receives a local file path. It prints load
+time, time to first token, decode throughput, cancellation latency, and Linux
+peak RSS. The normal test suite never fetches model files.
 
-Linux is the first supported development target. Windows and Android are
-long-term targets. Local inference, chat, SQLite, plugins, device networking,
-autonomous behavior, and installer packaging are outside this milestone.
-License selection is deferred.
+Load time covers native initialization, mapping, and template validation.
+Memory-mapped weights can page in during generation. Time to first token
+includes prompt evaluation. Decode throughput excludes the first token, and
+peak RSS covers the test process. Cancellation latency runs from the stop
+request to completion of the worker operation.
+
+```sh
+AGENT_TEST_MODEL=/path/to/Qwen3-0.6B-Q4_K_M.gguf \
+  cargo test --release --locked -p inference --features llama \
+  --test qwen real_qwen_cpu_inference -- --ignored --nocapture
+```
+
+For a network-isolated Linux runtime check, first compile the test with
+`--no-run`, then run the resulting test executable under
+`unshare --user --map-current-user --net`. Keep the model path in
+`AGENT_TEST_MODEL`.
+
+See [the architecture notes](docs/architecture.md) for the provider contract
+and permission boundaries. The milestone covers single-prompt CPU inference.
+Linux is the verified target. License selection is deferred.

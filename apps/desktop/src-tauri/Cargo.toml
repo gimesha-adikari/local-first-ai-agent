@@ -11,3 +11,5 @@ tauri-build = { version = "=2.7.6", features = [] }
 [dependencies]
 agent-core = { path = "../../../crates/agent-core" }
 tauri = { version = "=2.12.7", features = [] }
+inference = { path = "../../../crates/inference", features = ["llama"] }
+rfd = { version = "=0.15.4", default-features = false, features = ["gtk3"] }

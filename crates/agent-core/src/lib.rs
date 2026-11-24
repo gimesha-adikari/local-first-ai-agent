@@ -4,3 +4,5 @@
 pub fn status() -> &'static str {
     "Agent core is ready."
 }
+
+pub mod inference;
