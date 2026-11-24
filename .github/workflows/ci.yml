@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci --engine-strict
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Lint the Rust workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test the Rust workspace
+        run: cargo test --workspace --locked
+
+      - name: Type-check and build the desktop application
+        working-directory: apps/desktop
+        run: npm run tauri -- build --no-bundle -- --locked

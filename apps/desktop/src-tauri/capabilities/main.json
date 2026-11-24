@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Allow the local desktop window to check shared core status.",
+  "windows": ["main"],
+  "permissions": ["allow-core-status"]
+}

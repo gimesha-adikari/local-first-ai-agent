@@ -1,0 +1,13 @@
+[package]
+name = "local-first-ai-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "=2.7.6", features = [] }
+
+[dependencies]
+agent-core = { path = "../../../crates/agent-core" }
+tauri = { version = "=2.12.7", features = [] }

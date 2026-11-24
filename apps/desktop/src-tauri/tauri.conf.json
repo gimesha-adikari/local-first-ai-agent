@@ -1,0 +1,31 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "local-first-ai-agent",
+  "identifier": "io.github.gimesha-adikari.localfirstaiagent",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "local-first-ai-agent",
+        "width": 720,
+        "height": 480,
+        "minWidth": 320,
+        "minHeight": 360
+      }
+    ],
+    "security": {
+      "capabilities": ["main"],
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:1420; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
