@@ -353,6 +353,46 @@ metadata only. SQLite remains unencrypted and is not a tamper-proof log.
 Seven regression cases are authored, not executed. No new packages were added. Actual migration, recovery, disk durability,
 compilation and runtime behavior remain unverified.
 
+## Part 10 — Tauri commands and events
+
+The desktop host now owns one session-scoped AgentSession with a fresh
+random permission namespace, the platform-supported tool registry, native
+resource handles, and one active task/approval broker. The agent task runs
+on a dedicated Rust thread while all model decisions use the existing
+InferenceWorker; ordinary chat, model loading/unloading and settings share
+one atomic operation lease and cannot overlap agent execution.
+
+The Tauri bridge exposes start/cancel, exact-operation approval, paginated
+task history, task detail, native file/directory selection, scope listing
+and immediate scope revocation. File and directory grants are created only
+after the native picker returns and are bound to the existing Linux
+openat2-backed FilesystemScopes registry. Revocation intentionally bypasses
+the global operation lease so it can invalidate an in-flight permit.
+Application approval displays the trusted catalog name, desktop entry and
+executable; dispatch revalidates the catalog snapshot again in agent-tools.
+
+Agent progress is emitted on the app event channel as agent-event. Events
+cover task start/state, proposals, approval requests, dispatch, execution
+outcomes, transient observations and final reports. Raw proposals and
+observations remain out of SQLite. Task IDs are returned to the UI as
+decimal strings, including IDs nested in stored event/audit payloads, to
+avoid JavaScript integer precision loss. The frontend listener and user
+interface are Part 11.
+
+Shutdown cancels the active task, wakes any approval wait, and joins the
+task thread before releasing the inference worker. Unfinished task rows are
+recovered as interrupted, and unresolved dispatches remain uncertain.
+Session grants and approvals are never restored. The command capability is
+restricted to the main window; event listening is explicitly permitted.
+The agent-tools crate was already a workspace member; the desktop package
+now depends on it directly. No third-party dependencies were added.
+
+Part 10 source implementation is committed but unverified. No build, test,
+format, or runtime command was executed. The existing agent journal and
+native adapters have not been compiled together through this bridge. UI
+approval rendering, event consumption, and live desktop behavior remain
+pending Part 11 and final static integration review.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -367,10 +407,8 @@ compilation and runtime behavior remain unverified.
 | 07 | Model decision protocol | Implemented; unverified |
 | 08 | Bounded execution runtime | Implemented; unverified |
 | 09 | SQLite task persistence | Implemented; unverified |
-| 10 | Tauri commands and events | Pending |
+| 10 | Tauri commands and events | Implemented; unverified |
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-The six Linux adapters, model protocol and bounded runtime exist as source.
-The concrete SQLite journal now exists. The trusted desktop host must bridge
-runtime, inference, native tools and storage before agent actions are available.
+The Linux adapters, bounded runtime, SQLite journal and Tauri host bridge now exist as source. The desktop UI and final integration review remain pending.

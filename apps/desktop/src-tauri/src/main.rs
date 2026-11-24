@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
 mod commands;
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex, atomic::AtomicI64},
+    sync::{Arc, Mutex, atomic::{AtomicBool, AtomicI64}},
 };
 
+use agent::*;
 use commands::*;
 use inference::{InferenceWorker, LlamaProvider};
 use storage::SqliteStore;
@@ -51,11 +53,14 @@ fn main() {
                 .join("chat/conversations.sqlite3");
             prepare_database(&path)?;
             let database = SqliteStore::open(&path)?;
+            let worker = Arc::new(InferenceWorker::spawn(LlamaProvider::default)?);
+            let agent = Arc::new(AgentSession::new().map_err(|error| std::io::Error::other(error.message))?);
             app.manage(Desktop {
-                worker: InferenceWorker::spawn(LlamaProvider::default)?,
+                worker,
+                agent,
                 database: Arc::new(Mutex::new(database)),
                 database_path: path,
-                operations: tauri::async_runtime::Mutex::new(()),
+                operations: Arc::new(AtomicBool::new(false)),
                 active_model: AtomicI64::new(0),
             });
             Ok(())
@@ -76,7 +81,16 @@ fn main() {
             save_model_settings,
             unload_model,
             save_preferences,
-            inference_status
+            inference_status,
+            start_agent_task,
+            cancel_agent_task,
+            respond_agent_approval,
+            list_agent_tasks,
+            get_agent_task,
+            choose_agent_file,
+            choose_agent_directory,
+            list_agent_scopes,
+            revoke_agent_scope
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");
