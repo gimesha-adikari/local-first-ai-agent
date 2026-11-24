@@ -195,6 +195,51 @@ desktop behavior remain deferred to verification. Six integration test
 cases were authored, not executed; no additional dependency was added.
 Reference: https://man7.org/linux/man-pages/man2/openat2.2.html
 
+## Part 06 — restricted Linux desktop application tools
+
+NativeTools now owns an ApplicationCatalog. Linux registers all six MVP
+adapters. GIO AppInfo discovery and DesktopAppInfo visibility checks identify
+eligible system-installed desktop entries. GIO objects are not stored across
+threads; only owned candidate metadata is stored in the session catalog.
+The direct gio 0.18.4 dependency is already locked; Cargo.lock's agent-tools
+dependency list is updated by source edit, not Cargo resolution.
+
+The MVP deliberately supports a narrow launch subset: visible applications
+registered under /usr/share/applications, trusted root-owned canonical
+desktop files and executable paths with non-writable ancestors, and a simple
+Exec executable optionally followed by one file/URI field code. No operands
+are supplied. Reject terminal wrappers, D-Bus activation, custom working
+directories, shell/interpreter/helper names, complex arguments, unsafe path
+characters, setuid/setgid executables and user-installed desktop entries.
+Resolve bare executables using /usr/bin, not the model or ambient PATH.
+The launcher is reconstructed with GIO from only the vetted absolute
+executable; the original desktop arguments are not executed.
+
+Discovery returns bounded name/opaque ID records. Stable IDs refer to
+immutable snapshots, are never rebound, and are limited to 256 per catalog.
+The host must use approval_target to display the trusted name, desktop file
+and executable, not trust model labels. Revalidate the snapshot before
+approval and before dispatch. Metadata checks detect ordinary replacement or
+package updates, not malicious administrator changes; OS/package trust and
+a trusted mount namespace remain assumptions. A fresh approval is required
+for every launch, with the original deadline checked immediately before it.
+
+Launch success means GIO accepted dispatch, not that a window opened.
+Cancellation after dispatch must not erase a side-effect result. A launch
+error may be uncertain; the future runtime must never automatically retry
+apps.launch, including on cancellation, timeout, storage failure or an
+unknown result. External apps can use the network and access their normal
+user environment. The agent does not send prompts, file operands or model
+arguments to them. This is not a sandbox. Many Snap/Flatpak, user-installed,
+D-Bus-activated and complex desktop entries are intentionally unavailable.
+Discovery obtains GIO's system list before applying the 1024 scan cap;
+native calls may block beyond cooperative deadlines.
+
+Seven ordinary test cases and one opt-in real discovery case are authored,
+not executed. No test automatically launches a real application. Actual
+harmless launch and desktop approval checks are deferred to Codex.
+API reference: https://gtk-rs.org/gtk-rs-core/stable/0.18/docs/gio/struct.DesktopAppInfo.html
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -205,7 +250,7 @@ Reference: https://man7.org/linux/man-pages/man2/openat2.2.html
 | 03 | Permission engine | Implemented; unverified |
 | 04 | Calculator and device tools | Implemented; unverified |
 | 05 | Linux filesystem tools | Implemented; unverified |
-| 06 | Linux application tools | Pending |
+| 06 | Linux application tools | Implemented; unverified |
 | 07 | Model decision protocol | Pending |
 | 08 | Bounded execution runtime | Pending |
 | 09 | SQLite task persistence | Pending |
@@ -213,7 +258,7 @@ Reference: https://man7.org/linux/man-pages/man2/openat2.2.html
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-The calculator, Linux device and scoped filesystem adapters exist as source, but UI integration,
+All six Linux adapters exist as source, but UI integration,
 persistent permission audit and model-driven execution remain pending. The
 core policy and native dispatcher must be wired into the trusted runtime
 before any action is available in the application.

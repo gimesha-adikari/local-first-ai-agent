@@ -27,9 +27,8 @@ fn registry_exposes_only_implemented_tools() {
     assert_eq!(registry.get(ToolId::DeviceInfo).is_some(), cfg!(target_os = "linux"));
     assert_eq!(registry.get(ToolId::FileSearch).is_some(), cfg!(target_os = "linux"));
     assert_eq!(registry.get(ToolId::FileRead).is_some(), cfg!(target_os = "linux"));
-    for id in [ToolId::AppsList, ToolId::AppLaunch] {
-        assert!(registry.get(id).is_none());
-    }
+    assert_eq!(registry.get(ToolId::AppsList).is_some(), cfg!(target_os = "linux"));
+    assert_eq!(registry.get(ToolId::AppLaunch).is_some(), cfg!(target_os = "linux"));
 }
 
 #[test]
@@ -61,12 +60,14 @@ fn cancellation_prevents_dispatch() {
 }
 
 #[test]
-fn full_contract_registry_does_not_create_native_adapters() {
+fn full_contract_registry_does_not_create_missing_native_handles() {
     let registry = ToolRegistry::mvp().unwrap();
     let mut policy = PermissionEngine::new("test_session").unwrap();
     let task = TaskId::new(1).unwrap();
     policy.begin_task(task, Duration::from_secs(20), Cancellation::default()).unwrap();
-    let permit = authorize(&mut policy, &registry, task, ToolId::AppsList, "{}");
+    let scope = policy.grant_scope(agent_core::agent::ScopeKind::File, Duration::from_secs(10)).unwrap();
+    let args = format!(r#"{{"scope_id":"{}"}}"#, scope.id);
+    let permit = authorize(&mut policy, &registry, task, ToolId::FileRead, &args);
     assert!(matches!(execute(&registry, permit).unwrap().outcome(), ToolOutcome::Failure { .. }));
 }
 

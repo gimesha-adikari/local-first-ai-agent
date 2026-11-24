@@ -21,6 +21,7 @@ name = "agent-tools"
 version = "0.0.3"
 dependencies = [
  "agent-core",
+ "gio",
  "libc",
 ]
 

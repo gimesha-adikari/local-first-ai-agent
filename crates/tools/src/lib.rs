@@ -5,6 +5,11 @@ mod calculator;
 mod device;
 #[cfg(target_os = "linux")]
 mod filesystem;
+#[cfg(target_os = "linux")]
+mod applications;
+
+#[cfg(target_os = "linux")]
+pub use applications::{ApplicationCatalog, ApplicationTarget};
 
 #[cfg(target_os = "linux")]
 pub use filesystem::FilesystemScopes;
@@ -26,6 +31,8 @@ pub fn supported_registry() -> AgentResult<ToolRegistry> {
         registry.register(ToolId::DeviceInfo)?;
         registry.register(ToolId::FileSearch)?;
         registry.register(ToolId::FileRead)?;
+        registry.register(ToolId::AppsList)?;
+        registry.register(ToolId::AppLaunch)?;
     }
     Ok(registry)
 }
@@ -35,6 +42,8 @@ pub fn supported_registry() -> AgentResult<ToolRegistry> {
 pub struct NativeTools {
     #[cfg(target_os = "linux")]
     filesystem: FilesystemScopes,
+    #[cfg(target_os = "linux")]
+    applications: ApplicationCatalog,
 }
 
 impl NativeTools {
@@ -45,6 +54,11 @@ impl NativeTools {
     #[cfg(target_os = "linux")]
     pub fn filesystem(&self) -> &FilesystemScopes {
         &self.filesystem
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn applications(&self) -> &ApplicationCatalog {
+        &self.applications
     }
 
     /// Own the non-cloneable permit through dispatch. The host must persist the
@@ -83,14 +97,26 @@ impl NativeTools {
             (ToolId::FileRead, ToolArguments::FileRead(args)) => {
                 self.filesystem.read(args, &context)
             }
+            #[cfg(target_os = "linux")]
+            (ToolId::AppsList, ToolArguments::Empty {}) => {
+                self.applications.list(&context)
+            }
+            #[cfg(target_os = "linux")]
+            (ToolId::AppLaunch, ToolArguments::AppLaunch(args)) => {
+                self.applications.launch(args, &context)
+            }
             _ => Err(AgentError::new(
                 AgentErrorCode::UnsupportedPlatform,
                 "The requested tool has no native adapter in this build.",
             )),
         };
 
-        // Never release a successful read after cancellation or deadline expiry.
-        context.check()?;
+        // A dispatched side effect must not be rewritten as a cancelled read.
+        // The runtime must record launch success or uncertainty even if the
+        // task is cancelled during dispatch; it must never retry a launch.
+        if call.tool() != ToolId::AppLaunch {
+            context.check()?;
+        }
         match result {
             Ok(output) => ToolObservation::success(call, output),
             Err(error) => ToolObservation::failure(call, error),
@@ -99,8 +125,8 @@ impl NativeTools {
 
 }
 
-/// Compatibility entry point for stateless tools. Scoped operations require
-/// the session-owned NativeTools instance and cannot use this empty store.
+/// Compatibility entry point for stateless tools. Scoped operations and
+/// application launching require the same session-owned NativeTools instance.
 pub fn execute(
     registry: &ToolRegistry,
     authorization: AuthorizedCall,
