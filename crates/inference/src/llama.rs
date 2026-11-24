@@ -111,6 +111,37 @@ impl InferenceProvider for LlamaProvider {
         Ok(info)
     }
 
+    fn decide(
+        &mut self,
+        request: &agent_core::agent::DecisionRequest,
+        cancellation: &Cancellation,
+    ) -> Result<agent_core::agent::DecisionResponse> {
+        let (Some(loaded), Some(backend)) = (&self.loaded, &self.backend) else {
+            return Err(InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first."));
+        };
+        // Conservative template compatibility gate, not a certification.
+        if !loaded.supports_thinking
+            || !loaded.template.contains("<|im_start|>")
+            || !loaded.template.contains("<|im_end|>")
+            || !loaded.template.contains("enable_thinking")
+        {
+            return Err(unsupported_template());
+        }
+        let generation = request.generation_request()?;
+        let mut text = String::new();
+        let mut emit = |delta: TextDelta| {
+            if text.len().saturating_add(delta.text.len()) > agent_core::agent::MAX_PROPOSAL_BYTES
+                || delta.text.contains('\u{fffd}')
+            {
+                return Err(InferenceError::new(ErrorCode::GenerationFailed, "Invalid or oversized agent decision output."));
+            }
+            text.push_str(&delta.text);
+            Ok(())
+        };
+        let stats = loaded.generate(backend, &generation, cancellation, &mut emit)?;
+        Ok(agent_core::agent::DecisionResponse { text, stats })
+    }
+
     fn unload(&mut self) {
         self.loaded.take();
     }

@@ -240,6 +240,42 @@ not executed. No test automatically launches a real application. Actual
 harmless launch and desktop approval checks are deferred to Codex.
 API reference: https://gtk-rs.org/gtk-rs-core/stable/0.18/docs/gio/struct.DesktopAppInfo.html
 
+## Part 07 — local model decision protocol
+
+Agent decisions have a separate typed request/response and worker submission
+path sharing the existing single-operation inference reservation. Ordinary
+chat generation is unchanged. The llama adapter accepts Qwen-style
+non-thinking templates using conservative compatibility checks, not a
+guarantee of actual model performance. Unsupported providers fail closed.
+
+For this MVP, use a prompted strict JSON protocol rather than native Qwen
+function-call messages or grammar-constrained sampling. The embedded chat
+template still renders system/user messages with thinking disabled and
+greedy sampling. The prompt includes registered tool descriptions/input
+schemas, active scope IDs and all prior current-task observations. Output is
+buffered privately, bounded at 16 KiB, and accepted only after normal end
+of generation. The parser distinguishes final answers from tool proposals,
+rejects extra/duplicate fields and delegates argument validation to the
+registry. Never extract JSON from prose, reasoning, Markdown or partial
+output. Parsing does not authorize or execute anything.
+
+The task and observations are encoded as JSON with angle brackets escaped
+to neutralize Qwen control-marker spellings in untrusted input. This is
+not a complete prompt-injection defense; deterministic policy is mandatory.
+Only fixed corrections are added for malformed proposals. The entire
+current-task transcript stays in the latest user payload, so existing
+tokenizer context checking rejects oversized requests instead of dropping
+observations. The default 2048-token context may be insufficient for all
+tool descriptions and several observations; later verification must
+evaluate a larger context or compact tool selection. The host must charge
+actual tokens or full reservation on unknown failures, set each call budget,
+enforce deadlines and manage retries. Missing scopes require a separate
+trusted user-picker flow. No ordinary conversation history is imported.
+
+Four ordinary regression cases are authored, not executed. No dependencies
+or model downloads were added. Actual Qwen reliability and template
+compatibility remain unverified. This is not native Qwen tool calling.
+
 ## Implementation sequence
 
 | Part | Scope | Status |
@@ -251,14 +287,14 @@ API reference: https://gtk-rs.org/gtk-rs-core/stable/0.18/docs/gio/struct.Deskto
 | 04 | Calculator and device tools | Implemented; unverified |
 | 05 | Linux filesystem tools | Implemented; unverified |
 | 06 | Linux application tools | Implemented; unverified |
-| 07 | Model decision protocol | Pending |
+| 07 | Model decision protocol | Implemented; unverified |
 | 08 | Bounded execution runtime | Pending |
 | 09 | SQLite task persistence | Pending |
 | 10 | Tauri commands and events | Pending |
 | 11 | Desktop agent UI | Pending |
 | 12 | Static integration review and handoff | Pending |
 
-All six Linux adapters exist as source, but UI integration,
+All six Linux adapters and the model decision protocol exist as source, but UI integration,
 persistent permission audit and model-driven execution remain pending. The
 core policy and native dispatcher must be wired into the trusted runtime
 before any action is available in the application.

@@ -6,6 +6,7 @@ mod task;
 mod tool;
 mod registry;
 mod policy;
+mod decision;
 
 pub use budget::{AgentBudget, AgentLimits, BudgetUsage};
 pub use error::{AgentError, AgentErrorCode, AgentResult};
@@ -22,3 +23,5 @@ pub use policy::{
     ApprovalRequest, AuditAction, AuthorizationDecision, AuthorizedCall, DenialReason,
     PermissionAudit, PermissionAuditBatch, PermissionEngine, ScopeKind, ScopeState, ScopeSummary,
 };
+
+pub use decision::{AgentDecision, DecisionRequest, DecisionResponse, DecisionStep, parse_decision};

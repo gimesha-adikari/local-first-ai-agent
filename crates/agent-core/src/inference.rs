@@ -201,6 +201,16 @@ impl Cancellation {
 pub trait InferenceProvider: 'static {
     fn load(&mut self, path: &Path, config: ModelConfig) -> Result<ModelInfo>;
     fn unload(&mut self);
+
+    /// Separate, buffered agent decision path. Providers may opt out.
+    fn decide(
+        &mut self,
+        _request: &crate::agent::DecisionRequest,
+        _cancellation: &Cancellation,
+    ) -> Result<crate::agent::DecisionResponse> {
+        Err(InferenceError::new(ErrorCode::UnsupportedTemplate, "This provider does not support agent decisions."))
+    }
+
     fn generate(
         &mut self,
         request: &GenerationRequest,
