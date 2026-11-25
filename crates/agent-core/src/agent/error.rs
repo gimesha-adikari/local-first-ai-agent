@@ -1,8 +1,8 @@
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentErrorCode {
     InvalidLimits,
@@ -14,8 +14,19 @@ pub enum AgentErrorCode {
     UnknownTool,
     InvalidArguments,
     PermissionDenied,
+    ScopeKindMismatch,
+    ApprovalDeclined,
+    ApprovalExpired,
     ToolFailed,
+    PdfEncrypted,
+    PdfNoText,
+    PdfInvalid,
+    PdfUnsupported,
+    PdfLimit,
+    PdfUnavailable,
     ModelFailed,
+    ModelContextLimit,
+    DecisionOutputLimit,
     StorageFailed,
     UnsupportedPlatform,
     Busy,

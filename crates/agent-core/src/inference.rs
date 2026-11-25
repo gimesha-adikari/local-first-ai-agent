@@ -3,11 +3,11 @@
 use std::{
     fmt,
     path::Path,
-    time::{Duration, Instant},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -104,19 +104,46 @@ pub struct GenerationRequest {
     pub enable_thinking: bool,
     #[serde(skip)]
     pub history: crate::chat::ChatHistory,
+    #[serde(skip)]
+    pub chat: Option<ChatGeneration>,
+}
+
+pub const MAX_CHAT_ATTEMPT_TOKENS: usize = 8192;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AssistantReplay {
+    pub prompt_fingerprint: u64,
+    pub generated: Vec<i32>,
+    pub utf8_tail: Vec<u8>,
+    pub excluded_turns: usize,
+}
+
+#[derive(Debug)]
+pub struct ChatGeneration {
+    pub adaptive: bool,
+    pub replay: Option<AssistantReplay>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputBudget {
+    pub requested: u32,
+    pub effective: u32,
+    pub context_length: u32,
 }
 
 impl GenerationRequest {
     pub fn new(prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),
-            max_tokens: 256,
+            max_tokens: 768,
             temperature: 0.7,
             top_p: 0.8,
             top_k: 20,
             seed: None,
             enable_thinking: false,
             history: crate::chat::ChatHistory::default(),
+            chat: None,
         }
     }
 
@@ -154,6 +181,9 @@ pub struct ModelInfo {
     pub file_bytes: u64,
     pub trained_context: u32,
     pub supports_thinking: bool,
+    /// Whether the loaded template passed a validated Agent decision format.
+    /// This is independent of Thinking support.
+    pub supports_agent: bool,
     pub config: ModelConfig,
     pub load_ms: u64,
 }
@@ -177,6 +207,10 @@ pub struct GenerationStats {
     pub elapsed_ms: u64,
     pub tokens_per_second: f64,
     pub excluded_turns: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_budget: Option<OutputBudget>,
+    #[serde(skip)]
+    pub assistant_replay: Option<AssistantReplay>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,10 +228,15 @@ impl Cancellation {
     /// A child shares explicit cancellation but adds a local monotonic deadline.
     /// Expiring the child does not change the parent's cancellation flag.
     pub fn with_timeout(&self, duration: Duration) -> Self {
-        let deadline = Instant::now().checked_add(duration).unwrap_or_else(Instant::now);
+        let deadline = Instant::now()
+            .checked_add(duration)
+            .unwrap_or_else(Instant::now);
         Self {
             cancelled: self.cancelled.clone(),
-            deadline: Some(self.deadline.map_or(deadline, |parent| parent.min(deadline))),
+            deadline: Some(
+                self.deadline
+                    .map_or(deadline, |parent| parent.min(deadline)),
+            ),
         }
     }
 
@@ -212,7 +251,8 @@ impl Cancellation {
 
     /// Whether this cancellation view deadline has elapsed.
     pub fn is_deadline_elapsed(&self) -> bool {
-        self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -232,7 +272,10 @@ pub trait InferenceProvider: 'static {
         _request: &crate::agent::DecisionRequest,
         _cancellation: &Cancellation,
     ) -> Result<crate::agent::DecisionResponse> {
-        Err(InferenceError::new(ErrorCode::UnsupportedTemplate, "This provider does not support agent decisions."))
+        Err(InferenceError::new(
+            ErrorCode::UnsupportedTemplate,
+            "This provider does not support agent decisions.",
+        ))
     }
 
     fn generate(

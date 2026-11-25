@@ -8,6 +8,8 @@ export type ModelInfo = {
   fileBytes: number;
   trainedContext: number;
   supportsThinking: boolean;
+  /** Validated for the Agent decision protocol; independent of Thinking. */
+  supportsAgent: boolean;
   config: ModelConfig;
   loadMs: number;
 };
@@ -24,7 +26,11 @@ export type GenerationStats = {
   elapsedMs: number;
   tokensPerSecond: number;
   excludedTurns: number;
+  /** Requested ceiling and effective output for the latest segment (Task 03-A). */
+  outputBudget?: OutputBudget | null;
 };
+
+export type OutputBudget = { requested: number; effective: number; contextLength: number };
 
 export type TextDelta = { text: string };
 export type Output = { id: number; text: string };

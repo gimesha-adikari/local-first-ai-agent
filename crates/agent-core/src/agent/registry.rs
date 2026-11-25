@@ -5,8 +5,9 @@ use serde_json::{Value, json, value::RawValue};
 
 use super::{
     AgentError, AgentErrorCode, AgentResult, ApplicationArgs, CalculatorArgs, FileReadArgs,
-    FileSearchArgs, MAX_OBSERVATION_BYTES, MAX_PROPOSAL_BYTES, PermissionRequirement, Risk,
-    ToolArguments, ToolDefinition, ToolId, ValidatedCall,
+    FileSearchArgs, MAX_OBSERVATION_BYTES, MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_PDF_RANGE_PAGES,
+    MAX_PROPOSAL_BYTES, PermissionRequirement, Risk, ToolArguments, ToolDefinition, ToolId,
+    ValidatedCall,
     tool::{valid_filter, valid_identifier, valid_relative_path, valid_text},
 };
 
@@ -77,7 +78,8 @@ impl ToolRegistry {
         if source.len() > MAX_PROPOSAL_BYTES {
             return Err(invalid_proposal());
         }
-        let proposal: Proposal<'_> = serde_json::from_str(source).map_err(|_| invalid_proposal())?;
+        let proposal: Proposal<'_> =
+            serde_json::from_str(source).map_err(|_| invalid_proposal())?;
         let id = self
             .definitions
             .keys()
@@ -110,9 +112,16 @@ impl ToolRegistry {
             ToolId::FileSearch => {
                 let args: FileSearchArgs = decode(arguments)?;
                 if !valid_identifier(&args.scope_id)
-                    || args.name_contains.as_deref().is_some_and(|s| !valid_filter(s, 128))
+                    || args
+                        .name_contains
+                        .as_deref()
+                        .is_some_and(|s| !valid_filter(s, 128))
                     || args.extension.as_deref().is_some_and(|s| {
-                        s.is_empty() || s.len() > 32 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                        s.is_empty()
+                            || s.len() > 32
+                            || !s
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                     })
                     || !(1..=100).contains(&args.max_results)
                     || args.max_depth > 8
@@ -124,7 +133,11 @@ impl ToolRegistry {
             ToolId::FileRead => {
                 let args: FileReadArgs = decode(arguments)?;
                 if !valid_identifier(&args.scope_id)
-                    || args.relative_path.as_deref().is_some_and(|s| !valid_relative_path(s))
+                    || args.pdf_pages.is_some_and(|pages| !pages.is_valid())
+                    || args
+                        .relative_path
+                        .as_deref()
+                        .is_some_and(|s| !valid_relative_path(s))
                 {
                     return Err(invalid_arguments());
                 }
@@ -147,15 +160,24 @@ fn decode<T: DeserializeOwned>(source: &str) -> AgentResult<T> {
 }
 
 fn invalid_proposal() -> AgentError {
-    AgentError::new(AgentErrorCode::InvalidProposal, "Expected one complete tool proposal.")
+    AgentError::new(
+        AgentErrorCode::InvalidProposal,
+        "Expected one complete tool proposal.",
+    )
 }
 
 fn invalid_arguments() -> AgentError {
-    AgentError::new(AgentErrorCode::InvalidArguments, "Tool arguments do not match the registered contract.")
+    AgentError::new(
+        AgentErrorCode::InvalidArguments,
+        "Tool arguments do not match the registered contract.",
+    )
 }
 
 fn unknown_tool() -> AgentError {
-    AgentError::new(AgentErrorCode::UnknownTool, "The requested tool is not registered.")
+    AgentError::new(
+        AgentErrorCode::UnknownTool,
+        "The requested tool is not registered.",
+    )
 }
 
 fn object(properties: Value, required: &[&str]) -> Value {
@@ -199,48 +221,86 @@ fn definition(id: ToolId) -> ToolDefinition {
             ToolId::DeviceInfo => (
                 "Read basic OS, CPU, memory, storage and optional GPU information.",
                 empty(),
-                object(json!({
-                    "os": text(256), "architecture": text(64), "cpu": text(256),
-                    "logical_cpus": {"type":"integer","minimum":1},
-                    "memory_total_bytes": unsigned(),
-                    "memory_available_bytes": nullable(unsigned()),
-                    "storage_total_bytes": nullable(unsigned()),
-                    "storage_available_bytes": nullable(unsigned()),
-                    "gpu": nullable(text(256))
-                }), &["os","architecture","cpu","logical_cpus","memory_total_bytes","memory_available_bytes","storage_total_bytes","storage_available_bytes","gpu"]),
+                object(
+                    json!({
+                        "os": text(256), "architecture": text(64), "cpu": text(256),
+                        "logical_cpus": {"type":"integer","minimum":1},
+                        "memory_total_bytes": unsigned(),
+                        "memory_available_bytes": nullable(unsigned()),
+                        "storage_total_bytes": nullable(unsigned()),
+                        "storage_available_bytes": nullable(unsigned()),
+                        "gpu": nullable(text(256))
+                    }),
+                    &[
+                        "os",
+                        "architecture",
+                        "cpu",
+                        "logical_cpus",
+                        "memory_total_bytes",
+                        "memory_available_bytes",
+                        "storage_total_bytes",
+                        "storage_available_bytes",
+                        "gpu",
+                    ],
+                ),
                 Risk::Low,
                 PermissionRequirement::Automatic,
                 3000,
                 "None",
             ),
             ToolId::FileSearch => (
-                "Search filenames in an authorized directory; extension excludes the leading dot. Depth zero searches immediate entries.",
-                object(json!({
-                    "scope_id": identifier(),
-                    "name_contains": nullable(text(128)),
-                    "extension": nullable(json!({"type":"string","pattern":"^[A-Za-z0-9_-]{1,32}$"})),
-                    "max_results": {"type":"integer","minimum":1,"maximum":100,"default":100},
-                    "max_depth": {"type":"integer","minimum":0,"maximum":8,"default":8}
-                }), &["scope_id"]),
-                object(json!({"paths":{"type":"array","maxItems":100,"items":text(1024)},"truncated":{"type":"boolean"}}), &["paths","truncated"]),
+                "Search filenames in an authorized directory. For a file type such as PDF use extension='pdf' (exact, case-insensitive final suffix without the dot). name_contains is an independent filename substring, not a type filter. Depth zero searches immediate entries.",
+                object(
+                    json!({
+                        "scope_id": identifier(),
+                        "name_contains": nullable(text(128)),
+                        "extension": nullable(json!({"type":"string","pattern":"^[A-Za-z0-9_-]{1,32}$"})),
+                        "max_results": {"type":"integer","minimum":1,"maximum":100,"default":100},
+                        "max_depth": {"type":"integer","minimum":0,"maximum":8,"default":8}
+                    }),
+                    &["scope_id"],
+                ),
+                object(
+                    json!({"paths":{"type":"array","maxItems":100,"items":text(1024)},"truncated":{"type":"boolean"},"extension":nullable(text(32))}),
+                    &["paths", "truncated", "extension"],
+                ),
                 Risk::ScopedRead,
                 PermissionRequirement::DirectoryRead,
                 5000,
                 "Reads authorized filenames only",
             ),
             ToolId::FileRead => (
-                "Read a bounded UTF-8 text preview. Omit relative_path for a selected file; use a relative path for an authorized directory.",
-                object(json!({"scope_id":identifier(),"relative_path":nullable(text(1024))}), &["scope_id"]),
-                object(json!({"content":{"type":"string","maxLength":4096},"file_bytes":{"type":"integer","minimum":0,"maximum":65536},"truncated":{"type":"boolean"}}), &["content","file_bytes","truncated"]),
+                "Read bounded local UTF-8 text or selectable PDF text. Omit relative_path for a selected file; use a relative path for an authorized directory. Use pdf_pages only when the user specifies PDF page numbers; the range is inclusive and limited to four pages. For a document summary omit pdf_pages to read up to the first four available pages. First document means the first file, irrespective of page number.",
+                object(
+                    json!({"scope_id":identifier(),"relative_path":nullable(text(1024)), "pdf_pages":nullable(object(
+                        json!({"first_page":{"type":"integer","minimum":1,"maximum":MAX_PDF_PAGES},"last_page":{"type":"integer","minimum":1,"maximum":MAX_PDF_PAGES}}),
+                        &["first_page", "last_page"],
+                    ))}),
+                    &["scope_id"],
+                ),
+                json!({"oneOf":[object(
+                    json!({"content":{"type":"string","maxLength":4096},"file_bytes":{"type":"integer","minimum":0,"maximum":65536},"truncated":{"type":"boolean"}}),
+                    &["content", "file_bytes", "truncated"],
+                ), object(json!({
+                    "pages":{"type":"array","minItems":1,"maxItems":MAX_PDF_RANGE_PAGES,"items":object(json!({"page_number":{"type":"integer","minimum":1,"maximum":MAX_PDF_PAGES},"text":{"type":"string","maxLength":4096},"truncated":{"type":"boolean"}}), &["page_number","text","truncated"])},
+                    "page_count":{"type":"integer","minimum":1,"maximum":MAX_PDF_PAGES},
+                    "first_page":{"type":"integer","minimum":1,"maximum":MAX_PDF_PAGES},
+                    "last_page":{"type":"integer","minimum":1,"maximum":MAX_PDF_PAGES},
+                    "file_bytes":{"type":"integer","minimum":1,"maximum":MAX_PDF_BYTES},
+                    "truncated":{"type":"boolean"},
+                }), &["pages","page_count","first_page","last_page","file_bytes","truncated"])]}),
                 Risk::ScopedRead,
                 PermissionRequirement::ResourceRead,
-                3000,
-                "Reads authorized text only",
+                6000,
+                "Reads authorized text and selectable PDF text only",
             ),
             ToolId::AppsList => (
                 "List discoverable local desktop applications and their opaque identifiers.",
                 empty(),
-                object(json!({"applications":{"type":"array","maxItems":100,"items":object(json!({"app_id":identifier(),"display_name":text(256)}), &["app_id","display_name"])},"truncated":{"type":"boolean"}}), &["applications","truncated"]),
+                object(
+                    json!({"applications":{"type":"array","maxItems":100,"items":object(json!({"app_id":identifier(),"display_name":text(256)}), &["app_id","display_name"])},"truncated":{"type":"boolean"}}),
+                    &["applications", "truncated"],
+                ),
                 Risk::Low,
                 PermissionRequirement::Automatic,
                 5000,
@@ -249,7 +309,10 @@ fn definition(id: ToolId) -> ToolDefinition {
             ToolId::AppLaunch => (
                 "Request launch of an application from trusted discovery. Requires approval for every launch.",
                 object(json!({"app_id":identifier()}), &["app_id"]),
-                object(json!({"app_id":identifier(),"dispatched":{"const":true}}), &["app_id","dispatched"]),
+                object(
+                    json!({"app_id":identifier(),"dispatched":{"const":true}}),
+                    &["app_id", "dispatched"],
+                ),
                 Risk::SideEffect,
                 PermissionRequirement::ConfirmEveryLaunch,
                 5000,

@@ -7,5 +7,7 @@ mod llama;
 mod worker;
 
 #[cfg(feature = "llama")]
+pub use gguf::trained_context;
+#[cfg(feature = "llama")]
 pub use llama::LlamaProvider;
 pub use worker::{InferenceWorker, Pending, Phase, Status};

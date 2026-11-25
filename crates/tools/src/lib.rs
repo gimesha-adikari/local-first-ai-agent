@@ -1,12 +1,14 @@
 //! Native tool adapters. Dispatch consumes an authorization from agent-core.
 
+#[cfg(target_os = "linux")]
+mod applications;
 mod calculator;
 #[cfg(target_os = "linux")]
 mod device;
 #[cfg(target_os = "linux")]
 mod filesystem;
 #[cfg(target_os = "linux")]
-mod applications;
+mod pdf;
 
 #[cfg(target_os = "linux")]
 pub use applications::{ApplicationCatalog, ApplicationTarget};
@@ -71,7 +73,10 @@ impl NativeTools {
     ) -> AgentResult<ToolObservation> {
         let call = authorization.call();
         let definition = registry.get(call.tool()).ok_or_else(|| {
-            AgentError::new(AgentErrorCode::UnknownTool, "The requested tool is not registered.")
+            AgentError::new(
+                AgentErrorCode::UnknownTool,
+                "The requested tool is not registered.",
+            )
         })?;
         authorization.check_dispatch()?;
         let context = ToolContext {
@@ -98,9 +103,7 @@ impl NativeTools {
                 self.filesystem.read(args, &context)
             }
             #[cfg(target_os = "linux")]
-            (ToolId::AppsList, ToolArguments::Empty {}) => {
-                self.applications.list(&context)
-            }
+            (ToolId::AppsList, ToolArguments::Empty {}) => self.applications.list(&context),
             #[cfg(target_os = "linux")]
             (ToolId::AppLaunch, ToolArguments::AppLaunch(args)) => {
                 self.applications.launch(args, &context)
@@ -122,7 +125,6 @@ impl NativeTools {
             Err(error) => ToolObservation::failure(call, error),
         }
     }
-
 }
 
 /// Compatibility entry point for stateless tools. Scoped operations and
@@ -144,7 +146,10 @@ impl ToolContext<'_> {
     fn check(&self) -> AgentResult<()> {
         self.authorization.check_live()?;
         if self.started.elapsed() >= self.timeout {
-            return Err(AgentError::new(AgentErrorCode::TimedOut, "The tool deadline expired."));
+            return Err(AgentError::new(
+                AgentErrorCode::TimedOut,
+                "The tool deadline expired.",
+            ));
         }
         Ok(())
     }

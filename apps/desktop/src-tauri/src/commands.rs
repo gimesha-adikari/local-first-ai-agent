@@ -7,19 +7,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::agent::AgentSession;
 use agent_core::{
     chat::{
         ChatStore, Conversation, ConversationId, ConversationSummary, GenerationState, Message,
         MessageId, ModelId, ModelReference, ModelSettings, Preferences, TurnAction,
         validate_system_prompt, validate_title,
     },
-    inference::{ErrorCode, GenerationRequest, InferenceError, ModelInfo, Result},
+    inference::{ErrorCode, GenerationRequest, GenerationStats, InferenceError, ModelInfo, Result},
 };
 use inference::{InferenceWorker, Pending, Phase, Status};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use storage::SqliteStore;
 use tauri::{State, ipc::Channel};
-use crate::agent::AgentSession;
 
 pub struct Desktop {
     pub worker: Arc<InferenceWorker>,
@@ -30,7 +30,7 @@ pub struct Desktop {
     pub active_model: AtomicI64,
 }
 
-fn database(db: &Mutex<SqliteStore>) -> Result<MutexGuard<'_, SqliteStore>> {
+pub(crate) fn database(db: &Mutex<SqliteStore>) -> Result<MutexGuard<'_, SqliteStore>> {
     db.lock().map_err(|_| {
         InferenceError::new(
             ErrorCode::Storage,
@@ -49,8 +49,11 @@ impl Drop for OperationGuard {
 
 impl Desktop {
     pub(crate) fn reserve(&self) -> Result<OperationGuard> {
-        self.operations.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map_err(|_| InferenceError::new(ErrorCode::Busy, "Wait for the current operation to finish."))?;
+        self.operations
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| {
+                InferenceError::new(ErrorCode::Busy, "Wait for the current operation to finish.")
+            })?;
         Ok(OperationGuard(Arc::clone(&self.operations)))
     }
 
@@ -137,7 +140,9 @@ pub fn set_system_prompt(
 #[tauri::command]
 pub fn delete_conversation(state: State<'_, Desktop>, id: ConversationId) -> Result<()> {
     let _operation = state.reserve()?;
-    database(&state.database)?.delete(id)
+    database(&state.database)?.delete(id)?;
+    state.agent.forget_conversation(id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -167,10 +172,25 @@ pub async fn choose_model(state: State<'_, Desktop>) -> Result<Option<ModelRefer
                 "The picker did not return a file name.",
             )
         })?
-        .to_string_lossy();
-    let mut db = database(&state.database)?;
-    let defaults = db.preferences()?.defaults;
-    db.remember_model(path, &name, defaults).map(Some)
+        .to_string_lossy()
+        .into_owned();
+    let defaults = database(&state.database)?.preferences()?.defaults;
+    let defaults = if defaults == ModelSettings::recommended(8192) {
+        let path = path.to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            let (trained_context, bytes) = inference::trained_context(&path)?;
+            Ok(recommended_for_model(trained_context, bytes))
+        })
+        .await
+        .map_err(|_| {
+            InferenceError::new(ErrorCode::InvalidModel, "Could not inspect the GGUF model.")
+        })??
+    } else {
+        defaults
+    };
+    database(&state.database)?
+        .remember_model(path, &name, defaults)
+        .map(Some)
 }
 
 #[tauri::command]
@@ -277,10 +297,34 @@ fn transcript_lock(transcript: &Mutex<Transcript>) -> Result<MutexGuard<'_, Tran
     })
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatOptions {
+    #[serde(default)]
+    enable_thinking: bool,
+    max_tokens: Option<u32>,
+}
+
+#[cfg(test)]
+#[test]
+fn chat_options_default_to_direct_and_use_camel_case() {
+    let direct: ChatOptions = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(!direct.enable_thinking);
+    assert_eq!(direct.max_tokens, None);
+    let explicit: ChatOptions =
+        serde_json::from_value(serde_json::json!({"enableThinking":true,"maxTokens":768})).unwrap();
+    assert!(explicit.enable_thinking);
+    assert_eq!(explicit.max_tokens, Some(768));
+    assert!(
+        serde_json::from_value::<ChatOptions>(serde_json::json!({"enable_thinking":true})).is_err()
+    );
+}
+
 async fn run_turn(
     state: &Desktop,
     id: ConversationId,
     action: TurnAction,
+    options: ChatOptions,
     events: Channel<ChatEvent>,
 ) -> Result<Message> {
     let _operation = state.reserve()?;
@@ -297,18 +341,55 @@ async fn run_turn(
     if let TurnAction::Send(content) = &action {
         GenerationRequest::new(content).validate()?;
     }
-    let (turn, mut settings) = {
+    let (mut turn, settings) = {
         let mut db = database(&state.database)?;
-        let settings = db.model(model_id)?.reference.settings;
-        (db.begin(id, action)?, settings)
+        let mut settings = db.model(model_id)?.reference.settings;
+        settings.enable_thinking = options.enable_thinking;
+        if let Some(max_tokens) = options.max_tokens {
+            settings.max_tokens = max_tokens;
+        }
+        settings.validate()?;
+        if settings.enable_thinking
+            && !status
+                .model
+                .as_ref()
+                .is_some_and(|model| model.supports_thinking)
+        {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "This model does not support thinking mode. Send without thinking.",
+            ));
+        }
+        let model_name = status.model.as_ref().map(|model| model.file_name.as_str());
+        (
+            db.begin_chat_attempt(id, action, model_name, model_id, settings)?,
+            settings,
+        )
     };
-    settings.enable_thinking &= status.model.is_some_and(|model| model.supports_thinking);
+    let mut request = settings.request(
+        std::mem::take(&mut turn.prompt),
+        std::mem::take(&mut turn.history),
+    );
+    request.chat = Some(agent_core::inference::ChatGeneration {
+        adaptive: options.max_tokens.is_none(),
+        replay: None,
+    });
+    stream_chat(state, turn, request, events, None).await
+}
+
+async fn stream_chat(
+    state: &Desktop,
+    turn: agent_core::chat::PendingTurn,
+    request: GenerationRequest,
+    events: Channel<ChatEvent>,
+    previous: Option<GenerationStats>,
+) -> Result<Message> {
     let mut assistant = turn.assistant;
     let message_id = assistant.id;
     let transcript = Arc::new(Mutex::new(Transcript {
-        text: String::new(),
+        text: assistant.content.clone(),
         checkpoint_at: Instant::now(),
-        checkpoint_bytes: 0,
+        checkpoint_bytes: assistant.content.len(),
     }));
     let buffer = Arc::clone(&transcript);
     let db = Arc::clone(&state.database);
@@ -317,17 +398,14 @@ async fn run_turn(
         // hold back deltas until the initial message has been sent.
         let _first_event = transcript_lock(&transcript)?;
         let deltas = events.clone();
-        let pending =
-            state
-                .worker
-                .generate(settings.request(turn.prompt, turn.history), move |delta| {
-                    transcript_lock(&buffer)?.push(&delta.text, &db, message_id)?;
-                    let _ = deltas.send(ChatEvent::Delta {
-                        id: message_id,
-                        text: delta.text,
-                    });
-                    Ok(())
-                });
+        let pending = state.worker.generate(request, move |delta| {
+            transcript_lock(&buffer)?.push(&delta.text, &db, message_id)?;
+            let _ = deltas.send(ChatEvent::Delta {
+                id: message_id,
+                text: delta.text,
+            });
+            Ok(())
+        });
         if pending.is_ok() {
             let _ = events.send(ChatEvent::Started {
                 user: turn.user,
@@ -340,18 +418,35 @@ async fn run_turn(
         Ok(pending) => wait_for(pending).await,
         Err(error) => Err(error),
     };
-
-    assistant.content = std::mem::take(&mut transcript_lock(&transcript)?.text);
-    assistant.state = generated.as_ref().map_or(GenerationState::Failed, |stats| {
-        GenerationState::from_finish(stats.reason)
-    });
+    let content = std::mem::take(&mut transcript_lock(&transcript)?.text);
+    let generated = match generated {
+        Ok(mut stats) => {
+            if let Some(prior) = &previous {
+                stats.generated_tokens = stats
+                    .generated_tokens
+                    .saturating_add(prior.generated_tokens);
+            }
+            stats
+        }
+        Err(error) => {
+            let (state_after, stats) = if content == assistant.content && previous.is_some() {
+                (GenerationState::Truncated, previous.as_ref())
+            } else {
+                (GenerationState::Failed, None)
+            };
+            database(&state.database)?.finish(message_id, &content, state_after, stats)?;
+            return Err(error);
+        }
+    };
+    assistant.content = content;
+    assistant.state = GenerationState::from_output(generated.reason, &assistant.content);
     database(&state.database)?.finish(
         message_id,
         &assistant.content,
         assistant.state,
-        generated.as_ref().ok(),
+        Some(&generated),
     )?;
-    assistant.stats = Some(generated?);
+    assistant.stats = Some(generated);
     Ok(assistant)
 }
 
@@ -360,18 +455,143 @@ pub async fn send_message(
     state: State<'_, Desktop>,
     id: ConversationId,
     content: String,
+    options: Option<ChatOptions>,
     events: Channel<ChatEvent>,
 ) -> Result<Message> {
-    run_turn(&state, id, TurnAction::Send(content), events).await
+    run_turn(
+        &state,
+        id,
+        TurnAction::Send(content),
+        options.unwrap_or_default(),
+        events,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn regenerate(
     state: State<'_, Desktop>,
     id: ConversationId,
+    options: Option<ChatOptions>,
     events: Channel<ChatEvent>,
 ) -> Result<Message> {
-    run_turn(&state, id, TurnAction::Regenerate, events).await
+    run_turn(
+        &state,
+        id,
+        TurnAction::Regenerate,
+        options.unwrap_or_default(),
+        events,
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendedChatSettings {
+    settings: ModelSettings,
+    trained_context: Option<u32>,
+}
+
+pub(crate) fn recommended_for_model(trained_context: u32, file_bytes: u64) -> ModelSettings {
+    // Leave room for the inference context and other allocations on Linux.
+    // MemAvailable includes reclaimable cache, such as mapped model pages.
+    let available = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|info| {
+            let line = info
+                .lines()
+                .find_map(|line| line.strip_prefix("MemAvailable:"))?;
+            let kib: u64 = line.split_whitespace().next()?.parse().ok()?;
+            kib.checked_mul(1024)
+        });
+    let context = match available {
+        Some(bytes) if bytes >= file_bytes.saturating_add(2 << 30) => 8192,
+        Some(bytes) if bytes < file_bytes.saturating_add(1 << 30) => 2048,
+        _ => 4096,
+    };
+    ModelSettings::recommended(trained_context.min(context))
+}
+
+#[tauri::command]
+pub fn recommended_chat_settings(state: State<'_, Desktop>) -> Result<RecommendedChatSettings> {
+    let model = state.worker.status()?.model;
+    let trained_context = model.as_ref().map(|model| model.trained_context);
+    let settings = model.map_or_else(
+        || ModelSettings::recommended(8192),
+        |model| recommended_for_model(model.trained_context, model.file_bytes),
+    );
+    Ok(RecommendedChatSettings {
+        settings,
+        trained_context,
+    })
+}
+
+#[tauri::command]
+pub fn chat_continuation_remaining(
+    state: State<'_, Desktop>,
+    id: ConversationId,
+    message_id: MessageId,
+) -> Result<u32> {
+    let model = state.active_model().ok_or_else(|| {
+        InferenceError::new(
+            ErrorCode::NoModel,
+            "Load the original model to continue this response.",
+        )
+    })?;
+    database(&state.database)?.continuation_remaining(id, message_id, model)
+}
+
+#[tauri::command]
+pub async fn continue_chat(
+    state: State<'_, Desktop>,
+    id: ConversationId,
+    message_id: MessageId,
+    max_tokens: Option<u32>,
+    events: Channel<ChatEvent>,
+) -> Result<Message> {
+    let _operation = state.reserve()?;
+    if max_tokens.is_some_and(|value| !(1..=4096).contains(&value)) {
+        return Err(InferenceError::new(
+            ErrorCode::InvalidConfig,
+            "Use 1–4096 continuation tokens.",
+        ));
+    }
+    let model = state.active_model().ok_or_else(|| {
+        InferenceError::new(
+            ErrorCode::NoModel,
+            "Load the original model to continue this response.",
+        )
+    })?;
+    let status = state.worker.status()?;
+    if status.phase != Phase::Ready {
+        return Err(InferenceError::new(
+            ErrorCode::Busy,
+            "Wait for the model to be ready.",
+        ));
+    }
+    let (mut plan, saved_limit) = {
+        let mut db = database(&state.database)?;
+        let saved_limit = db.model(model)?.reference.settings.max_tokens;
+        (db.begin_continuation(id, message_id, model)?, saved_limit)
+    };
+    let mut request = plan.settings.request(
+        std::mem::take(&mut plan.turn.prompt),
+        std::mem::take(&mut plan.turn.history),
+    );
+    request.max_tokens = max_tokens.unwrap_or(saved_limit);
+    plan.previous_stats.assistant_replay = Some(plan.replay.clone());
+    request.chat = Some(agent_core::inference::ChatGeneration {
+        adaptive: true,
+        replay: Some(plan.replay),
+    });
+    stream_chat(
+        &state,
+        plan.turn,
+        request,
+        events,
+        Some(plan.previous_stats),
+    )
+    .await
 }
 
 #[tauri::command]

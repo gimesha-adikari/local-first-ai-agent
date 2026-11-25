@@ -14,10 +14,14 @@ use agent_core::{
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 mod agent;
+mod continuation;
+mod conversation;
+pub use continuation::ContinuationPlan;
+pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 5;
 const NEW_TITLE: &str = "New conversation";
 
 /// Local storage for one app instance. Exclusive locking protects crash recovery
@@ -36,6 +40,7 @@ impl SqliteStore {
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
                  PRAGMA trusted_schema = OFF;
+                 PRAGMA secure_delete = ON;
                  PRAGMA locking_mode = EXCLUSIVE;",
             )
             .map_err(sql_error)?;
@@ -53,11 +58,48 @@ impl SqliteStore {
             ));
         }
         if version == 0 {
-            transaction.execute_batch(include_str!("../migrations/001_chat.sql")).map_err(sql_error)?;
+            transaction
+                .execute_batch(include_str!("../migrations/001_chat.sql"))
+                .map_err(sql_error)?;
+            let preferences = Preferences {
+                defaults: ModelSettings::recommended(8192),
+                ..Preferences::default()
+            };
+            let encoded = serde_json::to_string(&preferences).map_err(|_| storage_error())?;
+            transaction
+                .execute(
+                    "INSERT INTO application_preferences (id, preferences) VALUES (1, ?1)",
+                    [encoded],
+                )
+                .map_err(sql_error)?;
         }
         if version < 2 {
-            transaction.execute_batch(include_str!("../migrations/002_agent.sql")).map_err(sql_error)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(sql_error)?;
+            transaction
+                .execute_batch(include_str!("../migrations/002_agent.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 3 {
+            transaction
+                .execute_batch(include_str!(
+                    "../migrations/003_conversation_agent_turns.sql"
+                ))
+                .map_err(sql_error)?;
+        }
+        if version < 4 {
+            transaction
+                .execute_batch(include_str!("../migrations/004_agent_turn_status.sql"))
+                .map_err(sql_error)?;
+            transaction
+                .execute_batch(include_str!("../migrations/004_chat_continuation.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 5 {
+            transaction
+                .execute_batch(include_str!("../migrations/005_bundled_model.sql"))
+                .map_err(sql_error)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(sql_error)?;
         }
         agent::recover_interrupted(&transaction, None).map_err(|_| storage_error())?;
         transaction
@@ -66,9 +108,262 @@ impl SqliteStore {
                 [],
             )
             .map_err(sql_error)?;
+        transaction
+            .execute(
+                "UPDATE chat_attempt_replay SET replay=NULL WHERE replay IS NOT NULL
+             AND message_id IN (SELECT id FROM messages WHERE state <> 'truncated')",
+                [],
+            )
+            .map_err(sql_error)?;
         transaction.commit().map_err(sql_error)?;
         Ok(Self { connection })
     }
+}
+
+/// Result of registering the application-bundled model.
+#[derive(Debug, Clone)]
+pub struct BundledRegistration {
+    pub reference: ModelReference,
+    /// True when no user-imported model exists, so the bundled model is the
+    /// only choice and may be loaded automatically.
+    pub only_model: bool,
+}
+
+impl SqliteStore {
+    /// Record the bundled model without changing user-imported rows, existing
+    /// settings or recent-use order. A new row is listed after earlier models.
+    pub fn register_bundled_model(
+        &mut self,
+        resource: &str,
+        path: &Path,
+        name: &str,
+        settings: ModelSettings,
+    ) -> Result<BundledRegistration> {
+        settings.validate()?;
+        let path = path
+            .to_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                InferenceError::new(
+                    ErrorCode::InvalidPath,
+                    "The bundled model path could not be saved as Unicode.",
+                )
+            })?;
+        if resource.is_empty() || name.is_empty() {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidPath,
+                "The bundled model identity is invalid.",
+            ));
+        }
+        let encoded = serde_json::to_string(&settings).map_err(|_| storage_error())?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let previous: Option<(ModelId, String)> = transaction
+            .query_row(
+                "SELECT id, path FROM models WHERE bundled_resource = ?1",
+                [resource],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let at_path: Option<ModelId> = transaction
+            .query_row("SELECT id FROM models WHERE path = ?1", [path], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(sql_error)?;
+        let id = match (previous, at_path) {
+            (Some((id, old)), _) if old == path => id,
+            // The same file is already listed (for example a manual import).
+            // Mark that row instead of creating a duplicate.
+            (previous, Some(existing)) => {
+                if let Some((id, _)) = previous {
+                    transaction
+                        .execute(
+                            "UPDATE models SET bundled_resource = NULL WHERE id = ?1",
+                            [id],
+                        )
+                        .map_err(sql_error)?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE models SET bundled_resource = ?1 WHERE id = ?2",
+                        params![resource, existing],
+                    )
+                    .map_err(sql_error)?;
+                existing
+            }
+            // The resource moved (reinstall or relocated bundle).
+            (Some((id, _)), None) => {
+                transaction
+                    .execute(
+                        "UPDATE models SET path = ?1, file_name = ?2 WHERE id = ?3",
+                        params![path, name, id],
+                    )
+                    .map_err(sql_error)?;
+                id
+            }
+            (None, None) => transaction
+                .query_row(
+                    "INSERT INTO models (path, file_name, settings, last_used_at, bundled_resource)
+                     VALUES (?1, ?2, ?3, 0, ?4) RETURNING id",
+                    params![path, name, encoded, resource],
+                    |row| row.get(0),
+                )
+                .map_err(sql_error)?,
+        };
+        let others: i64 = transaction
+            .query_row("SELECT count(*) FROM models WHERE id <> ?1", [id], |row| {
+                row.get(0)
+            })
+            .map_err(sql_error)?;
+        let reference = transaction
+            .query_row(
+                "SELECT id, file_name, settings FROM models WHERE id = ?1",
+                [id],
+                model_reference,
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(BundledRegistration {
+            reference,
+            only_model: others == 0,
+        })
+    }
+
+    pub fn begin_chat(
+        &mut self,
+        id: ConversationId,
+        action: TurnAction,
+        model_name: Option<&str>,
+    ) -> Result<PendingTurn> {
+        self.begin_chat_inner(id, action, model_name, None)
+    }
+
+    pub fn begin_chat_attempt(
+        &mut self,
+        id: ConversationId,
+        action: TurnAction,
+        model_name: Option<&str>,
+        model_id: ModelId,
+        settings: ModelSettings,
+    ) -> Result<PendingTurn> {
+        self.begin_chat_inner(id, action, model_name, Some((model_id, settings)))
+    }
+
+    fn begin_chat_inner(
+        &mut self,
+        id: ConversationId,
+        action: TurnAction,
+        model_name: Option<&str>,
+        recipe: Option<(ModelId, ModelSettings)>,
+    ) -> Result<PendingTurn> {
+        let now = unix_ms()?;
+        let transaction = self.connection.transaction().map_err(sql_error)?;
+        let generating: bool = transaction
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM messages WHERE state = 'streaming')
+                    OR EXISTS (SELECT 1 FROM agent_tasks WHERE finalized = 0)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if generating {
+            return Err(active_generation());
+        }
+        let mut conversation = read_conversation(&transaction, id)?;
+        let first_message = conversation.messages.is_empty();
+        let user = match action {
+            TurnAction::Send(content) => {
+                GenerationRequest::new(&content).validate()?;
+                let user = insert_message(
+                    &transaction,
+                    id,
+                    next_position(&conversation)?,
+                    MessageRole::User,
+                    GenerationState::Complete,
+                    content,
+                    now,
+                )?;
+                conversation.messages.push(user.clone());
+                Some(user)
+            }
+            TurnAction::Regenerate => {
+                if let Some(user) = conversation
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == MessageRole::User)
+                {
+                    let agent_turn: bool = transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM conversation_agent_turns WHERE user_message_id = ?1)",
+                        [user.id], |row| row.get(0),
+                    ).map_err(sql_error)?;
+                    if agent_turn {
+                        return Err(InferenceError::new(
+                            ErrorCode::InvalidConfig,
+                            "Send a new Chat message after an Agent turn.",
+                        ));
+                    }
+                }
+                None
+            }
+        };
+        let (history, prompt) = prepare_history(&conversation)?;
+        let assistant = insert_message(
+            &transaction,
+            id,
+            next_position(&conversation)?,
+            MessageRole::Assistant,
+            GenerationState::Streaming,
+            String::new(),
+            now,
+        )?;
+        if let Some(name) = model_name {
+            transaction
+                .execute(
+                    "UPDATE messages SET model_name = ?1 WHERE id = ?2",
+                    params![name, assistant.id],
+                )
+                .map_err(sql_error)?;
+        }
+        if let Some((model_id, settings)) = recipe {
+            continuation::remember_attempt(&transaction, assistant.id, model_id, settings)?;
+        }
+        if first_message && conversation.title == NEW_TITLE {
+            title_from_prompt(&transaction, id, &prompt)?;
+        }
+        touch_conversation(&transaction, id, now)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(PendingTurn {
+            user,
+            assistant,
+            history,
+            prompt,
+        })
+    }
+}
+
+fn title_from_prompt(connection: &Connection, id: ConversationId, prompt: &str) -> Result<()> {
+    let preview: String = prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(60)
+        .collect();
+    if !preview.is_empty() {
+        connection
+            .execute(
+                "UPDATE conversations SET title = ?1 WHERE id = ?2",
+                params![preview, id],
+            )
+            .map_err(sql_error)?;
+    }
+    Ok(())
 }
 
 impl ChatStore for SqliteStore {
@@ -149,94 +444,11 @@ impl ChatStore for SqliteStore {
     }
 
     fn delete(&mut self, id: ConversationId) -> Result<()> {
-        let generating: bool = self
-            .connection
-            .query_row(
-                "SELECT EXISTS (
-                    SELECT 1 FROM messages WHERE conversation_id = ?1 AND state = 'streaming'
-                 )",
-                [id],
-                |row| row.get(0),
-            )
-            .map_err(sql_error)?;
-        if generating {
-            return Err(active_generation());
-        }
-        updated(
-            self.connection
-                .execute("DELETE FROM conversations WHERE id = ?1", [id]),
-        )
+        self.delete_with_agent_turns(id)
     }
 
     fn begin(&mut self, id: ConversationId, action: TurnAction) -> Result<PendingTurn> {
-        let now = unix_ms()?;
-        let transaction = self.connection.transaction().map_err(sql_error)?;
-        let generating: bool = transaction
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM messages WHERE state = 'streaming')
-                    OR EXISTS (SELECT 1 FROM agent_tasks WHERE finalized = 0)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sql_error)?;
-        if generating {
-            return Err(active_generation());
-        }
-        let mut conversation = read_conversation(&transaction, id)?;
-        let first_message = conversation.messages.is_empty();
-        let user = match action {
-            TurnAction::Send(content) => {
-                GenerationRequest::new(&content).validate()?;
-                let user = insert_message(
-                    &transaction,
-                    id,
-                    next_position(&conversation)?,
-                    MessageRole::User,
-                    GenerationState::Complete,
-                    content,
-                    now,
-                )?;
-                conversation.messages.push(user.clone());
-                Some(user)
-            }
-            TurnAction::Regenerate => None,
-        };
-        let (history, prompt) = prepare_history(&conversation)?;
-        let assistant = insert_message(
-            &transaction,
-            id,
-            next_position(&conversation)?,
-            MessageRole::Assistant,
-            GenerationState::Streaming,
-            String::new(),
-            now,
-        )?;
-        if first_message && conversation.title == NEW_TITLE {
-            let preview: String = prompt
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(60)
-                .collect();
-            if !preview.is_empty() {
-                transaction
-                    .execute(
-                        "UPDATE conversations SET title = ?1 WHERE id = ?2",
-                        params![preview, id],
-                    )
-                    .map_err(sql_error)?;
-            }
-        }
-        touch_conversation(&transaction, id, now)?;
-        transaction.commit().map_err(sql_error)?;
-        Ok(PendingTurn {
-            user,
-            assistant,
-            history,
-            prompt,
-        })
+        self.begin_chat(id, action, None)
     }
 
     fn checkpoint(&mut self, message_id: MessageId, content: &str) -> Result<()> {
@@ -267,6 +479,15 @@ impl ChatStore for SqliteStore {
                 "Completing generation requires a final state.",
             ));
         }
+        let replay = stats.and_then(|stats| stats.assistant_replay.as_ref());
+        let replay = if state == GenerationState::Truncated {
+            replay
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|_| storage_error())?
+        } else {
+            None
+        };
         let stats = stats
             .map(serde_json::to_string)
             .transpose()
@@ -283,6 +504,12 @@ impl ChatStore for SqliteStore {
             .optional()
             .map_err(sql_error)?
             .ok_or_else(inactive_generation)?;
+        transaction
+            .execute(
+                "UPDATE chat_attempt_replay SET replay=?1 WHERE message_id=?2",
+                params![replay, message_id],
+            )
+            .map_err(sql_error)?;
         touch_conversation(&transaction, conversation, unix_ms()?)?;
         transaction.commit().map_err(sql_error)
     }

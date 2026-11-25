@@ -58,6 +58,11 @@ fn initializes_schema_and_preserves_conversations_across_reopen() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
+    let defaults = store.preferences().unwrap().defaults;
+    assert_eq!(defaults.model.context_length, 8192);
+    assert_eq!(defaults.max_tokens, 4096);
+    assert_eq!(defaults.model.threads, 4);
+    assert!(!defaults.enable_thinking);
     let initial = store.create().unwrap();
     store.rename(initial.id, "Saved conversation").unwrap();
     drop(store);
@@ -281,6 +286,8 @@ fn persists_ordered_attempts_and_uses_latest_completed_regeneration() {
         elapsed_ms: 60,
         tokens_per_second: 2.0,
         excluded_turns: 0,
+        output_budget: None,
+        assistant_replay: None,
     };
     store
         .finish(
@@ -397,4 +404,330 @@ fn persists_preferences_and_model_references_without_accessing_model_files() {
             .unwrap()
             .contains("agent-chat-test-")
     );
+}
+
+fn synthetic_replay_stats() -> GenerationStats {
+    GenerationStats {
+        reason: FinishReason::TokenLimit,
+        prompt_tokens: 12,
+        prompt_tokens_per_second: None,
+        generated_tokens: 2,
+        time_to_first_token_ms: Some(12),
+        elapsed_ms: 25,
+        tokens_per_second: 2.0,
+        excluded_turns: 0,
+        output_budget: None,
+        assistant_replay: Some(agent_core::inference::AssistantReplay {
+            prompt_fingerprint: 42,
+            generated: vec![13, 17],
+            utf8_tail: vec![0xe2, 0x82],
+            excluded_turns: 0,
+        }),
+    }
+}
+
+#[test]
+fn continuation_reopens_same_attempt_and_retains_checkpoint_on_restart() {
+    let database = TestDatabase::new();
+    let mut store = database.open();
+    let id = store.create().unwrap().id;
+    let settings = ModelSettings {
+        enable_thinking: true,
+        ..ModelSettings::default()
+    };
+    let model = store
+        .remember_model(Path::new("/synthetic/model.gguf"), "model.gguf", settings)
+        .unwrap();
+    let turn = store
+        .begin_chat_attempt(
+            id,
+            TurnAction::Send("Use a Markdown fence.".into()),
+            Some("model.gguf"),
+            model.id,
+            settings,
+        )
+        .unwrap();
+    let assistant = turn.assistant.id;
+    let stats = synthetic_replay_stats();
+    assert!(
+        !serde_json::to_string(&stats)
+            .unwrap()
+            .contains("assistantReplay")
+    );
+    store
+        .finish(
+            assistant,
+            "<think>Draft</think>\n```rust\n",
+            GenerationState::Truncated,
+            Some(&stats),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .continuation_remaining(id, assistant, model.id)
+            .unwrap(),
+        3
+    );
+    drop(store);
+    let mut store = database.open();
+    assert!(
+        store
+            .begin_continuation(id, assistant, model.id + 1)
+            .is_err()
+    );
+    let plan = store.begin_continuation(id, assistant, model.id).unwrap();
+    assert_eq!(plan.turn.assistant.id, assistant);
+    assert!(plan.turn.user.is_none());
+    assert!(plan.settings.enable_thinking);
+    assert!(plan.turn.assistant.content.ends_with("```rust\n"));
+    assert_eq!(plan.replay.utf8_tail, vec![0xe2, 0x82]);
+    assert!(store.begin_continuation(id, assistant, model.id).is_err());
+    let append = plan.turn.assistant.content + "fn main() {}";
+    store.checkpoint(assistant, &append).unwrap();
+    drop(store);
+    let mut store = database.open();
+    let conversation = store.get(id).unwrap();
+    assert_eq!(conversation.messages.len(), 2);
+    assert_eq!(conversation.messages[1].state, GenerationState::Interrupted);
+    assert_eq!(conversation.messages[1].content, append);
+    assert!(
+        store
+            .continuation_remaining(id, assistant, model.id)
+            .is_err()
+    );
+    store.delete(id).unwrap();
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT count(*) FROM chat_attempt_replay", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn continuation_is_bounded_and_preserves_latest_attempt_ownership() {
+    let mut store = in_memory();
+    let id = store.create().unwrap().id;
+    let settings = ModelSettings::default();
+    let model = store
+        .remember_model(Path::new("/synthetic/model.gguf"), "model.gguf", settings)
+        .unwrap();
+    let turn = store
+        .begin_chat_attempt(
+            id,
+            TurnAction::Send("Write a long response.".into()),
+            Some("model.gguf"),
+            model.id,
+            settings,
+        )
+        .unwrap();
+    let assistant = turn.assistant.id;
+    let stats = synthetic_replay_stats();
+    store
+        .finish(
+            assistant,
+            "Initial",
+            GenerationState::Truncated,
+            Some(&stats),
+        )
+        .unwrap();
+    for index in 0..3 {
+        assert_eq!(
+            store
+                .continuation_remaining(id, assistant, model.id)
+                .unwrap(),
+            3 - index
+        );
+        let plan = store.begin_continuation(id, assistant, model.id).unwrap();
+        let content = plan.turn.assistant.content + " next";
+        store
+            .finish(
+                assistant,
+                &content,
+                GenerationState::Truncated,
+                Some(&stats),
+            )
+            .unwrap();
+    }
+    assert!(store.begin_continuation(id, assistant, model.id).is_err());
+    let saved = store.get(id).unwrap();
+    assert_eq!(saved.messages.len(), 2);
+    assert_eq!(saved.messages[1].content, "Initial next next next");
+    let later = store
+        .begin(id, TurnAction::Send("New turn.".into()))
+        .unwrap();
+    finish_complete(&mut store, later.assistant.id, "Done.");
+    assert!(
+        store
+            .continuation_remaining(id, assistant, model.id)
+            .is_err()
+    );
+}
+
+fn bundled_settings() -> ModelSettings {
+    let mut settings = ModelSettings::default();
+    settings.model.context_length = 4096;
+    settings.model.threads = 4;
+    settings
+}
+
+#[test]
+fn bundled_model_is_the_only_choice_on_a_fresh_profile() {
+    let mut store = in_memory();
+    let path = Path::new("/opt/app/lib/models/bundled.gguf");
+    let first = store
+        .register_bundled_model("bundled-v1", path, "bundled.gguf", bundled_settings())
+        .unwrap();
+    assert!(first.only_model);
+    assert_eq!(first.reference.settings.model.context_length, 4096);
+    // Repeated discovery is idempotent and keeps later user settings.
+    let mut changed = first.reference.settings;
+    changed.max_tokens = 99;
+    store
+        .save_model_settings(first.reference.id, changed)
+        .unwrap();
+    let again = store
+        .register_bundled_model("bundled-v1", path, "bundled.gguf", bundled_settings())
+        .unwrap();
+    assert_eq!(again.reference.id, first.reference.id);
+    assert_eq!(again.reference.settings.max_tokens, 99);
+    assert_eq!(store.recent_models().unwrap().len(), 1);
+    // A relocated resource updates the same row.
+    let moved = store
+        .register_bundled_model(
+            "bundled-v1",
+            Path::new("/tmp/.mount_x/usr/lib/models/bundled.gguf"),
+            "bundled.gguf",
+            bundled_settings(),
+        )
+        .unwrap();
+    assert_eq!(moved.reference.id, first.reference.id);
+    assert_eq!(moved.reference.settings.max_tokens, 99);
+    assert_eq!(
+        store.model(first.reference.id).unwrap().path,
+        Path::new("/tmp/.mount_x/usr/lib/models/bundled.gguf")
+    );
+}
+
+#[test]
+fn bundled_model_preserves_existing_models_order_and_settings() {
+    let mut store = in_memory();
+    let custom = ModelSettings {
+        max_tokens: 256,
+        enable_thinking: true,
+        ..ModelSettings::default()
+    };
+    let qwen = store
+        .remember_model(
+            Path::new("/models/Qwen3.5-4B.gguf"),
+            "Qwen3.5-4B.gguf",
+            custom,
+        )
+        .unwrap();
+    store.mark_model_used(qwen.id).unwrap();
+    let bundled = store
+        .register_bundled_model(
+            "bundled-v1",
+            Path::new("/usr/lib/app/models/bundled.gguf"),
+            "bundled.gguf",
+            bundled_settings(),
+        )
+        .unwrap();
+    assert!(!bundled.only_model);
+    let models = store.recent_models().unwrap();
+    assert_eq!(
+        models.iter().map(|model| model.id).collect::<Vec<_>>(),
+        [qwen.id, bundled.reference.id]
+    );
+    let saved = store.model(qwen.id).unwrap().reference.settings;
+    assert_eq!(saved.max_tokens, 256);
+    assert!(saved.enable_thinking);
+
+    // A manual import of the same file is reused, not duplicated.
+    let manual = store
+        .remember_model(
+            Path::new("/models/bundled-copy.gguf"),
+            "bundled.gguf",
+            custom,
+        )
+        .unwrap();
+    let merged = store
+        .register_bundled_model(
+            "bundled-v1",
+            Path::new("/models/bundled-copy.gguf"),
+            "bundled.gguf",
+            bundled_settings(),
+        )
+        .unwrap();
+    assert_eq!(merged.reference.id, manual.id);
+    assert_eq!(merged.reference.settings.max_tokens, 256);
+    assert!(
+        store
+            .register_bundled_model("", Path::new("/x.gguf"), "x", bundled_settings())
+            .is_err()
+    );
+}
+
+#[test]
+fn v4_profile_migrates_to_bundled_schema_without_changing_models() {
+    let database = TestDatabase::new();
+    {
+        let manual = Connection::open(database.path()).unwrap();
+        manual
+            .execute_batch(include_str!("../migrations/001_chat.sql"))
+            .unwrap();
+        manual
+            .execute_batch(include_str!("../migrations/002_agent.sql"))
+            .unwrap();
+        manual
+            .execute_batch(include_str!(
+                "../migrations/003_conversation_agent_turns.sql"
+            ))
+            .unwrap();
+        manual
+            .execute_batch(include_str!("../migrations/004_agent_turn_status.sql"))
+            .unwrap();
+        manual
+            .execute_batch(include_str!("../migrations/004_chat_continuation.sql"))
+            .unwrap();
+        manual.pragma_update(None, "user_version", 4).unwrap();
+        let settings = serde_json::to_string(&ModelSettings::default()).unwrap();
+        manual
+            .execute(
+                "INSERT INTO models (path, file_name, settings, last_used_at) VALUES (?1, ?2, ?3, 5)",
+                params!["/models/old.gguf", "old.gguf", settings],
+            )
+            .unwrap();
+    }
+    let mut store = database.open();
+    let version: i64 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 5);
+    let models = store.recent_models().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].file_name, "old.gguf");
+    assert_eq!(models[0].settings, ModelSettings::default());
+    assert_eq!(
+        store.preferences().unwrap().defaults,
+        ModelSettings::default()
+    );
+    let bundled = store
+        .register_bundled_model(
+            "bundled-v1",
+            Path::new("/usr/lib/app/models/bundled.gguf"),
+            "bundled.gguf",
+            bundled_settings(),
+        )
+        .unwrap();
+    assert!(!bundled.only_model);
+    assert_eq!(store.recent_models().unwrap()[0].file_name, "old.gguf");
+    let integrity: String = store
+        .connection
+        .pragma_query_value(None, "integrity_check", |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
 }

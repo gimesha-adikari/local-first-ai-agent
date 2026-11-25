@@ -2,6 +2,38 @@ use std::{fs::File, io::Read, path::Path};
 
 use agent_core::inference::{ErrorCode, InferenceError, Result};
 
+#[cfg(feature = "llama")]
+pub fn trained_context(path: &Path) -> Result<(u32, u64)> {
+    use llama_cpp_2::gguf::GgufContext;
+
+    // Type tags defined by the GGUF format. Native getters require an exact
+    // type match and can abort if called with a different type.
+    const UINT32: u32 = 4;
+    const STRING: u32 = 8;
+    let bytes = validate(path)?;
+    let context = (|| {
+        let metadata = GgufContext::from_file(path)?;
+        let architecture = metadata.find_key("general.architecture");
+        if architecture < 0 || metadata.kv_type(architecture) != STRING {
+            return None;
+        }
+        let architecture = metadata.val_str(architecture)?;
+        let length = metadata.find_key(&format!("{architecture}.context_length"));
+        if length < 0 || metadata.kv_type(length) != UINT32 {
+            return None;
+        }
+        let length = metadata.val_u32(length);
+        (length >= 128).then_some(length)
+    })()
+    .ok_or_else(|| {
+        InferenceError::new(
+            ErrorCode::InvalidModel,
+            "Could not read a supported context length from this GGUF model.",
+        )
+    })?;
+    Ok((context, bytes))
+}
+
 pub(crate) fn validate(path: &Path) -> Result<u64> {
     let invalid_path = || {
         InferenceError::new(

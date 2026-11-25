@@ -43,13 +43,29 @@ pub enum GenerationState {
 }
 
 impl GenerationState {
-    pub fn from_finish(reason: FinishReason) -> Self {
+    pub fn from_output(reason: FinishReason, content: &str) -> Self {
         match reason {
-            FinishReason::EndOfGeneration => Self::Complete,
+            FinishReason::EndOfGeneration if !assistant_answer(content).trim().is_empty() => {
+                Self::Complete
+            }
+            FinishReason::EndOfGeneration => Self::Failed,
             FinishReason::TokenLimit => Self::Truncated,
             FinishReason::Cancelled => Self::Cancelled,
         }
     }
+}
+
+fn assistant_answer(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    if let Some(reasoning) = trimmed.strip_prefix("<think>") {
+        return reasoning
+            .split_once("</think>")
+            .map_or("", |(_, answer)| answer);
+    }
+    if trimmed.starts_with("<th") && "<think>".starts_with(trimmed.trim_end()) {
+        return "";
+    }
+    trimmed
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,13 +112,13 @@ pub struct PendingTurn {
     pub prompt: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatHistory {
     pub system: String,
     pub turns: Vec<CompletedTurn>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompletedTurn {
     pub user: String,
     pub assistant: String,
@@ -156,7 +172,7 @@ fn remember_turn(
 ) {
     if let (Some(user), Some(assistant)) = (user, assistant)
         && assistant.state == GenerationState::Complete
-        && !assistant.content.is_empty()
+        && !assistant_answer(&assistant.content).trim().is_empty()
     {
         turns.push(CompletedTurn {
             user: user.content.clone(),
@@ -244,7 +260,7 @@ pub enum Appearance {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
     #[serde(flatten)]
@@ -271,6 +287,13 @@ impl Default for ModelSettings {
 }
 
 impl ModelSettings {
+    pub fn recommended(context_limit: u32) -> Self {
+        let mut settings = Self::default();
+        settings.model.context_length = context_limit.min(8192);
+        settings.max_tokens = settings.model.context_length / 2;
+        settings
+    }
+
     pub fn validate(self) -> Result<()> {
         self.model.validate()?;
         self.request("Settings".into(), ChatHistory::default())
@@ -294,6 +317,7 @@ impl ModelSettings {
             seed: None,
             enable_thinking: self.enable_thinking,
             history,
+            chat: None,
         }
     }
 }

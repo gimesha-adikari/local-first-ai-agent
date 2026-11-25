@@ -6,6 +6,10 @@ use crate::inference::Cancellation;
 
 use super::{AgentError, AgentErrorCode, AgentResult};
 
+const DEFAULT_TASK_TIMEOUT_SECONDS: u32 = 300;
+pub(super) const MAX_TASK_LIFETIME: Duration = Duration::from_secs(600);
+pub(super) const MAX_APPROVAL_LIFETIME: Duration = Duration::from_secs(60);
+
 /// Conservative MVP ceilings. Callers may configure smaller limits but may
 /// not increase these hard ceilings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,13 +30,24 @@ impl Default for AgentLimits {
             model_calls: 8,
             retries: 2,
             generated_tokens: 2048,
-            task_timeout_ms: 120_000,
-            approval_timeout_ms: 120_000,
+            task_timeout_ms: u64::from(DEFAULT_TASK_TIMEOUT_SECONDS) * 1_000,
+            approval_timeout_ms: MAX_APPROVAL_LIFETIME.as_millis() as u64,
         }
     }
 }
 
 impl AgentLimits {
+    pub fn with_task_timeout_seconds(seconds: u32) -> AgentResult<Self> {
+        let task_timeout_ms = u64::from(seconds) * 1_000;
+        let limits = Self {
+            task_timeout_ms,
+            approval_timeout_ms: (MAX_APPROVAL_LIFETIME.as_millis() as u64).min(task_timeout_ms),
+            ..Self::default()
+        };
+        limits.validate()?;
+        Ok(limits)
+    }
+
     pub fn validate(self) -> AgentResult<()> {
         let max = Self::default();
         if self.tool_calls == 0
@@ -43,7 +58,7 @@ impl AgentLimits {
             || self.generated_tokens == 0
             || self.generated_tokens > max.generated_tokens
             || self.task_timeout_ms == 0
-            || self.task_timeout_ms > max.task_timeout_ms
+            || Duration::from_millis(self.task_timeout_ms) > MAX_TASK_LIFETIME
             || self.approval_timeout_ms == 0
             || self.approval_timeout_ms > self.task_timeout_ms
             || self.approval_timeout_ms > max.approval_timeout_ms
@@ -100,7 +115,10 @@ impl AgentBudget {
 
     pub fn remaining_time(&self) -> AgentResult<Duration> {
         if self.cancellation.is_cancelled() {
-            return Err(AgentError::new(AgentErrorCode::Cancelled, "The task was cancelled."));
+            return Err(AgentError::new(
+                AgentErrorCode::Cancelled,
+                "The task was cancelled.",
+            ));
         }
         Duration::from_millis(self.limits.task_timeout_ms)
             .checked_sub(self.started.elapsed())
@@ -120,7 +138,10 @@ impl AgentBudget {
     pub fn begin_model(&mut self, requested: u32) -> AgentResult<u32> {
         self.remaining_time()?;
         if self.pending_model_tokens.is_some() {
-            return Err(AgentError::new(AgentErrorCode::Busy, "A model invocation is pending."));
+            return Err(AgentError::new(
+                AgentErrorCode::Busy,
+                "A model invocation is pending.",
+            ));
         }
         let available = self.limits.generated_tokens - self.usage.generated_tokens;
         let allowed = requested.min(available);
@@ -137,7 +158,10 @@ impl AgentBudget {
     /// Accounting must finish even when a task is cancelled or timed out.
     pub fn finish_model(&mut self, generated: Option<u32>) -> AgentResult<()> {
         let reserved = self.pending_model_tokens.take().ok_or_else(|| {
-            AgentError::new(AgentErrorCode::InvalidTransition, "No model invocation is pending.")
+            AgentError::new(
+                AgentErrorCode::InvalidTransition,
+                "No model invocation is pending.",
+            )
         })?;
         let actual = generated.unwrap_or(reserved);
         self.usage.generated_tokens += actual.min(reserved);
@@ -151,7 +175,10 @@ impl AgentBudget {
     pub fn begin_tool(&mut self) -> AgentResult<()> {
         self.remaining_time()?;
         if self.pending_model_tokens.is_some() {
-            return Err(AgentError::new(AgentErrorCode::Busy, "A model invocation is pending."));
+            return Err(AgentError::new(
+                AgentErrorCode::Busy,
+                "A model invocation is pending.",
+            ));
         }
         if self.usage.tool_calls >= self.limits.tool_calls {
             return Err(exhausted());
@@ -163,7 +190,10 @@ impl AgentBudget {
     pub fn record_retry(&mut self) -> AgentResult<()> {
         self.remaining_time()?;
         if self.pending_model_tokens.is_some() {
-            return Err(AgentError::new(AgentErrorCode::Busy, "A model invocation is pending."));
+            return Err(AgentError::new(
+                AgentErrorCode::Busy,
+                "A model invocation is pending.",
+            ));
         }
         if self.usage.retries >= self.limits.retries {
             return Err(exhausted());
@@ -174,5 +204,8 @@ impl AgentBudget {
 }
 
 fn exhausted() -> AgentError {
-    AgentError::new(AgentErrorCode::BudgetExhausted, "The agent execution budget is exhausted.")
+    AgentError::new(
+        AgentErrorCode::BudgetExhausted,
+        "The agent execution budget is exhausted.",
+    )
 }

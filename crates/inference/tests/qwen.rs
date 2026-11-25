@@ -42,6 +42,100 @@ fn local_model() -> PathBuf {
 }
 
 #[test]
+#[ignore = "requires a local Qwen GGUF in AGENT_TEST_MODEL"]
+fn foundation_chat_prompts() {
+    use agent_core::chat::GenerationState;
+
+    let worker = InferenceWorker::spawn(LlamaProvider::default).unwrap();
+    let info = block_on(worker.load(local_model(), ModelConfig::default()).unwrap())
+        .unwrap()
+        .unwrap();
+    for (label, prompt, expected) in [
+        ("greeting", "Say hello in one short sentence.", "hello"),
+        (
+            "poem",
+            "Write four short lines of a poem about rain. Include the word rain.",
+            "rain",
+        ),
+        (
+            "rust",
+            "Write a Rust function named add that takes two i32 values and returns their sum. Show the code.",
+            "fn add",
+        ),
+        (
+            "explanation",
+            "In two short sentences, explain what Rust ownership means.",
+            "owner",
+        ),
+        (
+            "multi-turn",
+            "What is my dog's name? Reply with the name only.",
+            "pico",
+        ),
+    ] {
+        let mut request = GenerationRequest::new(prompt);
+        request.temperature = 0.0;
+        if label == "multi-turn" {
+            request.history.turns.push(CompletedTurn {
+                user: "My dog is named Pico.".into(),
+                assistant: "I will remember that your dog is named Pico.".into(),
+            });
+        }
+        let (pending, chunks) = stream(&worker, request);
+        let stats = block_on(pending).unwrap().unwrap();
+        let response = chunks.into_iter().collect::<String>();
+        println!(
+            "{} {label}: {:?}, {} tokens, {response:?}",
+            info.architecture, stats.reason, stats.generated_tokens
+        );
+        assert_eq!(
+            GenerationState::from_output(stats.reason, &response),
+            GenerationState::Complete
+        );
+        assert!(!response.trim_start().starts_with("<think>"));
+        assert!(
+            response.to_lowercase().contains(expected),
+            "{label}: {response:?}"
+        );
+        if label == "poem" {
+            assert!(
+                response
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count()
+                    >= 3
+            );
+        }
+        if label == "rust" {
+            assert!(response.contains("i32") && response.contains('+'));
+        }
+    }
+
+    let mut request = GenerationRequest::new("Write a short poem about the sea.");
+    request.temperature = 0.0;
+    request.enable_thinking = true;
+    request.max_tokens = 1;
+    let (pending, chunks) = stream(&worker, request);
+    let stats = block_on(pending).unwrap().unwrap();
+    let response = chunks.into_iter().collect::<String>();
+    println!(
+        "{} explicit thinking with tiny budget: {:?}, {response:?}",
+        info.architecture, stats.reason
+    );
+    assert!(response.trim_start().starts_with("<think>"), "{response:?}");
+    assert_eq!(stats.reason, FinishReason::TokenLimit);
+    assert_eq!(
+        GenerationState::from_output(stats.reason, &response),
+        GenerationState::Truncated
+    );
+    let latency = cancel_after_deltas(&worker, &local_model());
+    println!(
+        "{} cancellation after streaming: {latency:?}",
+        info.architecture
+    );
+}
+
+#[test]
 #[ignore = "requires the pinned local GGUF via AGENT_TEST_MODEL"]
 fn qwen_remembers_the_retained_turn_after_trimming() {
     let worker = InferenceWorker::spawn(LlamaProvider::default).unwrap();
@@ -89,6 +183,7 @@ fn qwen_remembers_the_retained_turn_after_trimming() {
 fn seeded(prompt: impl Into<String>) -> GenerationRequest {
     let mut request = GenerationRequest::new(prompt);
     request.seed = Some(42);
+    request.max_tokens = 256;
     request
 }
 

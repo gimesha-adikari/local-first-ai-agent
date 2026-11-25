@@ -1,0 +1,11 @@
+local-first-ai-agent 0.1.0
+Copyright: local-first-ai-agent contributors
+
+The original application source is licensed under the Apache License 2.0.
+The accompanying copyright document identifies included software and
+reproduces its licensing and attribution texts. Rust standard library
+attributions are in rust-COPYRIGHT-library.html. The corresponding MPL-2.0
+option-ext source archive is under sources/.
+
+Liquid AI's LFM2.5 model is included under the separate LFM Open License
+v1.0. Its license and model notice are installed beside the GGUF.

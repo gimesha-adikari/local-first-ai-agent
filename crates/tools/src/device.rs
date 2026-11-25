@@ -1,6 +1,10 @@
 //! Linux hardware snapshot from fixed local sources. No subprocesses.
 
-use std::{fs::File, io::{self, Read}, mem::MaybeUninit};
+use std::{
+    fs::File,
+    io::{self, Read},
+    mem::MaybeUninit,
+};
 
 use agent_core::agent::{AgentError, AgentErrorCode, AgentResult, DeviceInfo};
 
@@ -12,7 +16,10 @@ const MEMINFO_LIMIT: usize = 16 * 1024;
 pub(crate) fn collect(context: &ToolContext<'_>) -> AgentResult<DeviceInfo> {
     context.check()?;
     let cpuinfo = read_prefix("/proc/cpuinfo", CPUINFO_LIMIT, context)?;
-    let cpu = cpuinfo.as_deref().and_then(cpu_model).unwrap_or_else(|| "Unknown CPU".into());
+    let cpu = cpuinfo
+        .as_deref()
+        .and_then(cpu_model)
+        .unwrap_or_else(|| "Unknown CPU".into());
     let logical_cpus = std::thread::available_parallelism()
         .ok()
         .and_then(|count| u32::try_from(count.get()).ok())
@@ -37,9 +44,15 @@ pub(crate) fn collect(context: &ToolContext<'_>) -> AgentResult<DeviceInfo> {
 }
 
 /// Read a bounded prefix of fixed procfs entries. Never use model paths.
-fn read_prefix(path: &'static str, limit: usize, context: &ToolContext<'_>) -> AgentResult<Option<String>> {
+fn read_prefix(
+    path: &'static str,
+    limit: usize,
+    context: &ToolContext<'_>,
+) -> AgentResult<Option<String>> {
     context.check()?;
-    let Ok(mut file) = File::open(path) else { return Ok(None) };
+    let Ok(mut file) = File::open(path) else {
+        return Ok(None);
+    };
     let mut output = Vec::new();
     let mut buffer = [0_u8; 4096];
     while output.len() < limit {
@@ -55,7 +68,12 @@ fn read_prefix(path: &'static str, limit: usize, context: &ToolContext<'_>) -> A
     context.check()?;
     // Ignore a potentially partial final line at the byte limit.
     if output.len() == limit {
-        output.truncate(output.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1));
+        output.truncate(
+            output
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |i| i + 1),
+        );
     }
     Ok(String::from_utf8(output).ok())
 }
@@ -64,7 +82,9 @@ fn cpu_model(input: &str) -> Option<String> {
     // Only descriptive CPU fields; never return serials, machine IDs or flags.
     for key in ["model name", "Processor", "Hardware", "cpu model"] {
         for line in input.lines() {
-            let Some((name, value)) = line.split_once(':') else { continue };
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
             let value = value.trim();
             if name.trim() == key
                 && !value.is_empty()
@@ -80,7 +100,9 @@ fn cpu_model(input: &str) -> Option<String> {
 
 fn memory(input: &str) -> Option<(u64, Option<u64>)> {
     fn kib(input: &str, wanted: &str) -> Option<u64> {
-        let (_, value) = input.lines().filter_map(|line| line.split_once(':'))
+        let (_, value) = input
+            .lines()
+            .filter_map(|line| line.split_once(':'))
             .find(|(key, _)| *key == wanted)?;
         let mut fields = value.split_whitespace();
         let size = fields.next()?.parse::<u64>().ok()?;
@@ -104,7 +126,11 @@ fn root_storage() -> Option<(u64, u64)> {
     }
     // SAFETY: statvfs reported success and initialized the structure.
     let stat = unsafe { output.assume_init() };
-    let unit = u128::from(if stat.f_frsize == 0 { stat.f_bsize } else { stat.f_frsize });
+    let unit = u128::from(if stat.f_frsize == 0 {
+        stat.f_bsize
+    } else {
+        stat.f_frsize
+    });
     if unit == 0 {
         return None;
     }
@@ -114,7 +140,10 @@ fn root_storage() -> Option<(u64, u64)> {
 }
 
 fn unavailable() -> AgentError {
-    AgentError::new(AgentErrorCode::ToolFailed, "Required device information is unavailable.")
+    AgentError::new(
+        AgentErrorCode::ToolFailed,
+        "Required device information is unavailable.",
+    )
 }
 
 #[cfg(test)]
@@ -123,14 +152,23 @@ mod tests {
 
     #[test]
     fn cpu_parser_only_selects_descriptive_fields() {
-        assert_eq!(cpu_model("Serial : secret\nmodel name : Example CPU\n"), Some("Example CPU".into()));
+        assert_eq!(
+            cpu_model("Serial : secret\nmodel name : Example CPU\n"),
+            Some("Example CPU".into())
+        );
         assert_eq!(cpu_model("Serial : secret\nflags : example\n"), None);
     }
 
     #[test]
     fn memory_parser_validates_units_and_bounds() {
-        assert_eq!(memory("MemTotal: 1024 kB\nMemAvailable: 512 kB\n"), Some((1_048_576, Some(524_288))));
-        assert_eq!(memory("MemTotal: 1024 kB\nMemAvailable: 2048 kB\n"), Some((1_048_576, None)));
+        assert_eq!(
+            memory("MemTotal: 1024 kB\nMemAvailable: 512 kB\n"),
+            Some((1_048_576, Some(524_288)))
+        );
+        assert_eq!(
+            memory("MemTotal: 1024 kB\nMemAvailable: 2048 kB\n"),
+            Some((1_048_576, None))
+        );
         assert_eq!(memory("MemTotal: 1024 kB\n"), Some((1_048_576, None)));
         assert_eq!(memory("MemTotal: 0 kB\n"), None);
         assert_eq!(memory("MemTotal: 18446744073709551615 kB\n"), None);

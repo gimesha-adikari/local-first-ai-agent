@@ -1,11 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod bundled_model;
 mod commands;
+#[cfg(all(test, target_os = "linux"))]
+mod desktop_acceptance;
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex, atomic::{AtomicBool, AtomicI64}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64},
+    },
 };
 
 use agent::*;
@@ -45,16 +51,27 @@ fn prepare_database(path: &Path) -> std::io::Result<()> {
 }
 
 fn main() {
-    tauri::Builder::default()
-        .setup(|app| {
+    run_desktop(tauri::Builder::default(), || {
+        InferenceWorker::spawn(LlamaProvider::default)
+    });
+}
+
+fn run_desktop(
+    builder: tauri::Builder<tauri::Wry>,
+    spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
+) {
+    builder
+        .setup(move |app| {
             let path = app
                 .path()
                 .app_local_data_dir()?
                 .join("chat/conversations.sqlite3");
             prepare_database(&path)?;
             let database = SqliteStore::open(&path)?;
-            let worker = Arc::new(InferenceWorker::spawn(LlamaProvider::default)?);
-            let agent = Arc::new(AgentSession::new().map_err(|error| std::io::Error::other(error.message))?);
+            let worker = Arc::new(spawn_worker()?);
+            let agent = Arc::new(
+                AgentSession::new().map_err(|error| std::io::Error::other(error.message))?,
+            );
             app.manage(Desktop {
                 worker,
                 agent,
@@ -75,6 +92,9 @@ fn main() {
             delete_conversation,
             send_message,
             regenerate,
+            continue_chat,
+            chat_continuation_remaining,
+            recommended_chat_settings,
             stop_generation,
             choose_model,
             load_model,
@@ -82,7 +102,11 @@ fn main() {
             unload_model,
             save_preferences,
             inference_status,
+            bundled_model::prepare_bundled_model,
             start_agent_task,
+            start_agent_turn,
+            agent::agent_conversation::get_unified_conversation,
+            agent::agent_conversation::get_active_agent_turn,
             cancel_agent_task,
             respond_agent_approval,
             list_agent_tasks,

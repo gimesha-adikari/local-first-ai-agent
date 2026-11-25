@@ -1,5 +1,8 @@
 # Agent MVP v0.1.0 — implementation record
 
+See [Linux Agent verification](verification-v0.1.0.md) for the subsequent
+build, runtime, and model acceptance results.
+
 Baseline: 7b417411b1905de66d37f62438564f1d3bc67926 (verified offline chatbot).
 Development branch: feature/agent-v0.1.0.
 Verification status: implementation-only; local builds and tests deferred.
@@ -20,13 +23,17 @@ created by the host, not deserialized from model output. Valid transitions are
 checked; terminal tasks cannot resume. A transition is not proof of permission
 or successful execution. The future runtime is responsible for those checks.
 
-The default limits are hard MVP ceilings: five tool dispatches, eight model
-invocations, two recoverable retries, 2048 generated tokens, and 120 seconds
-of total elapsed time. Approval waits share the task deadline and may be
-configured shorter. A cancelled or timed-out invocation must still settle
-its token reservation. Failed invocations with unknown usage are charged
-their full reservation. The runtime must enforce actual context limits and
-interruptible operation deadlines. The budget object itself is not a watchdog.
+The tool and model ceilings are five tool attempts, eight model calls,
+two recoverable retries, and 2048 generated tokens total. The task deadline
+defaults to 300 seconds. The user can set 1–600 seconds before starting a
+task. The task starts with one monotonic deadline that spans inference,
+tools, and confirmation. Human approval expires after at most 60 seconds
+and shares any shorter remaining task time. The workspace displays elapsed
+and remaining task time, and the approval dialog shows its own countdown.
+A cancelled or timed-out invocation settles its token reservation. Failed
+invocations with unknown usage are charged their full reservation. The
+runtime checks the real context size and cooperates with inference and tools
+to enforce deadlines at their interruption points.
 
 Task IDs use a nonzero u64 internally; the host must allocate persistent IDs
 and use a lossless IPC representation (string or a checked safe integer).
@@ -34,6 +41,19 @@ Do not treat IDs or transition events as authority tokens.
 
 Four model-free integration test cases are authored, not executed.
 No new dependencies or lockfile changes are needed for Part 01.
+
+For v0.1.0, CPU Agent decisions poll cancellation before native context
+creation, between 16-token prompt batches, and during token decode.
+Chat uses 64-token prompt batches. The pinned Rust binding keeps the
+native abort callback handle private. A context initialization, native
+decode call, or filesystem syscall in progress must return before the
+owning thread can finish. An already-dispatched application launch is
+recorded and cannot be undone by cancelling the task.
+
+Qwen3.5-4B is the recommended Agent model based on the observed ten-trial
+comparison. Qwen3-0.6B remains useful for lightweight chat and development.
+Model selection uses the native picker with a user-selected GGUF. See the
+[verification report](verification-v0.1.0.md) for model-specific results.
 
 ## Part 02 — tool registry and validation
 
