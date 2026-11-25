@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use agent_core::{
     agent::{AgentBudget, AgentErrorCode, AgentLimits, AgentTask, TaskId, TaskState},
     inference::Cancellation,
@@ -71,10 +73,19 @@ fn budget_rejects_excess_and_charges_unknown_generation() {
         AgentErrorCode::BudgetExhausted,
     );
     budget.begin_tool().unwrap();
-    assert_eq!(budget.begin_tool().unwrap_err().code, AgentErrorCode::BudgetExhausted);
-    assert_eq!(budget.record_retry().unwrap_err().code, AgentErrorCode::BudgetExhausted);
+    assert_eq!(
+        budget.begin_tool().unwrap_err().code,
+        AgentErrorCode::BudgetExhausted
+    );
+    assert_eq!(
+        budget.record_retry().unwrap_err().code,
+        AgentErrorCode::BudgetExhausted
+    );
     cancellation.cancel();
-    assert_eq!(budget.remaining_time().unwrap_err().code, AgentErrorCode::Cancelled);
+    assert_eq!(
+        budget.remaining_time().unwrap_err().code,
+        AgentErrorCode::Cancelled
+    );
 }
 
 #[test]
@@ -83,5 +94,37 @@ fn limits_cannot_exceed_mvp_ceilings() {
         tool_calls: 6,
         ..AgentLimits::default()
     };
-    assert_eq!(limits.validate().unwrap_err().code, AgentErrorCode::InvalidLimits);
+    assert_eq!(
+        limits.validate().unwrap_err().code,
+        AgentErrorCode::InvalidLimits
+    );
+}
+
+#[test]
+fn task_timeout_has_a_hard_ceiling_and_bounds_approval() {
+    let defaults = AgentLimits::default();
+    assert_eq!(defaults.task_timeout_ms, 300_000);
+    assert_eq!(defaults.approval_timeout_ms, 60_000);
+
+    let maximum = AgentLimits::with_task_timeout_seconds(600).unwrap();
+    assert_eq!(maximum.task_timeout_ms, 600_000);
+    assert_eq!(maximum.approval_timeout_ms, defaults.approval_timeout_ms);
+    assert_eq!(maximum.tool_calls, defaults.tool_calls);
+    assert_eq!(maximum.model_calls, defaults.model_calls);
+    assert_eq!(maximum.retries, defaults.retries);
+    assert_eq!(maximum.generated_tokens, defaults.generated_tokens);
+    for invalid in [0, 601, u32::MAX] {
+        assert_eq!(
+            AgentLimits::with_task_timeout_seconds(invalid)
+                .unwrap_err()
+                .code,
+            AgentErrorCode::InvalidLimits
+        );
+    }
+
+    let short = AgentLimits::with_task_timeout_seconds(1).unwrap();
+    let budget = AgentBudget::new(short, Cancellation::default()).unwrap();
+    assert!(budget.approval_wait().unwrap() <= Duration::from_secs(1));
+    let budget = AgentBudget::new(maximum, Cancellation::default()).unwrap();
+    assert_eq!(budget.approval_wait().unwrap(), Duration::from_secs(60));
 }

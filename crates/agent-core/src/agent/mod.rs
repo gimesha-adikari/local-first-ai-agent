@@ -1,14 +1,14 @@
 //! Platform-independent agent domain. No model or tool execution is performed here.
 
 mod budget;
-mod error;
-mod task;
-mod tool;
-mod registry;
-mod policy;
 mod decision;
+mod error;
+mod policy;
+mod registry;
 mod runtime;
 mod store;
+mod task;
+mod tool;
 
 pub use budget::{AgentBudget, AgentLimits, BudgetUsage};
 pub use error::{AgentError, AgentErrorCode, AgentResult};
@@ -17,8 +17,9 @@ pub use task::{AgentTask, TaskId, TaskState, TaskTransition};
 pub use registry::ToolRegistry;
 pub use tool::{
     AppEntry, ApplicationArgs, CalculatorArgs, DeviceInfo, FileReadArgs, FileSearchArgs,
-    PermissionRequirement, Risk, ToolArguments, ToolDefinition, ToolId, ToolObservation,
-    ToolOutcome, ToolOutput, ValidatedCall, MAX_OBSERVATION_BYTES, MAX_PROPOSAL_BYTES,
+    MAX_OBSERVATION_BYTES, MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_PDF_RANGE_PAGES, MAX_PDF_TEXT_BYTES,
+    MAX_PROPOSAL_BYTES, PdfPageRange, PdfPageText, PermissionRequirement, Risk, ToolArguments,
+    ToolDefinition, ToolId, ToolObservation, ToolOutcome, ToolOutput, ValidatedCall,
 };
 
 pub use policy::{
@@ -26,8 +27,15 @@ pub use policy::{
     PermissionAudit, PermissionAuditBatch, PermissionEngine, ScopeKind, ScopeState, ScopeSummary,
 };
 
-pub use decision::{AgentDecision, DecisionRequest, DecisionResponse, DecisionStep, parse_decision};
+pub use decision::{
+    AgentDecision, DecisionRequest, DecisionResponse, DecisionStep, DecisionStyle, parse_decision,
+};
 
-pub use runtime::{run_task, ApprovalChoice, ExecutionRecord, ExecutionStatus, RuntimeEvent, RuntimeHost, TaskReport, TaskRequest};
+pub use runtime::{
+    ApprovalChoice, ExecutionRecord, ExecutionStatus, RuntimeEvent, RuntimeHost, TaskReport,
+    TaskRequest, run_task,
+};
 
-pub use store::{AgentStore, StoredTask, StoredTaskDetail, StoredTaskEvent, StoredExecution, StoredAudit};
+pub use store::{
+    AgentStore, StoredAudit, StoredExecution, StoredTask, StoredTaskDetail, StoredTaskEvent,
+};

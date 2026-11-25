@@ -28,6 +28,8 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "license": "Apache-2.0",
+    "licenseFile": "../../../LICENSE"
   }
 }

@@ -9,7 +9,10 @@ use std::{
     mem::MaybeUninit,
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
-        unix::{ffi::OsStrExt, fs::{FileExt, MetadataExt}},
+        unix::{
+            ffi::OsStrExt,
+            fs::{FileExt, MetadataExt},
+        },
     },
     path::Path,
     sync::{Arc, Mutex},
@@ -17,11 +20,11 @@ use std::{
 };
 
 use agent_core::agent::{
-    AgentError, AgentErrorCode, AgentResult, FileReadArgs, FileSearchArgs, PermissionEngine,
-    ScopeKind, ScopeState, ScopeSummary, ToolOutput,
+    AgentError, AgentErrorCode, AgentResult, FileReadArgs, FileSearchArgs, MAX_PDF_BYTES,
+    PermissionEngine, ScopeKind, ScopeState, ScopeSummary, ToolOutput,
 };
 
-use crate::ToolContext;
+use crate::{ToolContext, pdf};
 
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_PREVIEW_BYTES: usize = 4096;
@@ -44,6 +47,7 @@ struct OpenHow {
 struct Resource {
     kind: ScopeKind,
     handle: File,
+    is_pdf: bool,
 }
 
 /// Native handles have session lifetime and never acquire replacement paths.
@@ -57,7 +61,7 @@ pub struct FilesystemScopes {
 impl FilesystemScopes {
     /// Trusted host only: call after the user selects a resource via a native
     /// picker. Do not accept this path through a model-controlled IPC command.
-    /// Return only the opaque ID, never a path or raw descriptor.
+    /// Return internal grant metadata without a path or raw descriptor.
     pub fn grant_selected(
         &self,
         policy: &mut PermissionEngine,
@@ -73,7 +77,8 @@ impl FilesystemScopes {
             path.as_os_str().as_bytes(),
             libc::O_PATH | libc::O_CLOEXEC,
             NO_LINKS,
-        ).map_err(open_error)?;
+        )
+        .map_err(open_error)?;
         check_filesystem(&handle)?;
         let metadata = handle.metadata().map_err(|_| unavailable())?;
         match kind {
@@ -82,12 +87,32 @@ impl FilesystemScopes {
             _ => return Err(denied()),
         }
         let mut resources = self.resources.lock().map_err(|_| unavailable())?;
-        let summary = policy.grant_scope(kind, lifetime)?;
+        let display_name = path
+            .file_name()
+            .map(|name| {
+                name.to_string_lossy()
+                    .chars()
+                    .filter(|ch| {
+                        !ch.is_control()
+                            && !matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                    })
+                    .take(80)
+                    .collect::<String>()
+            })
+            .filter(|name| !name.trim().is_empty());
+        let summary = policy.grant_named_scope(kind, lifetime, display_name)?;
         if resources.contains_key(&summary.id) {
             policy.revoke_scope(&summary.id);
             return Err(denied());
         }
-        resources.insert(summary.id.clone(), Arc::new(Resource { kind, handle }));
+        resources.insert(
+            summary.id.clone(),
+            Arc::new(Resource {
+                kind,
+                handle,
+                is_pdf: has_pdf_extension(path),
+            }),
+        );
         Ok(summary)
     }
 
@@ -102,22 +127,32 @@ impl FilesystemScopes {
     /// Call on scope listing/task cleanup to release expired/revoked handles.
     /// Policy records retain old IDs to prevent rebinding.
     pub fn prune(&self, policy: &PermissionEngine) -> AgentResult<()> {
-        let active = policy.scopes().into_iter()
+        let active = policy
+            .scopes()
+            .into_iter()
             .filter(|scope| scope.state == ScopeState::Active)
             .map(|scope| scope.id)
             .collect::<std::collections::BTreeSet<_>>();
-        self.resources.lock().map_err(|_| unavailable())?
+        self.resources
+            .lock()
+            .map_err(|_| unavailable())?
             .retain(|id, _| active.contains(id));
         Ok(())
     }
 
     fn resource(&self, id: &str) -> AgentResult<Arc<Resource>> {
-        self.resources.lock().map_err(|_| unavailable())?
-            .get(id).cloned().ok_or_else(denied)
+        self.resources
+            .lock()
+            .map_err(|_| unavailable())?
+            .get(id)
+            .cloned()
+            .ok_or_else(denied)
     }
 
     pub(crate) fn search(
-        &self, args: &FileSearchArgs, context: &ToolContext<'_>,
+        &self,
+        args: &FileSearchArgs,
+        context: &ToolContext<'_>,
     ) -> AgentResult<ToolOutput> {
         context.check()?;
         let root = self.resource(&args.scope_id)?;
@@ -137,27 +172,48 @@ impl FilesystemScopes {
         search.walk("", 0)?;
         context.check()?;
         search.paths.sort_unstable();
-        Ok(ToolOutput::FileSearch { paths: search.paths, truncated: search.truncated })
+        Ok(ToolOutput::FileSearch {
+            paths: search.paths,
+            truncated: search.truncated,
+            extension: args.extension.as_deref().map(str::to_ascii_lowercase),
+        })
     }
 
     pub(crate) fn read(
-        &self, args: &FileReadArgs, context: &ToolContext<'_>,
+        &self,
+        args: &FileReadArgs,
+        context: &ToolContext<'_>,
     ) -> AgentResult<ToolOutput> {
         context.check()?;
         let resource = self.resource(&args.scope_id)?;
         let child;
+        let is_pdf;
         let pinned = match (resource.kind, args.relative_path.as_deref()) {
-            (ScopeKind::File, None) => &resource.handle,
+            (ScopeKind::File, None) => {
+                is_pdf = resource.is_pdf;
+                &resource.handle
+            }
             (ScopeKind::Directory, Some(path)) if valid_relative(path) => {
-                child = open_child(&resource.handle, path, libc::O_PATH)
-                    .map_err(open_error)?;
+                child = open_child(&resource.handle, path, libc::O_PATH).map_err(open_error)?;
+                is_pdf = has_pdf_extension(Path::new(path));
                 &child
             }
             _ => return Err(denied()),
         };
         let file = reopen_regular(pinned, context)?;
-        read_text(&file, context)
+        if is_pdf || args.pdf_pages.is_some() {
+            let input = read_bytes(&file, MAX_PDF_BYTES as usize, pdf::limit, context)?;
+            pdf::read(&input, args.pdf_pages, context)
+        } else {
+            read_text(&file, context)
+        }
     }
+}
+
+fn has_pdf_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|suffix| suffix.to_str())
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case("pdf"))
 }
 
 /// Only local conventional filesystem types are supported. Unknown, network,
@@ -172,8 +228,7 @@ fn check_filesystem(file: &File) -> AgentResult<()> {
     // SAFETY: successful fstatfs initialized the structure.
     let magic = unsafe { stat.assume_init() }.f_type as u32;
     match magic {
-        0xEF53 | 0x58465342 | 0x9123683E | 0x01021994 | 0x794C7630
-        | 0x2011BAB0 | 0x4D44 => Ok(()), // ext, XFS, Btrfs, tmpfs, overlay, exFAT, FAT
+        0xEF53 | 0x58465342 | 0x9123683E | 0x01021994 | 0x794C7630 | 0x2011BAB0 | 0x4D44 => Ok(()), // ext, XFS, Btrfs, tmpfs, overlay, exFAT, FAT
         _ => Err(AgentError::new(
             AgentErrorCode::UnsupportedPlatform,
             "The selected filesystem is not supported for secure document access.",
@@ -183,13 +238,20 @@ fn check_filesystem(file: &File) -> AgentResult<()> {
 
 fn open_at(dir: RawFd, path: &[u8], flags: i32, resolve: u64) -> io::Result<File> {
     let path = CString::new(path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-    let how = OpenHow { flags: flags as u64, mode: 0, resolve };
+    let how = OpenHow {
+        flags: flags as u64,
+        mode: 0,
+        resolve,
+    };
     // SAFETY: valid NUL-terminated path and initialized open_how for the
     // duration of the syscall. The dirfd is borrowed from a live File or
     // AT_FDCWD. A successful result is a new owned file descriptor.
     let fd = unsafe {
         libc::syscall(
-            libc::SYS_openat2, dir, path.as_ptr(), &how as *const OpenHow,
+            libc::SYS_openat2,
+            dir,
+            path.as_ptr(),
+            &how as *const OpenHow,
             std::mem::size_of::<OpenHow>(),
         )
     };
@@ -201,14 +263,22 @@ fn open_at(dir: RawFd, path: &[u8], flags: i32, resolve: u64) -> io::Result<File
 }
 
 fn open_child(root: &File, path: &str, flags: i32) -> io::Result<File> {
-    open_at(root.as_raw_fd(), path.as_bytes(), flags | libc::O_CLOEXEC, DESCENDANT)
+    open_at(
+        root.as_raw_fd(),
+        path.as_bytes(),
+        flags | libc::O_CLOEXEC,
+        DESCENDANT,
+    )
 }
 
 fn valid_relative(path: &str) -> bool {
-    !path.trim().is_empty() && path.len() <= 1024
+    !path.trim().is_empty()
+        && path.len() <= 1024
         && !path.contains(['\\', ':'])
         && !path.chars().any(char::is_control)
-        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// First pin without opening a device/FIFO, then verify type and link count,
@@ -217,7 +287,7 @@ fn valid_relative(path: &str) -> bool {
 fn reopen_regular(pinned: &File, context: &ToolContext<'_>) -> AgentResult<File> {
     context.check()?;
     let before = pinned.metadata().map_err(|_| unavailable())?;
-    if !before.is_file() || before.nlink() != 1 || before.len() > MAX_FILE_BYTES as u64 {
+    if !before.is_file() || before.nlink() != 1 {
         return Err(denied());
     }
     let fd_dir = File::open("/proc/self/fd").map_err(|_| unavailable())?;
@@ -236,8 +306,11 @@ fn reopen_regular(pinned: &File, context: &ToolContext<'_>) -> AgentResult<File>
     context.check()?;
     // SAFETY: dirfd and CString are live. No creation flags are supplied.
     let fd = unsafe {
-        libc::openat(fd_dir.as_raw_fd(), name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        libc::openat(
+            fd_dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
     };
     if fd < 0 {
         return Err(unavailable());
@@ -245,9 +318,10 @@ fn reopen_regular(pinned: &File, context: &ToolContext<'_>) -> AgentResult<File>
     // SAFETY: openat returned a fresh owned descriptor.
     let file = unsafe { File::from_raw_fd(fd) };
     let after = file.metadata().map_err(|_| unavailable())?;
-    if !after.is_file() || after.nlink() != 1
-        || before.dev() != after.dev() || before.ino() != after.ino()
-        || after.len() > MAX_FILE_BYTES as u64
+    if !after.is_file()
+        || after.nlink() != 1
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
     {
         return Err(denied());
     }
@@ -255,22 +329,30 @@ fn reopen_regular(pinned: &File, context: &ToolContext<'_>) -> AgentResult<File>
     Ok(file)
 }
 
-fn read_text(file: &File, context: &ToolContext<'_>) -> AgentResult<ToolOutput> {
+fn read_bytes(
+    file: &File,
+    maximum: usize,
+    oversized: fn() -> AgentError,
+    context: &ToolContext<'_>,
+) -> AgentResult<Vec<u8>> {
     let before = file.metadata().map_err(|_| unavailable())?;
-    if !before.is_file() || before.nlink() != 1 || before.len() > MAX_FILE_BYTES as u64 {
+    if !before.is_file() || before.nlink() != 1 {
         return Err(denied());
+    }
+    if before.len() > maximum as u64 {
+        return Err(oversized());
     }
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
         context.check()?;
-        let limit = buffer.len().min(MAX_FILE_BYTES + 1 - bytes.len());
+        let limit = buffer.len().min(maximum + 1 - bytes.len());
         match file.read_at(&mut buffer[..limit], bytes.len() as u64) {
             Ok(0) => break,
             Ok(n) => {
                 bytes.extend_from_slice(&buffer[..n]);
-                if bytes.len() > MAX_FILE_BYTES {
-                    return Err(denied());
+                if bytes.len() > maximum {
+                    return Err(oversized());
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -278,14 +360,29 @@ fn read_text(file: &File, context: &ToolContext<'_>) -> AgentResult<ToolOutput> 
         }
     }
     let after = file.metadata().map_err(|_| unavailable())?;
-    if after.nlink() != 1 || before.len() != after.len() || after.len() != bytes.len() as u64
-        || before.mtime() != after.mtime() || before.mtime_nsec() != after.mtime_nsec()
-        || before.ctime() != after.ctime() || before.ctime_nsec() != after.ctime_nsec()
+    if after.nlink() != 1
+        || before.len() != after.len()
+        || after.len() != bytes.len() as u64
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
     {
-        return Err(AgentError::new(AgentErrorCode::ToolFailed, "The selected file changed during reading."));
+        return Err(AgentError::new(
+            AgentErrorCode::ToolFailed,
+            "The selected file changed during reading.",
+        ));
     }
+    Ok(bytes)
+}
+
+fn read_text(file: &File, context: &ToolContext<'_>) -> AgentResult<ToolOutput> {
+    let bytes = read_bytes(file, MAX_FILE_BYTES, denied, context)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| unsupported_text())?;
-    if text.chars().any(|ch| ch.is_control() && !matches!(ch, '\t' | '\r' | '\n')) {
+    if text
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\r' | '\n'))
+    {
         return Err(unsupported_text());
     }
     let mut end = 0;
@@ -306,7 +403,7 @@ fn read_text(file: &File, context: &ToolContext<'_>) -> AgentResult<ToolOutput> 
     })
 }
 
-fn escaped_len(ch: char) -> usize {
+pub(crate) fn escaped_len(ch: char) -> usize {
     match ch {
         '"' | '\\' | '\r' | '\n' | '\t' => 2,
         ch if ch <= '\u{001f}' => 6,
@@ -329,7 +426,11 @@ impl Search<'_, '_> {
     fn walk(&mut self, prefix: &str, depth: u32) -> AgentResult<()> {
         self.context.check()?;
         let path = if prefix.is_empty() { "." } else { prefix };
-        let dir = match open_child(self.root, path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK) {
+        let dir = match open_child(
+            self.root,
+            path,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK,
+        ) {
             Ok(dir) => dir,
             Err(error) if !prefix.is_empty() && skippable(&error) => {
                 self.truncated = true;
@@ -343,7 +444,12 @@ impl Search<'_, '_> {
             // SAFETY: dir is a live directory descriptor. buffer is writable;
             // getdents64 writes at most its length. Parse only returned bytes.
             let count = unsafe {
-                libc::syscall(libc::SYS_getdents64, dir.as_raw_fd(), buffer.as_mut_ptr(), buffer.len())
+                libc::syscall(
+                    libc::SYS_getdents64,
+                    dir.as_raw_fd(),
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                )
             };
             if count < 0 {
                 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
@@ -372,7 +478,10 @@ impl Search<'_, '_> {
                     return Err(unavailable());
                 }
                 let field = &rest[19..len];
-                let end = field.iter().position(|byte| *byte == 0).ok_or_else(unavailable)?;
+                let end = field
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .ok_or_else(unavailable)?;
                 pos += len;
                 if &field[..end] == b"." || &field[..end] == b".." {
                     continue;
@@ -390,7 +499,11 @@ impl Search<'_, '_> {
                         continue;
                     }
                 };
-                let relative = if prefix.is_empty() { name.to_owned() } else { format!("{prefix}/{name}") };
+                let relative = if prefix.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{prefix}/{name}")
+                };
                 if name.contains('/') || !valid_relative(&relative) {
                     self.truncated = true;
                     continue;
@@ -414,7 +527,9 @@ impl Search<'_, '_> {
                     }
                 } else if metadata.is_file() && metadata.nlink() == 1 && self.matches(name) {
                     let cost = relative.chars().map(escaped_len).sum::<usize>() + 3;
-                    if self.paths.len() >= self.args.max_results as usize || self.wire_bytes + cost > MAX_WIRE_DATA {
+                    if self.paths.len() >= self.args.max_results as usize
+                        || self.wire_bytes + cost > MAX_WIRE_DATA
+                    {
                         self.truncated = true;
                         self.stopped = true;
                     } else {
@@ -429,21 +544,39 @@ impl Search<'_, '_> {
 
     fn matches(&self, name: &str) -> bool {
         self.args.name_contains.as_ref().is_none_or(|filter| {
-            name.to_ascii_lowercase().contains(&filter.to_ascii_lowercase())
+            name.to_ascii_lowercase()
+                .contains(&filter.to_ascii_lowercase())
         }) && self.args.extension.as_ref().is_none_or(|extension| {
-            Path::new(name).extension().and_then(|ext| ext.to_str())
+            Path::new(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
         })
     }
 }
 
 fn skippable(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ELOOP | libc::EXDEV | libc::EACCES | libc::EPERM | libc::ENOTDIR | libc::EAGAIN | libc::ESTALE))
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::ENOENT
+                | libc::ELOOP
+                | libc::EXDEV
+                | libc::EACCES
+                | libc::EPERM
+                | libc::ENOTDIR
+                | libc::EAGAIN
+                | libc::ESTALE
+        )
+    )
 }
 
 fn open_error(error: io::Error) -> AgentError {
     if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL)) {
-        AgentError::new(AgentErrorCode::UnsupportedPlatform, "Secure Linux path resolution is unavailable.")
+        AgentError::new(
+            AgentErrorCode::UnsupportedPlatform,
+            "Secure Linux path resolution is unavailable.",
+        )
     } else if skippable(&error) {
         denied()
     } else {
@@ -452,13 +585,22 @@ fn open_error(error: io::Error) -> AgentError {
 }
 
 fn denied() -> AgentError {
-    AgentError::new(AgentErrorCode::PermissionDenied, "The resource cannot be accessed within the authorized scope.")
+    AgentError::new(
+        AgentErrorCode::PermissionDenied,
+        "The resource cannot be accessed within the authorized scope.",
+    )
 }
 
 fn unavailable() -> AgentError {
-    AgentError::new(AgentErrorCode::ToolFailed, "The selected resource is unavailable.")
+    AgentError::new(
+        AgentErrorCode::ToolFailed,
+        "The selected resource is unavailable.",
+    )
 }
 
 fn unsupported_text() -> AgentError {
-    AgentError::new(AgentErrorCode::InvalidArguments, "The file is not supported UTF-8 text.")
+    AgentError::new(
+        AgentErrorCode::InvalidArguments,
+        "The file is not supported UTF-8 text.",
+    )
 }

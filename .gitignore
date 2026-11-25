@@ -26,3 +26,8 @@ models/
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+
+# Local release packages and desktop acceptance captures
+*.deb
+/docs/screenshots/
+/docs/screenshots.zip

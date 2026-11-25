@@ -1,10 +1,34 @@
 use agent_core::{
     chat::{
         ChatHistory, CompletedTurn, Conversation, GenerationState, Message, MessageRole,
-        PromptMessage, fit_context, prepare_history,
+        ModelSettings, PromptMessage, fit_context, prepare_history,
     },
-    inference::ErrorCode,
+    inference::{ErrorCode, FinishReason},
 };
+
+#[test]
+fn chat_defaults_to_direct_output_and_requires_an_answer_at_eog() {
+    assert_eq!(ModelSettings::default().max_tokens, 768);
+    assert!(!ModelSettings::default().enable_thinking);
+    for content in ["", " \n", "<thin", "<think>work", "<think>work</think>\n"] {
+        assert_eq!(
+            GenerationState::from_output(FinishReason::EndOfGeneration, content),
+            GenerationState::Failed
+        );
+    }
+    assert_eq!(
+        GenerationState::from_output(FinishReason::EndOfGeneration, "<think>work</think>\nAnswer"),
+        GenerationState::Complete
+    );
+    assert_eq!(
+        GenerationState::from_output(FinishReason::TokenLimit, "<think>work"),
+        GenerationState::Truncated
+    );
+    assert_eq!(
+        GenerationState::from_output(FinishReason::Cancelled, "partial answer"),
+        GenerationState::Cancelled
+    );
+}
 
 #[test]
 fn keeps_system_and_latest_user_with_the_newest_complete_turns() {

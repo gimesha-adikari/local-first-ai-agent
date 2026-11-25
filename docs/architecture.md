@@ -1,13 +1,14 @@
-# Offline chat architecture
+# Offline desktop architecture
 
 React, the Tauri host, the inference worker, and SQLite run in one local
 application. The Linux release embeds its frontend assets.
 
 | Layer | Responsibility |
 | --- | --- |
-| crates/agent-core | Conversation and message entities, storage contract, inference provider contract, and context selection |
+| crates/agent-core | Chat and task domain, storage and inference contracts, context selection, budgets, and permission policy |
 | crates/inference | Dedicated worker, GGUF validation, llama.cpp, template rendering, and tokenizer-backed budgeting |
-| crates/storage | Versioned SQLite schema, transactions, message history, model references, and preferences |
+| crates/storage | Versioned SQLite schema, chat and task history, permission audit, model references, and preferences |
+| crates/tools | Typed native tools, scoped read-only file handles, trusted application discovery and dispatch |
 | apps/desktop/src-tauri | App data directory, native picker, command validation, generation coordination, and streaming IPC |
 | apps/desktop/src | Conversation UI, composer, scoped Markdown rendering, model controls, and settings |
 
@@ -47,14 +48,34 @@ Cancellation is cooperative between prompt batches and decode steps. Thinking
 and final answer tokens share the same output limit. The view separates
 reasoning when it recognizes the model's thinking delimiters.
 
+## Agent task lifecycle
+
+The desktop host owns the task thread and the single operation lease.
+Agent decisions share the inference worker used by chat. The model returns
+a grammar-constrained proposal or final answer. The core validates tool
+arguments and checks the permission policy. The host journals dispatch
+intent before calling a native tool. Application launches require a
+single-use confirmation for the current trusted target. A task can make
+at most one launch attempt, including when the outcome is uncertain.
+
+The task clock is monotonic, defaults to 300 seconds and accepts up to 600.
+The 60-second confirmation window is also bounded by the task deadline.
+Tauri reports the selected duration with the start event, and the desktop
+counts down locally. The host enforces the actual deadline. Cancellation
+targets the active task's shared flag, including its inference decision,
+approval wait, and tool permit. Agent prefill checks the flag between
+16-token batches. Native calls in progress return to their owning thread
+before the terminal event is published. Cleanup releases the operation
+lease before that event so chat or a new task can resume.
+
 ## Permissions and trust
 
 A native picker authorizes a local GGUF path, which Rust stores in the model
 reference table. The view receives model reference IDs and file names. Load
 requests resolve IDs in Rust, including references to drives that may be
 disconnected. The main window capability grants only the named chat, model,
-and preference commands. The release content security policy permits embedded
-assets and Tauri IPC.
+preference, and Agent commands. The release content security policy permits
+embedded assets and Tauri IPC.
 
 Generated Markdown is untrusted. The view disables raw HTML, external images,
 and navigation links in model output. Copy controls copy text on user action.

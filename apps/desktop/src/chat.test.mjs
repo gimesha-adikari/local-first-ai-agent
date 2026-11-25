@@ -82,3 +82,90 @@ test("model settings reserve room for input and reject invalid number fields", (
   assert.equal(validModelSettings({ ...defaults, threads: 1.5 }), false);
   assert.equal(validModelSettings({ ...defaults, temperature: NaN }), false);
 });
+
+test("each turn sends an explicit thinking choice and defaults to direct mode", async () => {
+  const { chatRequestOptions } = await import("./chat.ts");
+  assert.deepEqual(chatRequestOptions({ thinking: false, supportsThinking: true }), { enableThinking: false });
+  assert.deepEqual(chatRequestOptions({ thinking: true, supportsThinking: true }), { enableThinking: true });
+  // A model without a thinking template never receives an opt-in, whatever the toggle says.
+  assert.deepEqual(chatRequestOptions({ thinking: true, supportsThinking: false }), { enableThinking: false });
+  assert.deepEqual(chatRequestOptions({ thinking: false, supportsThinking: true, maxTokens: 1536 }), { enableThinking: false, maxTokens: 1536 });
+  assert.deepEqual(chatRequestOptions({ thinking: false, supportsThinking: true, maxTokens: 5000 }), { enableThinking: false });
+  assert.deepEqual(chatRequestOptions({ thinking: false, supportsThinking: true, maxTokens: null }), { enableThinking: false });
+});
+
+test("non-complete responses explain what happened and what to try", async () => {
+  const { responseNotice } = await import("./chat.ts");
+  const stats = (reason, generatedTokens) => ({ reason, promptTokens: 20, promptTokensPerSecond: null, generatedTokens,
+    timeToFirstTokenMs: null, elapsedMs: 1, tokensPerSecond: 1, excludedTurns: 0 });
+  const reply = (state, content, stat = null) => ({ ...message(9, 1, "assistant", state, content), stats: stat });
+
+  assert.equal(responseNotice(reply("complete", "Hello")), null);
+  const thinkingOnly = responseNotice(reply("truncated", "<think>long reasoning", stats("token_limit", 256)), 256);
+  assert.equal(thinkingOnly.title, "No answer before the output limit");
+  assert.match(thinkingOnly.detail, /Thinking used the whole 256-token/);
+  assert.equal(thinkingOnly.suggestLimit, true);
+  const cut = responseNotice(reply("truncated", "Partial answer", stats("token_limit", 256)), 256);
+  assert.equal(cut.title, "Response cut off at the output limit");
+  const empty = responseNotice(reply("failed", "<think>notes</think>", stats("end_of_generation", 40)));
+  assert.equal(empty.title, "The model finished without an answer");
+  assert.equal(empty.suggestLimit, false);
+  assert.equal(responseNotice(reply("failed", "", null)).title, "Generation failed");
+  assert.equal(responseNotice(reply("cancelled", "Part")).title, "Stopped");
+  assert.equal(responseNotice(message(1, 0, "user", "complete", "Hi")), null);
+});
+
+test("generation limits are discoverable without silently replacing saved values", async () => {
+  const { lowOutputLimit, suggestedOutputLimit, recommendedChatSettings, matchesRecommended } = await import("./chat.ts");
+  const legacy = { contextLength: 4096, threads: 6, temperature: 0.9, maxTokens: 256, topP: 0.95, topK: 40, enableThinking: true };
+  assert.equal(lowOutputLimit(legacy), true);
+  assert.equal(lowOutputLimit({ maxTokens: 768 }), false);
+  const general = recommendedChatSettings().settings;
+  assert.deepEqual(general, { contextLength: 8192, threads: 4, maxTokens: 4096, temperature: 0.7, topP: 0.8, topK: 20, enableThinking: false });
+  assert.equal(matchesRecommended(legacy, general), false);
+  assert.equal(matchesRecommended({ ...general }, general), true);
+  assert.equal(legacy.maxTokens, 256, "a recommendation never changes saved settings");
+  assert.equal(suggestedOutputLimit(256, 2048), 768);
+  assert.equal(suggestedOutputLimit(768, 2048), 1536);
+  assert.equal(suggestedOutputLimit(1536, 2048), null);
+  assert.equal(suggestedOutputLimit(2048, 8192), 4096);
+});
+
+test("one model-aware recommendation mirrors recommended_chat_settings", async () => {
+  const { recommendedChatSettings } = await import("./chat.ts");
+  // Same formula as the backend: min(trained, 8192) context, half of it (≤ 4096) output.
+  assert.deepEqual(recommendedChatSettings(128000), { ...recommendedChatSettings(null), trainedContext: 128000 });
+  const short = recommendedChatSettings(4096);
+  assert.equal(short.settings.contextLength, 4096);
+  assert.equal(short.settings.maxTokens, 2048);
+  assert.equal(recommendedChatSettings(1000).settings.maxTokens, 500);
+  assert.equal(recommendedChatSettings(null).trainedContext, null);
+});
+
+test("models get friendly names, built-in identity and capability guidance", async () => {
+  const { modelLabel, modelProfile, modelCapabilities, capabilityGuidance, agentUnavailableText } = await import("./models.ts");
+  const lfm = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
+  assert.equal(modelLabel(lfm), "LFM2.5 1.2B");
+  assert.equal(modelProfile(lfm).builtIn, true);
+  assert.equal(modelLabel("Qwen3.5-4B-UD-Q4_K_XL.gguf"), "Qwen3.5 4B");
+  assert.equal(modelLabel("my-model.Q8_0.gguf"), "my-model.Q8_0");
+  assert.equal(modelProfile("Qwen3-0.6B-Q4_K_M.gguf"), null, "Qwen3-0.6B is no longer recommended");
+
+  const info = { fileName: lfm, supportsAgent: false, supportsThinking: false };
+  const lfmCaps = modelCapabilities(lfm, info);
+  assert.equal(lfmCaps.checked, true);
+  assert.deepEqual(lfmCaps.capabilities.map(({ key, available }) => [key, available]),
+    [["chat", true], ["thinking", false], ["agent", false]]);
+  // Backend flags win over the file-name profile.
+  assert.equal(modelCapabilities(lfm, { ...info, supportsAgent: true }).capabilities[2].available, true);
+  assert.equal(modelCapabilities("unknown.gguf", null), null);
+  assert.equal(modelCapabilities("Qwen3.5-4B.gguf", null).checked, false);
+
+  const guidance = capabilityGuidance(info);
+  assert.match(guidance, /lightweight Chat model/);
+  assert.match(guidance, /select or import Qwen3\.5-4B/);
+  assert.equal(capabilityGuidance({ fileName: "Qwen3.5-4B.gguf", supportsAgent: true, supportsThinking: true }), null);
+  assert.match(capabilityGuidance({ fileName: "other.gguf", supportsAgent: true, supportsThinking: false }), /doesn't support Thinking/);
+  assert.equal(capabilityGuidance(null), null);
+  assert.match(agentUnavailableText(info), /^LFM2\.5 1\.2B supports Chat only/);
+});

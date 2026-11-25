@@ -1,7 +1,9 @@
 //! Metadata-only durable task history contract.
+use crate::chat::{ConversationId, MessageId};
+
+use super::{AgentResult, PermissionAuditBatch, RuntimeEvent, TaskId, TaskState};
 use serde::Serialize;
 use serde_json::Value;
-use super::{AgentResult, PermissionAuditBatch, RuntimeEvent, TaskId, TaskState};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,6 +15,9 @@ pub struct StoredTask {
     pub finalized: bool,
     pub usage: Option<Value>,
     pub error: Option<String>,
+    pub conversation_id: Option<ConversationId>,
+    pub turn_id: Option<MessageId>,
+    pub excluded_turns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,7 +64,11 @@ pub struct StoredTaskDetail {
 pub trait AgentStore {
     fn allocate_agent_task(&mut self) -> AgentResult<TaskId>;
     fn record_agent_event(&mut self, id: TaskId, event: &RuntimeEvent) -> AgentResult<()>;
-    fn persist_permission_audit(&mut self, namespace: &str, batch: &PermissionAuditBatch) -> AgentResult<()>;
+    fn persist_permission_audit(
+        &mut self,
+        namespace: &str,
+        batch: &PermissionAuditBatch,
+    ) -> AgentResult<()>;
     fn interrupt_agent_task(&mut self, id: TaskId) -> AgentResult<()>;
     fn list_agent_tasks(&self, before: Option<TaskId>, limit: u32) -> AgentResult<Vec<StoredTask>>;
     fn agent_task(&self, id: TaskId) -> AgentResult<StoredTaskDetail>;

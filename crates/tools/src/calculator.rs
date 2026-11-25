@@ -65,7 +65,9 @@ impl<F: FnMut() -> AgentResult<()>> Parser<'_, F> {
         let mut value = self.product(depth)?;
         loop {
             self.skip_space();
-            let Some(op @ (b'+' | b'-')) = self.peek() else { return Ok(value) };
+            let Some(op @ (b'+' | b'-')) = self.peek() else {
+                return Ok(value);
+            };
             self.step(depth)?;
             self.position += 1;
             let rhs = self.product(depth)?;
@@ -77,12 +79,17 @@ impl<F: FnMut() -> AgentResult<()>> Parser<'_, F> {
         let mut value = self.unary(depth)?;
         loop {
             self.skip_space();
-            let Some(op @ (b'*' | b'/' | b'%')) = self.peek() else { return Ok(value) };
+            let Some(op @ (b'*' | b'/' | b'%')) = self.peek() else {
+                return Ok(value);
+            };
             self.step(depth)?;
             self.position += 1;
             let rhs = self.unary(depth)?;
             if matches!(op, b'/' | b'%') && rhs == 0.0 {
-                return Err(AgentError::new(AgentErrorCode::InvalidArguments, "Division or remainder by zero."));
+                return Err(AgentError::new(
+                    AgentErrorCode::InvalidArguments,
+                    "Division or remainder by zero.",
+                ));
             }
             value = finite(match op {
                 b'*' => value * rhs,
@@ -152,14 +159,20 @@ impl<F: FnMut() -> AgentResult<()>> Parser<'_, F> {
 }
 
 fn invalid() -> AgentError {
-    AgentError::new(AgentErrorCode::InvalidArguments, "Invalid arithmetic expression.")
+    AgentError::new(
+        AgentErrorCode::InvalidArguments,
+        "Invalid arithmetic expression.",
+    )
 }
 
 fn finite(value: f64) -> AgentResult<f64> {
     if value.is_finite() {
         Ok(value)
     } else {
-        Err(AgentError::new(AgentErrorCode::InvalidArguments, "The arithmetic result is not finite."))
+        Err(AgentError::new(
+            AgentErrorCode::InvalidArguments,
+            "The arithmetic result is not finite.",
+        ))
     }
 }
 
@@ -186,8 +199,30 @@ mod tests {
     }
 
     #[test]
+    fn multiplying_a_sum_requires_the_parenthesized_group() {
+        assert_eq!(run("19 * (23 + 7)").unwrap(), 570.0);
+        assert_eq!(run("19 * 23 + 7").unwrap(), 444.0);
+    }
+
+    #[test]
     fn rejects_invalid_nonfinite_and_complex_expressions() {
-        for input in ["", "1/0", "1%-0", "1e999", "1e308*1e308", "NaN", "2**3", "sqrt(4)", "2;3", "1e+", "1 2", "(2", "2)", "2(3)", "."] {
+        for input in [
+            "",
+            "1/0",
+            "1%-0",
+            "1e999",
+            "1e308*1e308",
+            "NaN",
+            "2**3",
+            "sqrt(4)",
+            "2;3",
+            "1e+",
+            "1 2",
+            "(2",
+            "2)",
+            "2(3)",
+            ".",
+        ] {
             assert!(run(input).is_err(), "{input}");
         }
         assert!(run(&format!("{}1{}", "(".repeat(25), ")".repeat(25))).is_err());
@@ -201,11 +236,15 @@ mod tests {
         let error = evaluate("1+2+3", || {
             calls += 1;
             if calls >= 3 {
-                Err(AgentError::new(AgentErrorCode::Cancelled, "The task was cancelled."))
+                Err(AgentError::new(
+                    AgentErrorCode::Cancelled,
+                    "The task was cancelled.",
+                ))
             } else {
                 Ok(())
             }
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert_eq!(error.code, AgentErrorCode::Cancelled);
     }
 }

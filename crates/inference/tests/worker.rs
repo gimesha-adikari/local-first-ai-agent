@@ -37,6 +37,7 @@ impl InferenceProvider for Mock {
             file_bytes: 32,
             trained_context: 2048,
             supports_thinking: false,
+            supports_agent: false,
             config,
             load_ms: 0,
         })
@@ -82,6 +83,8 @@ impl InferenceProvider for Mock {
             elapsed_ms: 2,
             tokens_per_second: 1000.0,
             excluded_turns: 0,
+            output_budget: None,
+            assistant_replay: None,
         })
     }
 }

@@ -10,6 +10,8 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     watch: { ignored: ["**/src-tauri/**"] },
+    // The bundled model's license text is imported from third_party at build time.
+    fs: { allow: [".", "../../third_party/model-licenses"] },
   },
   build: {
     target: "es2022",

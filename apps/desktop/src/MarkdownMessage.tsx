@@ -1,6 +1,7 @@
 import { Children, isValidElement, useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
+import { CheckIcon, CopyIcon } from "./icons";
 import { offlineMarkdown } from "./markdown";
 
 function textContent(content: ReactNode): string {
@@ -37,7 +38,7 @@ async function copyLocalText(text: string): Promise<void> {
   }
 }
 
-export function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({ text, label, showLabel = false }: { text: string; label: string; showLabel?: boolean }) {
   const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
   const timer = useRef<number | undefined>(undefined);
 
@@ -54,13 +55,21 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
     timer.current = window.setTimeout(() => setStatus("idle"), 2200);
   }
 
+  const visible = status === "copied" ? "Copied" : status === "failed" ? "Copy unavailable" : label;
   return (
-    <button className="quiet small" type="button" onClick={() => void copy()} aria-label={label}>
-      <span aria-live="polite">
-        {status === "copied" ? "Copied" : status === "failed" ? "Copy unavailable" : label}
-      </span>
+    <button className={showLabel ? "ghost-button small" : "icon-button small"} type="button"
+      onClick={() => void copy()} aria-label={label} title={label}>
+      {status === "copied" ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+      <span className={showLabel ? undefined : "sr-only"} aria-live="polite">{visible}</span>
     </button>
   );
+}
+
+function codeLanguage(children: ReactNode): string | null {
+  const child = Children.toArray(children)[0];
+  if (!isValidElement<{ className?: string }>(child)) return null;
+  const match = /language-([\w+#.-]{1,32})/.exec(child.props.className ?? "");
+  return match ? match[1] : null;
 }
 
 const components: Components = {
@@ -69,8 +78,11 @@ const components: Components = {
     const code = textContent(children).replace(/\n$/, "");
     return (
       <div className="code-block">
-        <div className="code-actions"><CopyButton text={code} label="Copy code" /></div>
-        <pre>{children}</pre>
+        <div className="code-header">
+          <span>{codeLanguage(children) ?? "Code"}</span>
+          <CopyButton text={code} label="Copy code" showLabel />
+        </div>
+        <pre tabIndex={0}>{children}</pre>
       </div>
     );
   },

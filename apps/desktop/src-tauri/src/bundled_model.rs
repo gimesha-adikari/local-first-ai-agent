@@ -1,0 +1,350 @@
+//! Discovery and integrity verification of the application-bundled model.
+//!
+//! The GGUF ships as a separate Tauri resource. It is verified against a
+//! pinned size and SHA-256 before it is registered, and a missing or
+//! corrupted resource never prevents the application from starting.
+
+use std::{
+    fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
+
+use agent_core::{
+    chat::{ChatStore, ModelReference, ModelSettings},
+    inference::{ErrorCode, InferenceError, Result},
+};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Manager, State};
+
+use crate::commands::{Desktop, database, recommended_for_model};
+
+/// Pinned identity of a bundled model resource.
+#[derive(Debug, Clone, Copy)]
+pub struct BundledSpec {
+    /// Stable database key, independent of the install location.
+    pub key: &'static str,
+    /// Path relative to the Tauri resource directory.
+    pub resource: &'static str,
+    pub file_name: &'static str,
+    pub bytes: u64,
+    pub sha256: &'static str,
+}
+
+/// LFM2.5-1.2B-Instruct Q4_K_M from Hugging Face `LiquidAI/LFM2.5-1.2B-Instruct-GGUF`
+/// at revision `8ed288026e23958ad9dfa92d53ed773a8eee7125`. LFM Open License v1.0.
+pub const LFM25: BundledSpec = BundledSpec {
+    key: "lfm2.5-1.2b-instruct-q4_k_m",
+    resource: "models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+    file_name: "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+    bytes: 730_895_168,
+    sha256: "b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5",
+};
+
+const VERIFIED_STAMP: &str = "bundled-model.verified";
+const LFM25_TRAINED_CONTEXT: u32 = 128_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BundledState {
+    /// Verified and registered.
+    Ready,
+    /// This build or installation does not contain the resource.
+    Missing,
+    /// The resource exists but failed size or checksum verification.
+    Corrupted,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundledModel {
+    pub state: BundledState,
+    /// The registered row. Present only when verification passed.
+    pub model: Option<ModelReference>,
+    /// True when no user-imported model exists, so the UI may load it.
+    pub auto_load: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verification {
+    Verified(PathBuf),
+    Missing,
+    Corrupted,
+}
+
+fn stamp_line(spec: &BundledSpec, path: &Path, metadata: &fs::Metadata) -> Option<String> {
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!(
+        "{} {} {} {} {}",
+        spec.key,
+        spec.sha256,
+        metadata.len(),
+        modified,
+        path.to_str()?
+    ))
+}
+
+fn sha256_hex(path: &Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn write_stamp(path: &Path, line: &str) {
+    let temporary = path.with_extension("verified.tmp");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // The stamp only avoids rehashing. Failing to save it is harmless.
+    let written = options
+        .open(&temporary)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if written.is_err() || fs::rename(&temporary, path).is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+}
+
+/// Verify the resource by size and SHA-256. A stamp keyed by path, size and
+/// modification time avoids rehashing an unchanged file on every launch.
+pub fn verify(spec: &BundledSpec, resource_dir: &Path, stamp_dir: &Path) -> Verification {
+    let path = resource_dir.join(spec.resource);
+    let Ok(metadata) = fs::metadata(&path) else {
+        return Verification::Missing;
+    };
+    if !metadata.is_file() || metadata.len() != spec.bytes {
+        return Verification::Corrupted;
+    }
+    let stamp_path = stamp_dir.join(VERIFIED_STAMP);
+    let line = stamp_line(spec, &path, &metadata);
+    if line.is_some() && fs::read_to_string(&stamp_path).ok() == line {
+        return Verification::Verified(path);
+    }
+    match sha256_hex(&path) {
+        Ok(digest) if digest == spec.sha256 => {
+            if let Some(line) = line {
+                write_stamp(&stamp_path, &line);
+            }
+            Verification::Verified(path)
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(&stamp_path);
+            Verification::Corrupted
+        }
+        Err(_) => Verification::Corrupted,
+    }
+}
+
+pub fn register(
+    db: &mut storage::SqliteStore,
+    spec: &BundledSpec,
+    verification: Verification,
+) -> Result<BundledModel> {
+    let path = match verification {
+        Verification::Verified(path) => path,
+        Verification::Missing | Verification::Corrupted => {
+            return Ok(BundledModel {
+                state: if verification == Verification::Missing {
+                    BundledState::Missing
+                } else {
+                    BundledState::Corrupted
+                },
+                model: None,
+                auto_load: false,
+            });
+        }
+    };
+    let mut settings = db.preferences()?.defaults;
+    if settings == ModelSettings::recommended(8192) {
+        settings = recommended_for_model(LFM25_TRAINED_CONTEXT, spec.bytes);
+    } else {
+        settings.model.context_length = 4096;
+        settings.max_tokens = settings.max_tokens.min(settings.model.context_length - 1);
+    }
+    // LFM2.5-Instruct has no switchable Thinking mode.
+    settings.enable_thinking = false;
+    let registration = db.register_bundled_model(spec.key, &path, spec.file_name, settings)?;
+    Ok(BundledModel {
+        state: BundledState::Ready,
+        model: Some(registration.reference),
+        auto_load: registration.only_model,
+    })
+}
+
+/// Locate, verify and register the bundled model. Never loads it; the UI
+/// decides whether to load based on `auto_load`.
+#[tauri::command]
+pub async fn prepare_bundled_model(
+    app: AppHandle,
+    state: State<'_, Desktop>,
+) -> Result<BundledModel> {
+    let unavailable = || {
+        InferenceError::new(
+            ErrorCode::InvalidPath,
+            "The application resource folder is unavailable.",
+        )
+    };
+    let resource_dir = app.path().resource_dir().map_err(|_| unavailable())?;
+    let stamp_dir = state
+        .database_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(unavailable)?;
+    let verification =
+        tauri::async_runtime::spawn_blocking(move || verify(&LFM25, &resource_dir, &stamp_dir))
+            .await
+            .map_err(|_| unavailable())?;
+    register(&mut *database(&state.database)?, &LFM25, verification)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "agent-bundled-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(path.join("models")).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // The digest of "synthetic gguf" is computed in `fixture_spec`.
+    const FIXTURE: BundledSpec = BundledSpec {
+        key: "fixture",
+        resource: "models/fixture.gguf",
+        file_name: "fixture.gguf",
+        bytes: 14,
+        sha256: "",
+    };
+
+    fn fixture_spec() -> BundledSpec {
+        let digest = {
+            let mut hasher = Sha256::new();
+            hasher.update(b"synthetic gguf");
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        BundledSpec {
+            sha256: Box::leak(digest.into_boxed_str()),
+            ..FIXTURE
+        }
+    }
+
+    #[test]
+    fn verification_reports_missing_corrupted_and_verified() {
+        let spec = fixture_spec();
+        let scratch = Scratch::new();
+        let file = scratch.0.join(spec.resource);
+        assert_eq!(verify(&spec, &scratch.0, &scratch.0), Verification::Missing);
+
+        fs::write(&file, b"short").unwrap();
+        assert_eq!(
+            verify(&spec, &scratch.0, &scratch.0),
+            Verification::Corrupted
+        );
+        // Same size, different content.
+        fs::write(&file, b"synthetic GGUF").unwrap();
+        assert_eq!(
+            verify(&spec, &scratch.0, &scratch.0),
+            Verification::Corrupted
+        );
+        assert!(!scratch.0.join(VERIFIED_STAMP).exists());
+
+        fs::write(&file, b"synthetic gguf").unwrap();
+        assert_eq!(
+            verify(&spec, &scratch.0, &scratch.0),
+            Verification::Verified(file.clone())
+        );
+        assert!(scratch.0.join(VERIFIED_STAMP).exists());
+        // A rewritten file changes the stamp and is hashed again.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&file, b"synthetic GGUF").unwrap();
+        assert_eq!(
+            verify(&spec, &scratch.0, &scratch.0),
+            Verification::Corrupted
+        );
+        fs::create_dir(scratch.0.join("models/dir.gguf")).unwrap();
+        let directory = BundledSpec {
+            resource: "models/dir.gguf",
+            ..spec
+        };
+        assert_eq!(
+            verify(&directory, &scratch.0, &scratch.0),
+            Verification::Corrupted
+        );
+    }
+
+    #[test]
+    fn registration_never_registers_unverified_resources() {
+        let spec = fixture_spec();
+        let mut db = storage::SqliteStore::open(Path::new(":memory:")).unwrap();
+        for verification in [Verification::Missing, Verification::Corrupted] {
+            let result = register(&mut db, &spec, verification).unwrap();
+            assert!(result.model.is_none() && !result.auto_load);
+        }
+        assert!(db.recent_models().unwrap().is_empty());
+        let result = register(
+            &mut db,
+            &spec,
+            Verification::Verified(PathBuf::from("/usr/lib/app/models/fixture.gguf")),
+        )
+        .unwrap();
+        assert_eq!(result.state, BundledState::Ready);
+        assert!(result.auto_load);
+        let model = result.model.unwrap();
+        assert!([2048, 4096, 8192].contains(&model.settings.model.context_length));
+        assert_eq!(
+            model.settings.max_tokens,
+            model.settings.model.context_length / 2
+        );
+        assert_eq!(model.settings.model.threads, 4);
+        assert!(!model.settings.enable_thinking);
+    }
+
+    #[test]
+    fn pinned_lfm_identity_is_consistent() {
+        assert!(LFM25.resource.ends_with(LFM25.file_name));
+        assert_eq!(LFM25.sha256.len(), 64);
+        assert!(LFM25.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+}

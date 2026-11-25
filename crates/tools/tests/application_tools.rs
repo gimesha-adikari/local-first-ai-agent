@@ -15,18 +15,32 @@ fn launch_requires_confirmation_and_unknown_target_fails_without_dispatch() {
     let mut policy = PermissionEngine::new("apps_test").unwrap();
     let task = TaskId::new(1).unwrap();
     let duration = Duration::from_secs(20);
-    policy.begin_task(task, duration, Cancellation::default()).unwrap();
-    let call = registry.validate(ToolId::AppLaunch, r#"{"app_id":"app_missing"}"#).unwrap();
+    policy
+        .begin_task(task, duration, Cancellation::default())
+        .unwrap();
+    let call = registry
+        .validate(ToolId::AppLaunch, r#"{"app_id":"app_missing"}"#)
+        .unwrap();
     assert!(tools.applications().approval_target("app_missing").is_err());
     let AuthorizationDecision::Confirm { request } =
         policy.authorize(&registry, task, &call, duration).unwrap()
-    else { panic!("expected confirmation") };
-    assert!(policy.consume(&registry, task, &request.operation_id, &call).is_err());
+    else {
+        panic!("expected confirmation")
+    };
+    assert!(
+        policy
+            .consume(&registry, task, &request.operation_id, &call)
+            .is_err()
+    );
     let AuthorizationDecision::Confirm { request } =
         policy.authorize(&registry, task, &call, duration).unwrap()
-    else { panic!("expected confirmation") };
+    else {
+        panic!("expected confirmation")
+    };
     policy.respond(task, &request.operation_id, true).unwrap();
-    let permit = policy.consume(&registry, task, &request.operation_id, &call).unwrap();
+    let permit = policy
+        .consume(&registry, task, &request.operation_id, &call)
+        .unwrap();
     let observation = tools.execute(&registry, permit).unwrap();
     assert!(matches!(observation.outcome(), ToolOutcome::Failure { .. }));
 }
@@ -51,16 +65,27 @@ fn real_discovery_returns_revalidatable_targets() {
     let mut policy = PermissionEngine::new("apps_test").unwrap();
     let task = TaskId::new(1).unwrap();
     let duration = Duration::from_secs(20);
-    policy.begin_task(task, duration, Cancellation::default()).unwrap();
+    policy
+        .begin_task(task, duration, Cancellation::default())
+        .unwrap();
     let call = registry.validate(ToolId::AppsList, "{}").unwrap();
     let AuthorizationDecision::Allow { operation_id } =
         policy.authorize(&registry, task, &call, duration).unwrap()
-    else { panic!("expected allow") };
-    let permit = policy.consume(&registry, task, &operation_id, &call).unwrap();
+    else {
+        panic!("expected allow")
+    };
+    let permit = policy
+        .consume(&registry, task, &operation_id, &call)
+        .unwrap();
     let observation = tools.execute(&registry, permit).unwrap();
     match observation.outcome() {
-        ToolOutcome::Success { result: agent_core::agent::ToolOutput::AppsList { applications, .. } } => {
-            assert!(!applications.is_empty(), "no eligible system desktop application");
+        ToolOutcome::Success {
+            result: agent_core::agent::ToolOutput::AppsList { applications, .. },
+        } => {
+            assert!(
+                !applications.is_empty(),
+                "no eligible system desktop application"
+            );
             for app in applications {
                 let target = tools.applications().approval_target(&app.app_id).unwrap();
                 assert_eq!(target.display_name, app.display_name);

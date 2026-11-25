@@ -62,7 +62,10 @@ impl TaskState {
             (self, next),
             (Created, Planning)
                 | (Planning, Validating | Completed)
-                | (Validating, AwaitingAuthorization | Authorized | Denied | Planning)
+                | (
+                    Validating,
+                    AwaitingAuthorization | Authorized | Denied | Planning
+                )
                 | (AwaitingAuthorization, Authorized | Denied)
                 | (Authorized, Executing | Denied)
                 | (Executing, Observing)

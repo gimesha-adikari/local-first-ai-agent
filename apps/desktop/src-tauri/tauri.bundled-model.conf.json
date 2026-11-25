@@ -1,0 +1,25 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "active": true,
+    "targets": ["deb"],
+    "icon": ["icons/icon.png"],
+    "linux": {
+      "deb": {
+        "depends": ["bubblewrap", "poppler-utils", "util-linux"],
+        "files": {
+          "/usr/share/doc/local-first-ai-agent/LICENSE": "../../../LICENSE",
+          "/usr/share/doc/local-first-ai-agent/NOTICE": "../../../third_party/software-notices/NOTICE",
+          "/usr/share/doc/local-first-ai-agent/copyright": "../../../third_party/software-notices/copyright",
+          "/usr/share/doc/local-first-ai-agent/rust-COPYRIGHT-library.html": "../../../third_party/software-notices/rust-COPYRIGHT-library.html",
+          "/usr/share/doc/local-first-ai-agent/sources/option-ext-0.2.0.crate": "../../../third_party/software-notices/sources/option-ext-0.2.0.crate"
+        }
+      }
+    },
+    "resources": {
+      "resources/models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf": "models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+      "../../../third_party/model-licenses/LFM2.5-1.2B-Instruct/LICENSE": "models/LFM2.5-1.2B-Instruct.LICENSE",
+      "../../../third_party/model-licenses/LFM2.5-1.2B-Instruct/NOTICE.md": "models/LFM2.5-1.2B-Instruct.NOTICE.md"
+    }
+  }
+}
