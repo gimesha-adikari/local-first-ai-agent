@@ -667,3 +667,228 @@ fn keyword_retrieval_runs_without_an_embedding_model() {
     assert_eq!(status["available"], false);
     assert_eq!(status["restore"], "not_remembered");
 }
+
+/// Wait for a condition that other threads establish, failing after 5 s.
+fn eventually(mut condition: impl FnMut() -> bool, what: &str) {
+    let started = Instant::now();
+    while !condition() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timed out: {what}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Poll a turn once, keep polling until `ready`, then drop the caller's future.
+fn drop_turn_when<F: std::future::Future>(turn: F, mut ready: impl FnMut() -> bool) {
+    use std::task::{Context, Poll, Waker};
+    let mut turn = Box::pin(turn);
+    let mut context = Context::from_waker(Waker::noop());
+    let started = Instant::now();
+    loop {
+        assert!(
+            matches!(turn.as_mut().poll(&mut context), Poll::Pending),
+            "the turn finished before it was dropped"
+        );
+        if ready() {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "turn never got ready"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    drop(turn);
+}
+
+#[test]
+fn a_dropped_chat_future_can_be_stopped_and_still_persists_its_terminal_state() {
+    let h = harness();
+    h.load();
+    let id = h.conversation();
+    let events = Arc::new(Recorder::default());
+    let turn = h.engine.send_message(
+        id,
+        "Please wait".into(),
+        ChatOptions::default(),
+        events.clone(),
+    );
+    drop_turn_when(turn, || events.kinds().contains(&"started".to_owned()));
+    // Stop still reaches the turn whose caller went away.
+    assert!(h.engine.stop_chat().unwrap());
+    eventually(
+        || h.engine.reserve().is_ok(),
+        "the operation gate is released",
+    );
+    let saved = h.engine.get_conversation(id).unwrap().messages;
+    assert_eq!(saved[1].state, GenerationState::Cancelled);
+    assert_eq!(saved[1].content, "Partial");
+    let (next, _) = h.send(id, "Hello", json!({}));
+    assert_eq!(next.unwrap().state, GenerationState::Complete);
+}
+
+#[test]
+fn a_chat_future_dropped_right_after_acceptance_completes_in_the_background() {
+    let h = harness();
+    h.load();
+    let id = h.conversation();
+    let turn = h.engine.send_message(
+        id,
+        "Say hello".into(),
+        ChatOptions::default(),
+        Arc::new(Recorder::default()),
+    );
+    drop_turn_when(turn, || true);
+    // The gate stays held until the turn is persisted, so a waiting caller
+    // never observes a released gate with a streaming row.
+    eventually(
+        || h.engine.reserve().is_ok(),
+        "the operation gate is released",
+    );
+    let saved = h.engine.get_conversation(id).unwrap().messages;
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[1].state, GenerationState::Complete);
+    assert_eq!(saved[1].content, "Hello there.");
+    h.send(id, "Again", json!({})).0.unwrap();
+}
+
+#[test]
+fn a_dropped_failing_chat_future_records_the_failure() {
+    let h = harness();
+    h.load();
+    let id = h.conversation();
+    let turn = h.engine.send_message(
+        id,
+        "Please fail".into(),
+        ChatOptions::default(),
+        Arc::new(Recorder::default()),
+    );
+    drop_turn_when(turn, || true);
+    eventually(
+        || h.engine.reserve().is_ok(),
+        "the operation gate is released",
+    );
+    let saved = h.engine.get_conversation(id).unwrap().messages;
+    assert_eq!(saved[1].state, GenerationState::Failed);
+    assert_eq!(saved[1].content, "Half");
+    h.send(id, "Hello", json!({})).0.unwrap();
+}
+
+/// A sink that reads the conversation synchronously for every event.
+struct Reader {
+    store: Arc<Mutex<SqliteStore>>,
+    id: ConversationId,
+    seen: Mutex<Vec<(String, usize)>>,
+}
+
+impl ChatEventSink for Reader {
+    fn send(&self, event: ChatEvent) {
+        let kind = serde_json::to_value(&event).unwrap()["kind"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let messages = self.store.lock().unwrap().get(self.id).unwrap().messages;
+        self.seen.lock().unwrap().push((kind, messages.len()));
+    }
+}
+
+#[test]
+fn event_sinks_may_read_the_conversation_without_deadlocking() {
+    let h = Arc::new(harness());
+    h.load();
+    let document = h.document("backend.md", "The backend listens on port 8080.\n");
+    let id = h.conversation();
+    for (content, options) in [
+        ("search for walrus", knowledge(document, "documents")),
+        (
+            "Which port does the backend listen on?",
+            knowledge(document, "documents"),
+        ),
+        ("Say hello", json!({})),
+    ] {
+        let reader = Arc::new(Reader {
+            store: Arc::clone(h.engine.store()),
+            id,
+            seen: Mutex::default(),
+        });
+        let (done, result) = std::sync::mpsc::channel();
+        let (runner, sink) = (Arc::clone(&h), Arc::clone(&reader));
+        let options: ChatOptions = serde_json::from_value(options).unwrap();
+        thread::spawn(move || {
+            let answer = futures_executor::block_on(runner.engine.send_message(
+                id,
+                content.into(),
+                options,
+                sink,
+            ));
+            let _ = done.send(answer);
+        });
+        let answer = result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("deadlocked delivering events for {content:?}"))
+            .unwrap();
+        assert_eq!(answer.state, GenerationState::Complete);
+        let kinds: Vec<_> = reader
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        let expected: &[&str] = if content == "Say hello" {
+            &["started", "delta", "delta"]
+        } else if content.starts_with("search") {
+            &["knowledge", "started", "delta"]
+        } else {
+            &["knowledge", "started", "delta", "delta"]
+        };
+        assert_eq!(kinds, expected, "{content:?}");
+        // The pending turn is visible to the sink from the first event.
+        assert!(reader.seen.lock().unwrap().iter().all(|(_, n)| *n >= 2));
+    }
+}
+
+#[test]
+fn leases_from_another_engine_are_rejected_before_any_work() {
+    let a = harness();
+    let b = harness();
+    let missing = std::path::PathBuf::from("/nonexistent/03a/model.gguf");
+
+    let foreign = a.engine.reserve().unwrap();
+    let error =
+        futures_executor::block_on(b.engine.register_model(&foreign, missing.clone())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Busy, "{error:?}");
+    assert_eq!(b.engine.list_models().unwrap().len(), 1);
+    drop(foreign);
+    // The engine's own lease reaches file inspection.
+    let own = b.engine.reserve().unwrap();
+    let error =
+        futures_executor::block_on(b.engine.register_model(&own, missing.clone())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidModel, "{error:?}");
+    drop(own);
+
+    if cfg!(target_os = "linux") {
+        let foreign = a.engine.begin_embedding_selection().unwrap();
+        let result = futures_executor::block_on(
+            b.engine
+                .select_embedding_model(foreign, missing.with_extension("bge.gguf")),
+        );
+        let error = result.err().expect("a foreign lease must be rejected");
+        assert_eq!(error.code, AgentErrorCode::Busy, "{error:?}");
+        assert_eq!(
+            b.engine
+                .store()
+                .lock()
+                .unwrap()
+                .embedding_model_choice()
+                .unwrap(),
+            None
+        );
+        let status = serde_json::to_value(b.engine.embedding_status()).unwrap();
+        assert_eq!(status["restore"], "not_remembered");
+        // The foreign lease was consumed and released; both gates are free.
+        assert!(a.engine.reserve().is_ok() && b.engine.reserve().is_ok());
+    }
+}

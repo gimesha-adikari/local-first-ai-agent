@@ -205,6 +205,12 @@ fn isolated_profile() -> PathBuf {
     profile
 }
 
+/// Load a supplied embedding file through the production selection path.
+fn select_embedding(engine: &engine::Engine, path: PathBuf) {
+    let lease = engine.begin_embedding_selection().unwrap();
+    tauri::async_runtime::block_on(engine.select_embedding_model(lease, path)).unwrap();
+}
+
 fn fixture_worker() -> Result<InferenceWorker> {
     let worker = InferenceWorker::spawn(|| Fixture)?;
     let pending = worker.load(PathBuf::from("fixture.gguf"), ModelConfig::default())?;
@@ -222,25 +228,31 @@ fn desktop_approval_fixture() {
 #[test]
 #[ignore = "launches a deterministic packaged WebView under an isolated X11 profile"]
 fn unified_ipc_desktop_fixture() {
-    run_webview_fixture(
+    run_webview_fixture_with_worker(
         isolated_profile(),
         include_str!("unified_ipc_acceptance.js"),
         "document.documentElement.dataset.unifiedIpcResult || ''",
         |webview| {
             let desktop = webview.state::<crate::commands::Desktop>();
-            let model = desktop
-                .engine
-                .store()
-                .lock()
-                .unwrap()
-                .remember_model(
-                    Path::new("/synthetic/fixture.gguf"),
-                    "fixture.gguf",
-                    ModelSettings::default(),
-                )
-                .unwrap();
-            desktop.engine.assume_loaded_model(model.id);
+            let settings = ModelSettings::default();
+            let model = {
+                let mut db = desktop.engine.store().lock().unwrap();
+                let model = db
+                    .remember_model(
+                        Path::new("/synthetic/fixture.gguf"),
+                        "fixture.gguf",
+                        settings,
+                    )
+                    .unwrap();
+                // Custom settings load as given, without inspecting a file.
+                db.set_model_settings(model.id, settings, false).unwrap();
+                model
+            };
+            tauri::async_runtime::block_on(desktop.engine.load_model(model.id, settings)).unwrap();
         },
+        // Empty, so the engine's own load path loads the scripted model.
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(90),
     );
 }
 
@@ -335,12 +347,7 @@ fn contextual_chat_ipc_desktop_fixture() {
         "document.documentElement.dataset.contextualChatIpcResult || ''",
         move |webview| {
             let desktop = webview.state::<crate::commands::Desktop>();
-            tauri::async_runtime::block_on(
-                desktop
-                    .engine
-                    .load_embedding_unremembered(embedding.clone()),
-            )
-            .unwrap();
+            select_embedding(&desktop.engine, embedding.clone());
             let mut db = desktop.engine.store().lock().unwrap();
             let settings = ModelSettings {
                 model: ModelConfig {
@@ -420,13 +427,10 @@ fn task05_integration_desktop_fixture() {
         "document.documentElement.dataset.task05Result || ''",
         move |webview| {
             let started = Instant::now();
-            tauri::async_runtime::block_on(
-                webview
-                    .state::<crate::commands::Desktop>()
-                    .engine
-                    .load_embedding_unremembered(bge.clone()),
-            )
-            .unwrap();
+            select_embedding(
+                &webview.state::<crate::commands::Desktop>().engine,
+                bge.clone(),
+            );
             let load_ms = started.elapsed().as_millis();
             webview
                 .eval(format!(

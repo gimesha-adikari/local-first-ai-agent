@@ -65,6 +65,19 @@ pub fn database(db: &Mutex<SqliteStore>) -> Result<MutexGuard<'_, SqliteStore>> 
     })
 }
 
+/// Run blocking work on `platform`. `None` means the task stopped before it
+/// returned, for example by panicking.
+pub(crate) async fn run_blocking<T: Send + 'static>(
+    platform: &dyn Platform,
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (reply, result) = futures_channel::oneshot::channel();
+    platform.spawn_blocking(Box::new(move || {
+        let _ = reply.send(task());
+    }));
+    result.await.ok()
+}
+
 /// Exclusive lease on the CPU-bound operation gate shared by Chat, Agent,
 /// model and embedding work. Dropping it releases the gate.
 pub struct OperationGuard(Arc<AtomicBool>);
@@ -83,8 +96,8 @@ pub struct Engine {
     database_path: PathBuf,
     operations: Arc<AtomicBool>,
     active_model: AtomicI64,
-    chat_cancellation: Mutex<Option<Cancellation>>,
-    semantic: SemanticState,
+    chat_cancellation: Arc<Mutex<Option<Cancellation>>>,
+    semantic: Arc<SemanticState>,
     imports: KnowledgeImports,
 }
 
@@ -108,7 +121,7 @@ impl Engine {
         database: SqliteStore,
         database_path: PathBuf,
     ) -> AgentResult<Self> {
-        let semantic = SemanticState::new()?;
+        let semantic = Arc::new(SemanticState::new()?);
         let database = Arc::new(Mutex::new(database));
         semantic.restore_remembered(Arc::clone(&database));
         Ok(Self {
@@ -118,7 +131,7 @@ impl Engine {
             database_path,
             operations: Arc::new(AtomicBool::new(false)),
             active_model: AtomicI64::new(0),
-            chat_cancellation: Mutex::new(None),
+            chat_cancellation: Arc::new(Mutex::new(None)),
             semantic,
             imports: KnowledgeImports::default(),
         })
@@ -133,6 +146,11 @@ impl Engine {
                 InferenceError::new(ErrorCode::Busy, "Wait for the current operation to finish.")
             })?;
         Ok(OperationGuard(Arc::clone(&self.operations)))
+    }
+
+    /// Whether `lease` was issued by this engine's operation gate.
+    pub(crate) fn owns(&self, lease: &OperationGuard) -> bool {
+        Arc::ptr_eq(&lease.0, &self.operations)
     }
 
     /// The shared store. The engine is its single owner; hosts use it for
@@ -153,12 +171,6 @@ impl Engine {
     pub fn active_model(&self) -> Option<ModelId> {
         let id = self.active_model.load(Ordering::Acquire);
         (id > 0).then_some(id)
-    }
-
-    /// Record that the worker already holds `model_id`, for hosts and test
-    /// fixtures that load the worker before the engine exists.
-    pub fn assume_loaded_model(&self, model_id: ModelId) {
-        self.active_model.store(model_id, Ordering::Release);
     }
 
     pub fn bootstrap(&self) -> Result<Bootstrap> {
@@ -214,11 +226,7 @@ impl Engine {
         &self,
         task: impl FnOnce() -> T + Send + 'static,
     ) -> Option<T> {
-        let (reply, result) = futures_channel::oneshot::channel();
-        self.platform.spawn_blocking(Box::new(move || {
-            let _ = reply.send(task());
-        }));
-        result.await.ok()
+        run_blocking(self.platform.as_ref(), task).await
     }
 
     /// Run a store operation on a blocking thread.

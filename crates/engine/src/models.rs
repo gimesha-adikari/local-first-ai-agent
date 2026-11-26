@@ -86,6 +86,13 @@ pub fn content_key(path: &Path) -> std::io::Result<String> {
     Ok(format!("s1:{size}:{digest}"))
 }
 
+fn foreign_lease() -> InferenceError {
+    InferenceError::new(
+        ErrorCode::Busy,
+        "The operation lease belongs to another engine.",
+    )
+}
+
 fn inspection_failed() -> InferenceError {
     InferenceError::new(ErrorCode::InvalidModel, "Could not inspect the GGUF model.")
 }
@@ -113,9 +120,12 @@ impl Engine {
     /// operation lease for the whole selection.
     pub async fn register_model(
         &self,
-        _lease: &OperationGuard,
+        lease: &OperationGuard,
         path: PathBuf,
     ) -> Result<ModelReference> {
+        if !self.owns(lease) {
+            return Err(foreign_lease());
+        }
         let name = path
             .file_name()
             .ok_or_else(|| {

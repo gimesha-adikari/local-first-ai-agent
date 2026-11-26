@@ -279,6 +279,12 @@ impl Engine {
         lease: OperationGuard,
         path: PathBuf,
     ) -> AgentResult<EmbeddingModelStatus> {
+        if !self.owns(&lease) {
+            return Err(AgentError::new(
+                AgentErrorCode::Busy,
+                "The operation lease belongs to another engine.",
+            ));
+        }
         let state = &self.semantic;
         let remembered = path.clone();
         let loaded = Arc::clone(&state.loaded);
@@ -300,21 +306,6 @@ impl Engine {
             .map_err(|_| storage_error())?;
         state.set_restore(RestoreState::Selected);
         Ok(model_status(state))
-    }
-
-    /// Load an embedding model without remembering it, for test fixtures that
-    /// supply a local file directly.
-    pub async fn load_embedding_unremembered(&self, path: PathBuf) -> AgentResult<()> {
-        let loaded = Arc::clone(&self.semantic.loaded);
-        self.semantic
-            .worker
-            .submit(move |provider| {
-                provider.load(&path)?;
-                loaded.store(provider.available(), Ordering::Release);
-                Ok(())
-            })?
-            .await
-            .map_err(|_| unavailable())?
     }
 
     pub async fn unload_embedding_model(&self) -> AgentResult<()> {

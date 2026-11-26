@@ -2,13 +2,14 @@
 //! persistence and cancellation.
 
 use std::{
+    future::Future,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
 use agent_core::{
     agent::{AgentError, AgentErrorCode},
-    chat::{ChatStore, ConversationId, GenerationState, Message, MessageId, TurnAction},
+    chat::{ChatStore, ConversationId, GenerationState, Message, MessageId, ModelId, TurnAction},
     chat_context::{
         AttemptContext, ChatContext, ChatIntent, ContextObserver, EvidenceTask, Grounding,
         no_evidence_answer,
@@ -20,13 +21,13 @@ use agent_core::{
     knowledge::{MAX_DOCUMENT_ID, MAX_DOCUMENTS},
     semantic::{BGE_KEY, UnitVector},
 };
-use inference::{Pending, Phase};
+use inference::{InferenceWorker, Pending, Phase};
 use serde::{Deserialize, Serialize};
 use storage::{
     SqliteStore, chat_context::KnowledgeCoverage, knowledge::KnowledgeHit, semantic::RetrievalMode,
 };
 
-use crate::{Engine, database};
+use crate::{Engine, OperationGuard, Platform, database, semantic::SemanticState};
 
 /// Events streamed to the surface that started a Chat turn.
 #[derive(Serialize)]
@@ -145,9 +146,20 @@ pub fn retrieval_error(error: AgentError) -> InferenceError {
     InferenceError::new(code, error.message)
 }
 
-struct ChatCancellation<'a>(&'a Mutex<Option<Cancellation>>);
+/// Registers a turn's cancellation for Stop and clears it when dropped.
+struct ActiveChat(Arc<Mutex<Option<Cancellation>>>);
 
-impl Drop for ChatCancellation<'_> {
+impl ActiveChat {
+    fn register(
+        slot: &Arc<Mutex<Option<Cancellation>>>,
+        cancellation: Cancellation,
+    ) -> Result<Self> {
+        *cancellation_lock(slot)? = Some(cancellation);
+        Ok(Self(Arc::clone(slot)))
+    }
+}
+
+impl Drop for ActiveChat {
     fn drop(&mut self) {
         if let Ok(mut slot) = self.0.lock() {
             *slot = None;
@@ -311,6 +323,15 @@ struct StreamContext {
     coverage: Option<KnowledgeCoverage>,
 }
 
+/// Everything a detached Chat turn needs, shared with the engine.
+#[derive(Clone)]
+struct ChatRuntime {
+    platform: Arc<dyn Platform>,
+    worker: Arc<InferenceWorker>,
+    database: Arc<Mutex<SqliteStore>>,
+    semantic: Arc<SemanticState>,
+}
+
 impl Engine {
     /// Send a new user message and stream the assistant response.
     pub async fn send_message(
@@ -320,7 +341,7 @@ impl Engine {
         options: ChatOptions,
         events: ChatEvents,
     ) -> Result<Message> {
-        self.run_turn(id, TurnAction::Send(content), options, events)
+        self.start_turn(id, TurnAction::Send(content), options, events)
             .await
     }
 
@@ -331,8 +352,109 @@ impl Engine {
         options: ChatOptions,
         events: ChatEvents,
     ) -> Result<Message> {
-        self.run_turn(id, TurnAction::Regenerate, options, events)
+        self.start_turn(id, TurnAction::Regenerate, options, events)
             .await
+    }
+
+    async fn start_turn(
+        &self,
+        id: ConversationId,
+        action: TurnAction,
+        options: ChatOptions,
+        events: ChatEvents,
+    ) -> Result<Message> {
+        let operation = self.reserve()?;
+        let cancellation = Cancellation::default();
+        let active = ActiveChat::register(&self.chat_cancellation, cancellation.clone())?;
+        let model_id = self.active_model();
+        let runtime = self.chat_runtime();
+        self.detach(operation, Some(active), async move {
+            runtime
+                .run_turn(id, action, options, events, cancellation, model_id)
+                .await
+        })
+        .await
+    }
+
+    fn chat_runtime(&self) -> ChatRuntime {
+        ChatRuntime {
+            platform: Arc::clone(&self.platform),
+            worker: Arc::clone(&self.worker),
+            database: Arc::clone(&self.database),
+            semantic: Arc::clone(&self.semantic),
+        }
+    }
+
+    /// Run an accepted turn to completion independently of the caller. The
+    /// task owns the operation lease and the Stop registration until the
+    /// turn's terminal state is persisted and the worker no longer streams
+    /// into it, and releases both before the result is delivered. A caller
+    /// that stops waiting leaves the turn running; Stop still reaches it.
+    async fn detach(
+        &self,
+        operation: OperationGuard,
+        active: Option<ActiveChat>,
+        turn: impl Future<Output = Result<Message>> + Send + 'static,
+    ) -> Result<Message> {
+        let (reply, result) = futures_channel::oneshot::channel();
+        self.platform.spawn(Box::pin(async move {
+            let outcome = turn.await;
+            drop(active);
+            drop(operation);
+            let _ = reply.send(outcome);
+        }));
+        result.await.map_err(|_| {
+            InferenceError::new(ErrorCode::WorkerStopped, "The Chat operation stopped.")
+        })?
+    }
+
+    /// Tokens left for continuing a truncated response with the active model.
+    pub fn continuation_remaining(&self, id: ConversationId, message_id: MessageId) -> Result<u32> {
+        let model = self.active_model().ok_or_else(|| {
+            InferenceError::new(
+                ErrorCode::NoModel,
+                "Load the original model to continue this response.",
+            )
+        })?;
+        database(&self.database)?.continuation_remaining(id, message_id, model)
+    }
+
+    /// Continue a truncated assistant response in place.
+    pub async fn continue_chat(
+        &self,
+        id: ConversationId,
+        message_id: MessageId,
+        max_tokens: Option<u32>,
+        events: ChatEvents,
+    ) -> Result<Message> {
+        let operation = self.reserve()?;
+        let model = self.active_model();
+        let runtime = self.chat_runtime();
+        self.detach(operation, None, async move {
+            runtime
+                .continue_turn(id, message_id, max_tokens, model, events)
+                .await
+        })
+        .await
+    }
+
+    /// Cancel the active Chat preparation or generation. Returns whether
+    /// anything was cancelled.
+    pub fn stop_chat(&self) -> Result<bool> {
+        if let Some(cancellation) = cancellation_lock(&self.chat_cancellation)?.as_ref() {
+            cancellation.cancel();
+            return Ok(true);
+        }
+        self.worker.cancel()
+    }
+}
+
+impl ChatRuntime {
+    async fn blocking<T: Send + 'static>(
+        &self,
+        task: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        crate::run_blocking(self.platform.as_ref(), task).await
     }
 
     async fn run_turn(
@@ -341,13 +463,10 @@ impl Engine {
         action: TurnAction,
         options: ChatOptions,
         events: ChatEvents,
+        cancellation: Cancellation,
+        model_id: Option<ModelId>,
     ) -> Result<Message> {
-        let _operation = self.reserve()?;
-        let cancellation = Cancellation::default();
-        *cancellation_lock(&self.chat_cancellation)? = Some(cancellation.clone());
-        let _active_chat = ChatCancellation(&self.chat_cancellation);
-        let model_id = self
-            .active_model()
+        let model_id = model_id
             .ok_or_else(|| InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first."))?;
         let status = self.worker.status()?;
         if status.phase != Phase::Ready {
@@ -560,15 +679,15 @@ impl Engine {
     ) -> Result<Message> {
         let mut assistant = turn.assistant;
         let id = assistant.id;
-        let mut db = database(&self.database)?;
         if let Some(context) = assistant.context.clone() {
-            db.checkpoint_chat_evidence(
+            database(&self.database)?.checkpoint_chat_evidence(
                 id,
                 &context,
                 agent_core::chat_context::ContextUsage::default(),
                 &[],
             )?;
         }
+        // Event sinks run without the store lock; they may read the turn.
         if let Some(coverage) = coverage {
             events.send(ChatEvent::Knowledge { coverage });
         }
@@ -580,6 +699,7 @@ impl Engine {
             id,
             text: text.clone(),
         });
+        let mut db = database(&self.database)?;
         db.finish(id, &text, GenerationState::Complete, None)?;
         assistant.content = text;
         assistant.state = GenerationState::Complete;
@@ -683,33 +803,21 @@ impl Engine {
         Ok(assistant)
     }
 
-    /// Tokens left for continuing a truncated response with the active model.
-    pub fn continuation_remaining(&self, id: ConversationId, message_id: MessageId) -> Result<u32> {
-        let model = self.active_model().ok_or_else(|| {
-            InferenceError::new(
-                ErrorCode::NoModel,
-                "Load the original model to continue this response.",
-            )
-        })?;
-        database(&self.database)?.continuation_remaining(id, message_id, model)
-    }
-
-    /// Continue a truncated assistant response in place.
-    pub async fn continue_chat(
+    async fn continue_turn(
         &self,
         id: ConversationId,
         message_id: MessageId,
         max_tokens: Option<u32>,
+        model: Option<ModelId>,
         events: ChatEvents,
     ) -> Result<Message> {
-        let _operation = self.reserve()?;
         if max_tokens.is_some_and(|value| !(1..=4096).contains(&value)) {
             return Err(InferenceError::new(
                 ErrorCode::InvalidConfig,
                 "Use 1–4096 continuation tokens.",
             ));
         }
-        let model = self.active_model().ok_or_else(|| {
+        let model = model.ok_or_else(|| {
             InferenceError::new(
                 ErrorCode::NoModel,
                 "Load the original model to continue this response.",
@@ -747,16 +855,6 @@ impl Engine {
             },
         )
         .await
-    }
-
-    /// Cancel the active Chat preparation or generation. Returns whether
-    /// anything was cancelled.
-    pub fn stop_chat(&self) -> Result<bool> {
-        if let Some(cancellation) = cancellation_lock(&self.chat_cancellation)?.as_ref() {
-            cancellation.cancel();
-            return Ok(true);
-        }
-        self.worker.cancel()
     }
 }
 
