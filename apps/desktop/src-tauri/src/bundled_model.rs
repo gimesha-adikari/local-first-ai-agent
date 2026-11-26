@@ -6,7 +6,7 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
@@ -16,11 +16,14 @@ use agent_core::{
     chat::{ChatStore, ModelId, ModelReference},
     inference::{ErrorCode, InferenceError, Result},
 };
+use engine::{
+    database,
+    models::{content_key, recommended_for_model, sha256_hex},
+};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 
-use crate::commands::{Desktop, database, recommended_for_model};
+use crate::commands::Desktop;
 
 /// Pinned identity of a bundled model resource.
 #[derive(Debug, Clone, Copy)]
@@ -103,24 +106,6 @@ fn stamp_line(spec: &BundledSpec, path: &Path, metadata: &fs::Metadata) -> Optio
     ))
 }
 
-pub(crate) fn sha256_hex(path: &Path) -> std::io::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1 << 20];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
 fn write_stamp(path: &Path, line: &str) {
     let temporary = path.with_extension("verified.tmp");
     let mut options = fs::OpenOptions::new();
@@ -137,32 +122,6 @@ fn write_stamp(path: &Path, line: &str) {
     if written.is_err() || fs::rename(&temporary, path).is_err() {
         let _ = fs::remove_file(&temporary);
     }
-}
-
-/// Sampled content identity: file size and the SHA-256 of the first and last
-/// MiB. Equal identities are treated as the same weights at different paths.
-/// Reads at most 2 MiB and never modifies the file.
-pub fn content_key(path: &Path) -> std::io::Result<String> {
-    use std::io::{Seek, SeekFrom};
-    const SAMPLE: u64 = 1 << 20;
-    let mut file = fs::File::open(path)?;
-    let size = file.metadata()?.len();
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; SAMPLE as usize];
-    let head = file.read(&mut buffer)?;
-    hasher.update(&buffer[..head]);
-    if size > SAMPLE {
-        file.seek(SeekFrom::Start(size.saturating_sub(SAMPLE).max(SAMPLE)))?;
-        let mut tail = Vec::with_capacity(SAMPLE as usize);
-        file.take(SAMPLE).read_to_end(&mut tail)?;
-        hasher.update(&tail);
-    }
-    let digest: String = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    Ok(format!("s1:{size}:{digest}"))
 }
 
 /// Record sampled identities for listed files that can be read now, compute
@@ -252,7 +211,11 @@ pub fn register(
         }
     };
     // A new row starts with automatic settings. Existing rows keep theirs.
-    let mut settings = recommended_for_model(LFM25_TRAINED_CONTEXT, spec.bytes);
+    let mut settings = recommended_for_model(
+        LFM25_TRAINED_CONTEXT,
+        spec.bytes,
+        crate::platform::available_memory(),
+    );
     // LFM2.5-Instruct has no switchable Thinking mode.
     settings.enable_thinking = false;
     let registration = db.register_bundled_model(spec.key, &path, spec.file_name, settings)?;
@@ -279,7 +242,8 @@ pub async fn prepare_bundled_model(
     };
     let resource_dir = app.path().resource_dir().map_err(|_| unavailable())?;
     let stamp_dir = state
-        .database_path
+        .engine
+        .database_path()
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(unavailable)?;
@@ -287,15 +251,15 @@ pub async fn prepare_bundled_model(
         tauri::async_runtime::spawn_blocking(move || verify(&LFM25, &resource_dir, &stamp_dir))
             .await
             .map_err(|_| unavailable())?;
-    let mut bundled = register(&mut *database(&state.database)?, &LFM25, verification)?;
-    let store = Arc::clone(&state.database);
+    let mut bundled = register(&mut *database(state.engine.store())?, &LFM25, verification)?;
+    let store = Arc::clone(state.engine.store());
     let verified = bundled.model.as_ref().map(|model| model.id);
     tauri::async_runtime::spawn_blocking(move || {
         reconcile_models(&store, verified.map(|id| (id, LFM25.sha256)))
     })
     .await
     .map_err(|_| unavailable())??;
-    let db = database(&state.database)?;
+    let db = database(state.engine.store())?;
     if let Some(model) = &bundled.model {
         bundled.model = Some(db.model(model.id)?.reference);
     }
@@ -351,6 +315,7 @@ mod tests {
     };
 
     fn fixture_spec() -> BundledSpec {
+        use sha2::{Digest, Sha256};
         let digest = {
             let mut hasher = Sha256::new();
             hasher.update(b"synthetic gguf");

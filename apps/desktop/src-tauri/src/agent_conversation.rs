@@ -256,7 +256,8 @@ pub fn get_unified_conversation(
     id: ConversationId,
 ) -> agent_core::inference::Result<UnifiedConversation> {
     let (conversation, turns) = state
-        .database
+        .engine
+        .store()
         .lock()
         .map_err(|_| context_unavailable())?
         .unified_conversation(id)?;

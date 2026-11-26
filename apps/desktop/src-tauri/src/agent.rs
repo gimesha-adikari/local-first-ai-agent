@@ -998,9 +998,9 @@ fn start_task(
         .map(AgentLimits::with_task_timeout_seconds)
         .transpose()?
         .unwrap_or_default();
-    let operation = state.reserve().map_err(|_| busy_error())?;
+    let operation = state.engine.reserve().map_err(|_| busy_error())?;
     state.agent.join_previous();
-    let status = state.worker.status().map_err(map_inference)?;
+    let status = state.engine.worker().status().map_err(map_inference)?;
     let model = status
         .model
         .filter(|model| model.supports_thinking && status.phase == inference::Phase::Ready)
@@ -1011,7 +1011,7 @@ fn start_task(
             )
         })?;
     let (id, turn, history, omitted_by_storage) = {
-        let mut database = state.database.lock().map_err(|_| storage_error())?;
+        let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
         if let Some(conversation) = conversation {
             let (history, omitted) = database
                 .agent_context(conversation)
@@ -1034,15 +1034,15 @@ fn start_task(
         .agent
         .activate(id, cancellation.clone(), turn, limits.task_timeout_ms)
     {
-        if let Ok(mut database) = state.database.lock() {
+        if let Ok(mut database) = state.engine.store().lock() {
             let _ = database.interrupt_agent_task(id);
         }
         return Err(error);
     }
 
     let session = Arc::clone(&state.agent);
-    let worker = Arc::clone(&state.worker);
-    let database = Arc::clone(&state.database);
+    let worker = Arc::clone(state.engine.worker());
+    let database = Arc::clone(state.engine.store());
     let task_prompt = prompt;
     let operation_guard = operation;
     let app_handle = app.clone();
@@ -1122,7 +1122,7 @@ fn start_task(
         Err(_) => {
             drop(task_thread);
             state.agent.clear_active(id);
-            if let Ok(mut database) = state.database.lock() {
+            if let Ok(mut database) = state.engine.store().lock() {
                 let _ = database.interrupt_agent_task(id);
             }
             return Err(AgentError::new(
@@ -1163,7 +1163,7 @@ pub fn list_agent_tasks(
     limit: Option<u32>,
 ) -> AgentResult<Vec<AgentTaskSummary>> {
     let before = before.as_deref().map(parse_task_id).transpose()?;
-    let database = state.database.lock().map_err(|_| storage_error())?;
+    let database = state.engine.store().lock().map_err(|_| storage_error())?;
     database
         .list_agent_tasks(before, limit.unwrap_or(30))
         .map(|tasks| tasks.into_iter().map(Into::into).collect())
@@ -1173,7 +1173,8 @@ pub fn list_agent_tasks(
 pub fn get_agent_task(state: State<'_, Desktop>, task_id: String) -> AgentResult<AgentTaskDetail> {
     let id = parse_task_id(&task_id)?;
     let mut detail: AgentTaskDetail = state
-        .database
+        .engine
+        .store()
         .lock()
         .map_err(|_| storage_error())?
         .agent_task(id)?
@@ -1233,7 +1234,7 @@ fn grant_selected(
             .filesystem()
             .grant_selected(&mut policy, path, kind, SCOPE_LIFETIME)?;
     let persisted = policy.flush_audit(|namespace, batch| {
-        let mut database = state.database.lock().map_err(|_| storage_error())?;
+        let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
         database.persist_permission_audit(namespace, batch)
     });
     if let Err(error) = persisted {
@@ -1243,7 +1244,7 @@ fn grant_selected(
             .filesystem()
             .revoke(&mut policy, &scope.id);
         let _ = policy.flush_audit(|namespace, batch| {
-            let mut database = state.database.lock().map_err(|_| storage_error())?;
+            let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
             database.persist_permission_audit(namespace, batch)
         });
         return Err(error);
@@ -1261,7 +1262,7 @@ fn grant_selected(
 pub async fn choose_agent_file(
     state: State<'_, Desktop>,
 ) -> AgentResult<Option<AgentScopeDisplay>> {
-    let _operation = state.reserve().map_err(|_| busy_error())?;
+    let _operation = state.engine.reserve().map_err(|_| busy_error())?;
     let Some(file) = rfd::AsyncFileDialog::new()
         .set_title("Grant read access to one file")
         .pick_file()
@@ -1288,7 +1289,7 @@ pub async fn choose_agent_file(
 pub async fn choose_agent_directory(
     state: State<'_, Desktop>,
 ) -> AgentResult<Option<AgentScopeDisplay>> {
-    let _operation = state.reserve().map_err(|_| busy_error())?;
+    let _operation = state.engine.reserve().map_err(|_| busy_error())?;
     let Some(directory) = rfd::AsyncFileDialog::new()
         .set_title("Grant read access to one directory")
         .pick_folder()
@@ -1357,7 +1358,7 @@ pub fn revoke_agent_scope(state: State<'_, Desktop>, scope_id: String) -> AgentR
             .map_err(|_| storage_error())?
             .revoke(internal_id);
         policy.flush_audit(|namespace, batch| {
-            let mut database = state.database.lock().map_err(|_| storage_error())?;
+            let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
             database.persist_permission_audit(namespace, batch)
         })?;
     }

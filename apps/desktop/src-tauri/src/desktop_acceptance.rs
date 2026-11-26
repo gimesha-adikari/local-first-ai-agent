@@ -229,7 +229,8 @@ fn unified_ipc_desktop_fixture() {
         |webview| {
             let desktop = webview.state::<crate::commands::Desktop>();
             let model = desktop
-                .database
+                .engine
+                .store()
                 .lock()
                 .unwrap()
                 .remember_model(
@@ -238,9 +239,7 @@ fn unified_ipc_desktop_fixture() {
                     ModelSettings::default(),
                 )
                 .unwrap();
-            desktop
-                .active_model
-                .store(model.id, std::sync::atomic::Ordering::Release);
+            desktop.engine.assume_loaded_model(model.id);
         },
     );
 }
@@ -282,7 +281,7 @@ fn semantic_ipc_desktop_fixture() {
         "document.documentElement.dataset.semanticIpcResult || ''",
         |webview| {
             let desktop = webview.state::<crate::commands::Desktop>();
-            let mut db = desktop.database.lock().unwrap();
+            let mut db = desktop.engine.store().lock().unwrap();
             let long = "! ".repeat(32 * 1024);
             for (i, (name, body)) in [
                 (
@@ -335,12 +334,14 @@ fn contextual_chat_ipc_desktop_fixture() {
         .expect("contextual Chat WebView fixture"),
         "document.documentElement.dataset.contextualChatIpcResult || ''",
         move |webview| {
-            webview
-                .state::<crate::semantic::SemanticState>()
-                .load_fixture_embedding(embedding.clone())
-                .unwrap();
             let desktop = webview.state::<crate::commands::Desktop>();
-            let mut db = desktop.database.lock().unwrap();
+            tauri::async_runtime::block_on(
+                desktop
+                    .engine
+                    .load_embedding_unremembered(embedding.clone()),
+            )
+            .unwrap();
+            let mut db = desktop.engine.store().lock().unwrap();
             let settings = ModelSettings {
                 model: ModelConfig {
                     context_length: 1024,
@@ -419,10 +420,13 @@ fn task05_integration_desktop_fixture() {
         "document.documentElement.dataset.task05Result || ''",
         move |webview| {
             let started = Instant::now();
-            webview
-                .state::<crate::semantic::SemanticState>()
-                .load_fixture_embedding(bge.clone())
-                .unwrap();
+            tauri::async_runtime::block_on(
+                webview
+                    .state::<crate::commands::Desktop>()
+                    .engine
+                    .load_embedding_unremembered(bge.clone()),
+            )
+            .unwrap();
             let load_ms = started.elapsed().as_millis();
             webview
                 .eval(format!(
@@ -430,7 +434,7 @@ fn task05_integration_desktop_fixture() {
                 ))
                 .unwrap();
             let desktop = webview.state::<crate::commands::Desktop>();
-            let mut db = desktop.database.lock().unwrap();
+            let mut db = desktop.engine.store().lock().unwrap();
             db.remember_model(
                 &model,
                 model.file_name().unwrap().to_str().unwrap(),

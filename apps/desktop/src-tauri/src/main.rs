@@ -7,18 +7,14 @@ mod commands;
 #[cfg(all(test, target_os = "linux"))]
 mod desktop_acceptance;
 mod knowledge;
+mod platform;
 mod semantic;
 
-use std::{
-    path::Path,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64},
-    },
-};
+use std::{path::Path, sync::Arc};
 
 use agent::*;
 use commands::*;
+use engine::Engine;
 use inference::{InferenceWorker, LlamaProvider};
 use storage::SqliteStore;
 use tauri::Manager;
@@ -64,7 +60,6 @@ fn run_desktop(
     spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
 ) {
     builder
-        .manage(knowledge::KnowledgeJobs::default())
         .setup(move |app| {
             let path = app
                 .path()
@@ -73,22 +68,16 @@ fn run_desktop(
             prepare_database(&path)?;
             let database = SqliteStore::open(&path)?;
             let worker = Arc::new(spawn_worker()?);
-            let semantic = semantic::SemanticState::new()?;
-            let database = Arc::new(Mutex::new(database));
-            semantic.restore_remembered(Arc::clone(&database));
-            app.manage(semantic);
+            let engine = Arc::new(Engine::new(
+                Arc::new(platform::TauriPlatform),
+                worker,
+                database,
+                path,
+            )?);
             let agent = Arc::new(
                 AgentSession::new().map_err(|error| std::io::Error::other(error.message))?,
             );
-            app.manage(Desktop {
-                worker,
-                agent,
-                database,
-                database_path: path,
-                operations: Arc::new(AtomicBool::new(false)),
-                active_model: AtomicI64::new(0),
-                chat_cancellation: Mutex::new(None),
-            });
+            app.manage(Desktop { engine, agent });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

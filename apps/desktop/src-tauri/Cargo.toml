@@ -11,6 +11,7 @@ tauri-build = { version = "=2.7.6", features = [] }
 
 [dependencies]
 agent-core = { path = "../../../crates/agent-core" }
+engine = { path = "../../../crates/engine" }
 agent-tools = { path = "../../../crates/tools" }
 tauri = { version = "=2.12.7", features = [] }
 inference = { path = "../../../crates/inference", features = ["llama"] }
