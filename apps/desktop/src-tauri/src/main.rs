@@ -4,10 +4,12 @@ mod agent;
 mod bundled_model;
 mod chat_context;
 mod commands;
+mod credentials;
 #[cfg(all(test, target_os = "linux"))]
 mod desktop_acceptance;
 mod knowledge;
 mod platform;
+mod providers;
 mod semantic;
 
 use std::{path::Path, sync::Arc};
@@ -68,11 +70,13 @@ fn run_desktop(
             prepare_database(&path)?;
             let database = SqliteStore::open(&path)?;
             let worker = Arc::new(spawn_worker()?);
-            let engine = Arc::new(Engine::new(
+            let engine = Arc::new(Engine::with_network(
                 Arc::new(platform::TauriPlatform),
                 worker,
                 database,
                 path,
+                Arc::new(credentials::SecretServiceStore),
+                engine::network::BoundaryConfig::default(),
             )?);
             let agent = Arc::new(
                 AgentSession::new().map_err(|error| std::io::Error::other(error.message))?,
@@ -144,6 +148,14 @@ fn run_desktop(
             chat_context::memory_edit,
             chat_context::memory_delete,
             chat_context::memory_clear,
+            providers::provider_list,
+            providers::provider_save,
+            providers::provider_delete,
+            providers::provider_test,
+            providers::provider_enter_credential,
+            providers::provider_delete_credential,
+            providers::intelligence_settings,
+            providers::set_intelligence_settings,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");

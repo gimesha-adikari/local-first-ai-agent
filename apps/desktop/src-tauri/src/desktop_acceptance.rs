@@ -502,6 +502,109 @@ fn task05_integration_desktop_fixture() {
     );
 }
 
+/// A loopback OpenAI-compatible server. `/models` lists how many requests
+/// arrived before it, so the WebView script can prove local-only mode sent
+/// nothing.
+fn openai_fixture() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut seen = 0;
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = Vec::new();
+            let mut buffer = [0; 8192];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let length = text
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().to_owned())
+                })
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let head = text.find("\r\n\r\n").map_or(0, |end| end + 4);
+            while request.len() < head + length {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let response = if text.starts_with("GET /v1/models ") {
+                let auth = if text.contains("\r\nAuthorization: Bearer sk-synthetic-dialog-123\r\n")
+                {
+                    "auth-ok"
+                } else {
+                    "auth-missing"
+                };
+                let body = format!(
+                    r#"{{"data":[{{"id":"fixture-model"}},{{"id":"seen-{seen}"}},{{"id":"{auth}"}}]}}"#
+                );
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            } else {
+                let mut body = String::new();
+                for piece in ["Remote ", "fixture ", "answer"] {
+                    body.push_str(&format!(
+                        "data: {}\n\n",
+                        json!({"choices":[{"delta":{"content":piece}}]})
+                    ));
+                }
+                body.push_str(
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                );
+                body.push_str("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n");
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            seen += 1;
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+#[ignore = "launches a packaged WebView under an isolated X11 profile with a loopback provider fixture"]
+fn providers_ipc_desktop_fixture() {
+    let port = openai_fixture();
+    run_webview_fixture_with_worker(
+        isolated_profile(),
+        include_str!("providers_ipc_acceptance.js").replace("__PORT__", &port.to_string()),
+        "document.documentElement.dataset.providersIpcResult || ''",
+        |_| {},
+        // No local model is loaded: Chat can only complete through the provider.
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(90),
+    );
+}
+
+#[test]
+#[ignore = "opens the native GTK key dialog; an XTest helper types a synthetic key in an isolated X11 and keyring session"]
+fn credential_entry_desktop_fixture() {
+    let port = openai_fixture();
+    run_webview_fixture_with_worker(
+        isolated_profile(),
+        include_str!("credential_ipc_acceptance.js").replace("__PORT__", &port.to_string()),
+        "document.documentElement.dataset.credentialIpcResult || ''",
+        |_| {},
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(90),
+    );
+}
+
 fn run_webview_fixture(
     profile: PathBuf,
     script: &'static str,

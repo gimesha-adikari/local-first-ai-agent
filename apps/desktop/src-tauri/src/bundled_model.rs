@@ -145,6 +145,12 @@ pub fn reconcile_models(
         // The bundled file was just verified against its pinned digest.
         if let Some((id, sha256)) = verified {
             db.set_model_sha256(id, sha256)?;
+            if let Some(artifact) = engine::manifest::CURATED
+                .iter()
+                .find(|artifact| artifact.sha256 == sha256)
+            {
+                db.set_model_artifact(id, Some(artifact.key))?;
+            }
         }
     }
     let candidates = database(db)?.duplicate_candidates()?;
@@ -407,6 +413,57 @@ mod tests {
         assert!(LFM25.resource.ends_with(LFM25.file_name));
         assert_eq!(LFM25.sha256.len(), 64);
         assert!(LFM25.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        // The formerly bundled file is the curated manifest entry.
+        let curated = engine::manifest::LFM25;
+        assert_eq!(
+            (
+                curated.key,
+                curated.file_name,
+                curated.bytes,
+                curated.sha256
+            ),
+            (LFM25.key, LFM25.file_name, LFM25.bytes, LFM25.sha256)
+        );
+    }
+
+    /// The Debian base package carries no language or embedding model
+    /// weights (OQ-1). Models are optional verified imports.
+    #[test]
+    fn base_package_configuration_contains_no_model_weights() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for name in ["tauri.conf.json", "tauri.deb.conf.json"] {
+            let text = fs::read_to_string(root.join(name)).unwrap();
+            let config: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let bundle = &config["bundle"];
+            let mut paths = Vec::new();
+            if let Some(resources) = bundle["resources"].as_object() {
+                paths.extend(resources.iter().flat_map(|(from, to)| {
+                    [from.clone(), to.as_str().unwrap_or_default().to_owned()]
+                }));
+            }
+            if let Some(resources) = bundle["resources"].as_array() {
+                paths.extend(
+                    resources
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned)),
+                );
+            }
+            if let Some(files) = bundle["linux"]["deb"]["files"].as_object() {
+                paths.extend(files.iter().flat_map(|(to, from)| {
+                    [to.clone(), from.as_str().unwrap_or_default().to_owned()]
+                }));
+            }
+            for path in paths {
+                let lower = path.to_ascii_lowercase();
+                assert!(
+                    ![".gguf", ".safetensors", ".onnx", ".bin", ".pt", "/models/"]
+                        .iter()
+                        .any(|suffix| lower.contains(suffix)),
+                    "{name} packages model data: {path}"
+                );
+            }
+        }
+        assert!(!root.join("tauri.bundled-model.conf.json").exists());
     }
 
     /// Reconciles a disposable copy of a real profile database. Prints the
