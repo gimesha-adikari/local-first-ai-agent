@@ -55,7 +55,7 @@ impl GenerationState {
     }
 }
 
-fn assistant_answer(content: &str) -> &str {
+pub(crate) fn assistant_answer(content: &str) -> &str {
     let trimmed = content.trim_start();
     if let Some(reasoning) = trimmed.strip_prefix("<think>") {
         return reasoning
@@ -97,6 +97,11 @@ pub struct Message {
     pub content: String,
     pub created_at: i64,
     pub stats: Option<GenerationStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<Box<crate::chat_context::AttemptContext>>,
+    /// How an ordinary attempt with selected documents was routed (Task 06-C).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_coverage: Option<Box<crate::chat_context::KnowledgeCoverage>>,
 }
 
 pub enum TurnAction {
@@ -318,6 +323,8 @@ impl ModelSettings {
             enable_thinking: self.enable_thinking,
             history,
             chat: None,
+            context: None,
+            context_observer: None,
         }
     }
 }
@@ -346,6 +353,11 @@ pub struct ModelReference {
     pub id: ModelId,
     pub file_name: String,
     pub settings: ModelSettings,
+    /// Registered from the verified application resource, not imported.
+    pub bundled: bool,
+    /// Settings follow the recommendation on every load until the user saves
+    /// custom settings.
+    pub automatic_settings: bool,
 }
 
 pub struct SavedModel {

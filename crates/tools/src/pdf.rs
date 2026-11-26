@@ -18,7 +18,7 @@ use agent_core::agent::{
     MAX_PDF_TEXT_BYTES, PdfPageRange, PdfPageText, ToolOutput,
 };
 
-use crate::{ToolContext, filesystem::escaped_len};
+use crate::filesystem::escaped_len;
 
 const METADATA_LIMIT: usize = 16 * 1024;
 const EXTRACTED_LIMIT: usize = 64 * 1024;
@@ -61,7 +61,7 @@ fn unsupported() -> AgentError {
     )
 }
 
-fn no_text() -> AgentError {
+pub(super) fn no_text() -> AgentError {
     AgentError::new(
         AgentErrorCode::PdfNoText,
         "The selected PDF pages have no extractable text layer. OCR is unavailable.",
@@ -71,31 +71,9 @@ fn no_text() -> AgentError {
 pub(super) fn read(
     input: &[u8],
     range: Option<PdfPageRange>,
-    context: &ToolContext<'_>,
+    check: &dyn Fn() -> AgentResult<()>,
 ) -> AgentResult<ToolOutput> {
-    if !input.starts_with(b"%PDF-") {
-        return Err(invalid());
-    }
-    let info = run_parser(
-        "/usr/bin/pdfinfo",
-        &["/document.pdf"],
-        input,
-        METADATA_LIMIT,
-        context,
-    )?;
-    let info = std::str::from_utf8(&info).map_err(|_| unsupported())?;
-    if field(info, "Encrypted:")? != "no" {
-        return Err(encrypted());
-    }
-    if field(info, "Form:")? == "XFA" {
-        return Err(unsupported());
-    }
-    let page_count = field(info, "Pages:")?
-        .parse::<u32>()
-        .map_err(|_| invalid())?;
-    if page_count == 0 {
-        return Err(invalid());
-    }
+    let page_count = page_count(input, check)?;
     if page_count > MAX_PDF_PAGES {
         return Err(limit());
     }
@@ -113,6 +91,55 @@ pub(super) fn read(
         ));
     }
 
+    let output = extract_text(input, first_page, last_page, EXTRACTED_LIMIT, check)?;
+    let pages = page_previews(&output, first_page, last_page)?;
+    check()?;
+    let truncated =
+        first_page != 1 || last_page != page_count || pages.iter().any(|page| page.truncated);
+    Ok(ToolOutput::PdfRead {
+        pages,
+        page_count,
+        first_page,
+        last_page,
+        file_bytes: input.len() as u64,
+        truncated,
+    })
+}
+
+pub(super) fn page_count(input: &[u8], check: &dyn Fn() -> AgentResult<()>) -> AgentResult<u32> {
+    if !input.starts_with(b"%PDF-") {
+        return Err(invalid());
+    }
+    let info = run_parser(
+        "/usr/bin/pdfinfo",
+        &["/document.pdf"],
+        input,
+        METADATA_LIMIT,
+        check,
+    )?;
+    let info = std::str::from_utf8(&info).map_err(|_| unsupported())?;
+    if field(info, "Encrypted:")? != "no" {
+        return Err(encrypted());
+    }
+    if field(info, "Form:")? == "XFA" {
+        return Err(unsupported());
+    }
+    let page_count = field(info, "Pages:")?
+        .parse::<u32>()
+        .map_err(|_| invalid())?;
+    if page_count == 0 {
+        return Err(invalid());
+    }
+    Ok(page_count)
+}
+
+pub(super) fn extract_text(
+    input: &[u8],
+    first_page: u32,
+    last_page: u32,
+    output_limit: usize,
+    check: &dyn Fn() -> AgentResult<()>,
+) -> AgentResult<String> {
     let output = run_parser(
         "/usr/bin/pdftotext",
         &[
@@ -128,22 +155,24 @@ pub(super) fn read(
             "-",
         ],
         input,
-        EXTRACTED_LIMIT,
-        context,
+        output_limit,
+        check,
     )?;
-    let text = std::str::from_utf8(&output).map_err(|_| unsupported())?;
-    let pages = page_previews(text, first_page, last_page)?;
-    context.check()?;
-    let truncated =
-        first_page != 1 || last_page != page_count || pages.iter().any(|page| page.truncated);
-    Ok(ToolOutput::PdfRead {
-        pages,
-        page_count,
-        first_page,
-        last_page,
-        file_bytes: input.len() as u64,
-        truncated,
-    })
+    String::from_utf8(output).map_err(|_| unsupported())
+}
+
+pub(super) fn page_texts(
+    text: &str,
+    expected_pages: u32,
+) -> AgentResult<impl Iterator<Item = &str>> {
+    // pdftotext appends a form feed for each page. Verify all boundaries
+    // before assigning page numbers.
+    let body = text.strip_suffix('\x0c').ok_or_else(unsupported)?;
+    let pages = body.split('\x0c');
+    if pages.clone().count() != expected_pages as usize {
+        return Err(unsupported());
+    }
+    Ok(pages)
 }
 
 fn field<'a>(info: &'a str, label: &str) -> AgentResult<&'a str> {
@@ -157,13 +186,7 @@ fn field<'a>(info: &'a str, label: &str) -> AgentResult<&'a str> {
 }
 
 fn page_previews(text: &str, first_page: u32, last_page: u32) -> AgentResult<Vec<PdfPageText>> {
-    // A trailing form feed is produced by pdftotext for every processed page.
-    // Require exact boundary count before attributing text to page numbers.
-    let body = text.strip_suffix('\x0c').ok_or_else(unsupported)?;
-    let extracted = body.split('\x0c');
-    if extracted.clone().count() != (last_page - first_page + 1) as usize {
-        return Err(unsupported());
-    }
+    let extracted = page_texts(text, last_page - first_page + 1)?;
     let mut bytes = 0;
     let mut escaped_bytes = 0;
     let mut pages = Vec::new();
@@ -202,14 +225,14 @@ fn run_parser(
     arguments: &[&str],
     input: &[u8],
     output_limit: usize,
-    context: &ToolContext<'_>,
+    check: &dyn Fn() -> AgentResult<()>,
 ) -> AgentResult<Vec<u8>> {
-    context.check()?;
+    check()?;
     let filter = parser_filter()?;
     let filter_fd = filter.as_raw_fd();
     let filter_argument = filter_fd.to_string();
     // Each invocation has independent address-space and CPU ceilings.
-    // The authorization owner's six-second ToolContext bounds combined wall time.
+    // The caller's checkpoint bounds combined wall time and handles cancellation.
     let mut command = Command::new("/usr/bin/prlimit");
     command
         .args([
@@ -297,7 +320,7 @@ fn run_parser(
     let mut diagnostics = Vec::new();
 
     let status = loop {
-        context.check()?;
+        check()?;
         if let Some(pipe) = writer.as_mut() {
             let end = input.len().min(consumed + 16 * 1024);
             match pipe.write(&input[consumed..end]) {
@@ -326,7 +349,7 @@ fn run_parser(
         }
         thread::sleep(Duration::from_millis(2));
     };
-    context.check()?;
+    check()?;
     classify(status, &diagnostics)?;
     Ok(output)
 }

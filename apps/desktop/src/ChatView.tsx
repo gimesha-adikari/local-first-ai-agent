@@ -1,8 +1,11 @@
 import {
   outputBudgetNote, responseNotice, splitReasoning, suggestedOutputLimit, type ContinuationStatus, type Message,
 } from "./chat";
-import { ArrowDownIcon, ChevronRightIcon, RefreshIcon, Spinner, ThinkIcon } from "./icons";
+import { useCallback, useMemo, useState } from "react";
+import { ArrowDownIcon, BookIcon, ChevronRightIcon, RefreshIcon, Spinner, ThinkIcon } from "./icons";
+import { contextUsageLabel, coverageLines, coverageSummary, isContextual, type KnowledgeCoverage } from "./knowledge";
 import MarkdownMessage, { CopyButton } from "./MarkdownMessage";
+import { SourceList, useSourceReferences } from "./Sources";
 import { modelLabel } from "./models";
 import { Callout, IconButton } from "./ui";
 import type { UnifiedTurn } from "./unified";
@@ -32,9 +35,19 @@ export type ChatActions = {
   onOpenLimits: () => void;
 };
 
+/** Library state that source references and coverage notes depend on. */
+export type KnowledgeContext = {
+  /** Changes when retained source text can change. */
+  revision: number;
+  documentName: (id: number) => string | null;
+  /** Live coverage kept for this session when the attempt saved none (ordinary Chat routes). */
+  liveCoverage: (messageId: number) => KnowledgeCoverage | null;
+};
+
 function AssistantMessage({
-  message, latest, busy, contextLength, actions, continuation, modelName = null,
+  message, latest, busy, contextLength, actions, continuation, modelName = null, knowledge,
 }: {
+  knowledge: KnowledgeContext;
   modelName?: string | null;
   message: Message;
   latest: boolean;
@@ -55,11 +68,44 @@ function AssistantMessage({
   const larger = notice?.suggestLimit && contextLength && reached ? suggestedOutputLimit(reached, contextLength) : null;
   const excluded = message.stats?.excludedTurns ?? 0;
   const budgetNote = !streaming ? outputBudgetNote(message.stats) : null;
+  const contextual = isContextual(message);
+  const legacyUsage = message.context?.memoryEnabled == null ? message.stats?.contextUsage : null;
+  const usage = message.context?.fitted ?? legacyUsage ?? null;
+  const coverage = message.context?.coverage ?? message.routeCoverage ?? knowledge.liveCoverage(message.id);
+  const summary = coverageSummary(coverage);
+  const citations = useSourceReferences(message.id, !streaming && contextual, knowledge.revision);
+  const [focus, setFocus] = useState<{ id: string; at: number } | null>(null);
+  const onSelect = useCallback((id: string) => setFocus({ id, at: Date.now() }), []);
+  const citationProps = useMemo(() => {
+    const ids = new Set(citations.filter(({ cited }) => cited).map(({ citationId }) => citationId));
+    return ids.size ? { ids, onSelect } : undefined;
+  }, [citations, onSelect]);
+  const notes = coverageLines(coverage, streaming ? null : usage, (id) =>
+    citations.find(({ documentId }) => documentId === id)?.documentName ?? knowledge.documentName(id),
+  true);
+  const usageLabel = !streaming ? contextUsageLabel(usage) : null;
 
   return (
     <div className="assistant-turn" aria-label="Assistant">
+      {summary && (
+        <p className={`context-note context-${summary.tone}`}>
+          <BookIcon size={13} />
+          <span className="context-title">{summary.title}</span>
+          {summary.detail && <span className="context-detail">{summary.detail}</span>}
+        </p>
+      )}
       {reasoning !== null && <Reasoning text={reasoning} complete={reasoningComplete} streaming={streaming} />}
-      {answer && <MarkdownMessage text={answer} />}
+      {answer && <MarkdownMessage text={answer} citations={citationProps} />}
+      {!streaming && citations.length > 0 && (
+        <SourceList key={`${message.id}:${knowledge.revision}`} messageId={message.id} citations={citations} revision={knowledge.revision}
+          focus={focus} onFocusHandled={() => setFocus(null)} />
+      )}
+      {!streaming && message.context?.coverage && !usage && (
+        <p className="hint">Prompt preparation did not complete. Fitted counts are unavailable.</p>
+      )}
+      {notes.length > 0 && (
+        <ul className="coverage-notes">{notes.map((note) => <li key={note}>{note}</li>)}</ul>
+      )}
       {streaming && !answer && reasoning === null && (
         <p className="activity-live" role="status"><Spinner size={13} />Generating…</p>
       )}
@@ -77,6 +123,7 @@ function AssistantMessage({
               )}
               {own?.checking && <span className="hint inline-status"><Spinner size={12} />Checking continuation…</span>}
               <button type="button" className="secondary-button small" disabled={busy}
+                title={contextual ? "Search again with your current knowledge settings" : undefined}
                 onClick={() => onRegenerate({})}><RefreshIcon size={14} />Regenerate</button>
               {larger && (
                 <button type="button" className="secondary-button small" disabled={busy}
@@ -97,11 +144,17 @@ function AssistantMessage({
         <div className="message-actions">
           {message.content && <CopyButton text={answer || message.content} label="Copy response" />}
           {latest && (
-            <IconButton label="Regenerate response" disabled={busy} onClick={() => onRegenerate({})}>
+            <IconButton label={contextual ? "Regenerate with current knowledge settings" : "Regenerate response"} disabled={busy}
+              onClick={() => onRegenerate({})}>
               <RefreshIcon size={14} />
             </IconButton>
           )}
           {modelName && <span className="message-meta" title={modelName}>{modelLabel(modelName)}</span>}
+          {usageLabel && (
+            <span className="message-meta" title="Passages and memories supplied in this attempt. Contextual answers are excluded from later prompts.">
+              {usageLabel}
+            </span>
+          )}
           {budgetNote && <span className="message-meta" title="Thinking and the answer share this budget.">{budgetNote}</span>}
           {excluded > 0 && (
             <span className="message-meta">
@@ -125,8 +178,9 @@ const attemptLabel: Record<Message["state"], string> = {
 
 /** One saved Chat turn: the user message and its assistant attempts. */
 export function ChatTurnView({
-  turn, latest, busy, contextLength, actions, continuation,
+  turn, latest, busy, contextLength, actions, continuation, knowledge,
 }: {
+  knowledge: KnowledgeContext;
   turn: UnifiedTurn;
   latest: boolean;
   busy: boolean;
@@ -142,7 +196,7 @@ export function ChatTurnView({
         const last = index === attempts.length - 1;
         const body = (
           <AssistantMessage message={attempt.message} modelName={attempt.modelName} latest={latest && last} busy={busy}
-            contextLength={contextLength} actions={actions} continuation={continuation} />
+            contextLength={contextLength} actions={actions} continuation={continuation} knowledge={knowledge} />
         );
         if (last) return <div key={attempt.message.id}>{body}</div>;
         return (

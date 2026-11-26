@@ -19,6 +19,7 @@ fn response(text: &str, reason: FinishReason) -> DecisionResponse {
             tokens_per_second: 1.0,
             excluded_turns: 0,
             output_budget: None,
+            context_usage: None,
             assistant_replay: None,
         },
     }

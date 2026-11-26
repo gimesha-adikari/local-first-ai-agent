@@ -94,6 +94,7 @@ impl RuntimeHost for Host {
                 tokens_per_second: 10.0,
                 excluded_turns: 0,
                 output_budget: None,
+                context_usage: None,
                 assistant_replay: None,
             },
         })

@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { stateLabel } from "./agent";
 import type { TaskState } from "./agentTypes";
 import {
-  AgentIcon, ChatIcon, ChevronRightIcon, ComposeIcon, CubeIcon, GearIcon, PanelLeftIcon, SearchIcon, Spinner,
+  AgentIcon, BookIcon, ChatIcon, ChevronRightIcon, ComposeIcon, CubeIcon, GearIcon, MemoryIcon, PanelLeftIcon, SearchIcon, Spinner,
 } from "./icons";
 import { IconButton } from "./ui";
 
@@ -15,7 +15,10 @@ export type RecordItem = { key: string; id: string; title: string; updatedAt: nu
 export default function Sidebar({
   collapsed, onToggle, onNewThread, newDisabled, searching, onSearching, query, onQuery, searchError,
   items, records, currentKey, navigationDisabled, onOpen, onOpenRecord, onModels, onSettings, loading,
+  onKnowledge, onMemory,
 }: {
+  onKnowledge: () => void;
+  onMemory: () => void;
   collapsed: boolean;
   onToggle: () => void;
   onNewThread: () => void;
@@ -49,6 +52,10 @@ export default function Sidebar({
         <IconButton label="Show sidebar" onClick={onToggle}><PanelLeftIcon size={18} /></IconButton>
         <IconButton label="New thread" onClick={onNewThread} disabled={newDisabled}><ComposeIcon size={18} /></IconButton>
         <IconButton label="Search" onClick={() => { onToggle(); onSearching(true); }}><SearchIcon size={18} /></IconButton>
+        <IconButton label="Knowledge" onClick={onKnowledge} disabled={navigationDisabled}
+          aria-current={currentKey === "knowledge" ? "page" : undefined}><BookIcon size={18} /></IconButton>
+        <IconButton label="Memory" onClick={onMemory} disabled={navigationDisabled}
+          aria-current={currentKey === "memory" ? "page" : undefined}><MemoryIcon size={18} /></IconButton>
         <IconButton label="Models" onClick={onModels}><CubeIcon size={18} /></IconButton>
         <span className="spacer" />
         <IconButton label="Settings" onClick={onSettings}><GearIcon size={18} /></IconButton>
@@ -81,6 +88,14 @@ export default function Sidebar({
             <SearchIcon size={16} /><span>Search</span>
           </button>
         )}
+        <button type="button" className="nav-item" onClick={onKnowledge} disabled={navigationDisabled}
+          aria-current={currentKey === "knowledge" ? "page" : undefined}>
+          <BookIcon size={16} /><span>Knowledge</span>
+        </button>
+        <button type="button" className="nav-item" onClick={onMemory} disabled={navigationDisabled}
+          aria-current={currentKey === "memory" ? "page" : undefined}>
+          <MemoryIcon size={16} /><span>Memory</span>
+        </button>
         <button type="button" className="nav-item" onClick={onModels}>
           <CubeIcon size={16} /><span>Models</span>
         </button>

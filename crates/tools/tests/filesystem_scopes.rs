@@ -624,3 +624,167 @@ fn pdf_cancellation_stops_and_reaps_an_active_parser() {
         assert!(!std::path::Path::new(&format!("/proc/{child}")).exists());
     });
 }
+
+#[test]
+fn knowledge_reads_full_text_and_markdown_without_agent_previews() {
+    use agent_core::knowledge::{DocumentFormat, SourceReference};
+    use agent_tools::knowledge::SelectedKnowledgeFile;
+
+    let fixture = Fixture::new();
+    let body = format!("{}\nEndMarker", "front ".repeat(1000));
+    for (name, format) in [
+        ("full.TXT", DocumentFormat::Txt),
+        ("guide.markdown", DocumentFormat::Markdown),
+    ] {
+        let path = fixture.0.join(name);
+        fs::write(&path, &body).unwrap();
+        let contents = SelectedKnowledgeFile::pin(&path)
+            .unwrap()
+            .read(|| Ok(()))
+            .unwrap();
+        assert_eq!(contents.format, format);
+        let result = contents.extract(|| Ok(())).unwrap();
+        let last = result.chunks.last().unwrap();
+        assert!(last.text.ends_with("EndMarker"));
+        assert!(matches!(
+            last.source,
+            SourceReference::Lines { end_line: 2, .. }
+        ));
+        assert_eq!(
+            result
+                .chunks
+                .iter()
+                .map(|chunk| chunk.text.len())
+                .sum::<usize>(),
+            body.len()
+        );
+        assert!(result.pdf_coverage.is_none());
+    }
+}
+
+#[test]
+fn knowledge_rejects_unapproved_resource_shapes_and_uses_the_selected_inode() {
+    use agent_tools::knowledge::SelectedKnowledgeFile;
+
+    let fixture = Fixture::new();
+    let original = fixture.0.join("notes.txt");
+    fs::write(&original, "before").unwrap();
+    let directory = fixture.0.join("folder.txt");
+    fs::create_dir(&directory).unwrap();
+    let link = fixture.0.join("symlink.txt");
+    symlink(&original, &link).unwrap();
+    let hard = fixture.0.join("hard.txt");
+    fs::hard_link(&original, &hard).unwrap();
+
+    for path in [
+        &directory,
+        &link,
+        &hard,
+        &original,
+        &PathBuf::from("notes.txt"),
+    ] {
+        assert_eq!(
+            SelectedKnowledgeFile::pin(path).err().unwrap().code,
+            AgentErrorCode::PermissionDenied
+        );
+    }
+    fs::remove_file(hard).unwrap();
+    let selected = SelectedKnowledgeFile::pin(&original).unwrap();
+    fs::rename(&original, fixture.0.join("moved.txt")).unwrap();
+    fs::write(&original, "replacement path").unwrap();
+    assert_eq!(selected.read(|| Ok(())).unwrap().bytes(), b"before");
+}
+
+#[test]
+fn knowledge_read_limits_and_utf8_validation_fail_before_indexing() {
+    use agent_core::{agent::AgentError, knowledge::MAX_TEXT_BYTES};
+    use agent_tools::knowledge::SelectedKnowledgeFile;
+
+    let fixture = Fixture::new();
+    let path = fixture.0.join("large.txt");
+    fs::File::create(&path)
+        .unwrap()
+        .set_len(MAX_TEXT_BYTES as u64 + 1)
+        .unwrap();
+    let selected = SelectedKnowledgeFile::pin(&path).unwrap();
+    assert_eq!(
+        selected.read(|| Ok(())).err().unwrap().code,
+        AgentErrorCode::KnowledgeLimit
+    );
+
+    fs::write(&path, b"broken\xff").unwrap();
+    let selected = SelectedKnowledgeFile::pin(&path).unwrap();
+    assert_eq!(
+        selected
+            .read(|| Err(AgentError::new(AgentErrorCode::Cancelled, "fixture")))
+            .err()
+            .unwrap()
+            .code,
+        AgentErrorCode::Cancelled
+    );
+    let contents = SelectedKnowledgeFile::pin(&path)
+        .unwrap()
+        .read(|| Ok(()))
+        .unwrap();
+    assert!(contents.extract(|| Ok(())).is_err());
+}
+
+#[test]
+#[ignore = "uses local Poppler and Bubblewrap with Linux namespace isolation"]
+fn knowledge_pdf_indexes_beyond_agent_range_and_reports_partial_page_coverage() {
+    use agent_core::knowledge::SourceReference;
+    use agent_tools::knowledge::SelectedKnowledgeFile;
+
+    let fixture = Fixture::new();
+    let path = fixture.0.join("limited.pdf");
+    let mut pages = vec![""; 101];
+    pages[0] = "first page";
+    pages[4] = "searchable beyond the Agent preview";
+    pages[99] = "last examined";
+    pages[100] = "outside import limit";
+    fs::write(&path, synthetic_pdf(&pages)).unwrap();
+    let extract = |path: &std::path::Path| {
+        SelectedKnowledgeFile::pin(path)
+            .unwrap()
+            .read(|| Ok(()))
+            .unwrap()
+            .extract(|| Ok(()))
+    };
+    let result = extract(&path).unwrap();
+    let coverage = result.pdf_coverage.unwrap();
+    assert_eq!(
+        (
+            coverage.page_count,
+            coverage.pages_examined,
+            coverage.pages_without_text
+        ),
+        (101, 100, 97)
+    );
+    assert!(coverage.is_partial());
+    assert!(
+        result
+            .chunks
+            .iter()
+            .any(|chunk| chunk.source == (SourceReference::Page { page: 5 })
+                && chunk.text.contains("searchable beyond"))
+    );
+    assert!(
+        result
+            .chunks
+            .iter()
+            .any(|chunk| chunk.source == (SourceReference::Page { page: 100 }))
+    );
+    assert!(
+        !result
+            .chunks
+            .iter()
+            .any(|chunk| chunk.text.contains("outside"))
+    );
+
+    let scanned = fixture.0.join("scanned.pdf");
+    fs::write(&scanned, include_bytes!("fixtures/image-only.pdf")).unwrap();
+    assert_eq!(
+        extract(&scanned).unwrap_err().code,
+        AgentErrorCode::PdfNoText
+    );
+}

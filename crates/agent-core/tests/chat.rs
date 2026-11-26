@@ -73,6 +73,8 @@ fn message(position: i64, role: MessageRole, state: GenerationState, content: &s
         content: content.into(),
         created_at: 0,
         stats: None,
+        context: None,
+        route_coverage: None,
     }
 }
 

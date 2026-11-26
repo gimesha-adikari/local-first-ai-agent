@@ -8,5 +8,11 @@ pub fn status() -> &'static str {
 pub mod inference;
 
 pub mod chat;
+pub mod chat_context;
+pub mod chat_route;
 
 pub mod agent;
+
+pub mod knowledge;
+
+pub mod semantic;

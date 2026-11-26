@@ -53,6 +53,10 @@ export const MonitorIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="4.5" 
 export const UploadIcon = (p: IconProps) => <Icon {...p}><path d="M12 15.5v-11M7.5 9 12 4.5 16.5 9" /><path d="M4.5 15v3.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V15" /></Icon>;
 export const PowerIcon = (p: IconProps) => <Icon {...p}><path d="M12 3.5v8" /><path d="M7 6.5a7 7 0 1 0 10 0" /></Icon>;
 
+export const BookIcon = (p: IconProps) => <Icon {...p}><path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H18.5v13H6.5A1.5 1.5 0 0 0 5 18.5z" /><path d="M5 18.5A1.5 1.5 0 0 0 6.5 20h12v-3" /><path d="M9 8h6" /></Icon>;
+export const MemoryIcon = (p: IconProps) => <Icon {...p}><path d="M7 3.5h10A1.5 1.5 0 0 1 18.5 5v15.5L12 16.5l-6.5 4V5A1.5 1.5 0 0 1 7 3.5z" /></Icon>;
+export const QuoteIcon = (p: IconProps) => <Icon {...p}><path d="M5 17.5c2.5-.5 4-2.5 4-5.5V7.5H5V12h4M15 17.5c2.5-.5 4-2.5 4-5.5V7.5h-4V12h4" /></Icon>;
+
 export function Spinner({ size = 14 }: { size?: number }) {
   return (
     <svg className="spinner" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">

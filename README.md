@@ -1,9 +1,11 @@
 # local-first-ai-agent
 
-A Linux desktop app for offline Chat and bounded Agent tasks. v0.1.0
-runs GGUF models on the CPU with llama.cpp and saves conversations and
-Agent activity in local SQLite. The accepted build is a release candidate.
-Publication is pending. [v0.1.0 release notes](docs/release-notes-v0.1.0.md)
+A Linux desktop app for offline Chat, bounded Agent tasks, and local
+knowledge. It runs GGUF models on the CPU with llama.cpp and saves
+conversations, Agent activity, imported documents and optional memories in
+local SQLite. v0.2.0 adds explicit document import, keyword and optional
+semantic search, cited answers, and personal memory. Public releases are
+deferred until v1.0.0. [v0.2.0 architecture](docs/architecture.md#local-knowledge) · [v0.1.0 release notes](docs/release-notes-v0.1.0.md)
 
 ## Models
 
@@ -11,6 +13,7 @@ Publication is pending. [v0.1.0 release notes](docs/release-notes-v0.1.0.md)
 | --- | --- | --- | --- | --- |
 | LFM2.5-1.2B-Instruct Q4_K_M | Included in the bundled Debian package | Yes | Disabled | Disabled |
 | Qwen3.5-4B | Optional local GGUF imported through **Models** | Yes | Yes | Yes |
+| BGE-small-en-v1.5 (F16 GGUF) | Optional local embedding model imported through **Models** for semantic Knowledge search | Not for Chat | No | No |
 
 LFM2.5 is the lightweight built-in assistant. The app verifies the
 bundled file by size and SHA-256 and loads it automatically in a fresh
@@ -26,8 +29,8 @@ download or automatic model switching. [Verified Qwen GGUF](https://huggingface.
 The accepted `amd64` package was tested on Ubuntu 26.04.1 LTS. Its
 executable references glibc 2.39 and its CPU build uses AVX2, FMA, F16C
 and BMI2. Compatibility outside the tested environment remains unverified.
-With the Task 07-A package in the current directory, verify it before
-installing.
+The checksum below identifies the v0.1.0 package. v0.2.0 has no packaged
+installer in this milestone. Verify the v0.1.0 package before installing.
 
 ```sh
 printf '%s  %s\n' \
@@ -79,6 +82,15 @@ build declares these dependencies automatically.
   covers up to four contiguous pages, with a default of the first four.
   The app shows extracted text and coverage warnings separately from the
   model's answer. [Permission and data architecture](docs/architecture.md)
+- **Knowledge** imports one TXT, Markdown or PDF file at a time after
+  retention consent. Keyword search runs in SQLite. Semantic and hybrid
+  search need the imported BGE model. Enable Knowledge in Chat, tick the
+  documents to search, and choose Automatic or Documents-only grounding.
+  Each answer shows its sources, coverage and fitted counts.
+  Overviews read at most four passages and say when they are partial.
+- **Memory** is off by default. Save notes explicitly under Settings →
+  Knowledge & Memory. When enabled, up to three relevant notes are added to
+  later answers as background, separate from document evidence.
 
 ## Known limitations
 
@@ -90,11 +102,29 @@ build declares these dependencies automatically.
 - PDF extraction requires Poppler and working Linux namespace isolation
   with Bubblewrap and seccomp. It supports PDFs with selectable text up to
   8 MiB and 256 pages. Scanned pages require OCR outside the app. Encrypted
-  PDFs, image input, and GPU inference are unsupported in v0.1.0.
-- Local SQLite is unencrypted. Saved answers can contain text from
-  selected files. Raw tool previews are held in memory for the current
-  session. Deleting a conversation removes its saved messages and linked
-  task history. Content-free audit entries and external copies can remain.
+  PDFs, image input, and GPU inference are unsupported.
+- Knowledge limits: TXT and Markdown are capped at 1 MiB, the library holds
+  128 documents and 32 MiB of retained text, and memory holds 512 notes.
+  Scanned PDFs and encrypted files are not indexed. Only one import runs at
+  a time.
+- Search and routing are English-focused. Keyword search has no stemming, so
+  "run" does not match "running". Routing cues are English heuristics. A
+  refinement such as "make it shorter" must be short and add no new subject.
+- Answers are grounded only in the passages supplied to the model. A
+  refinement re-answers from current evidence, so wording can change beyond
+  the requested revision. Evidence answers do not carry earlier turns.
+- LFM2.5 often writes facts in brackets instead of linked source markers, so
+  some grounded answers show sources as uncited.
+- Semantic search returns `busy` while Chat or Agent is generating. The
+  library refreshes by polling rather than by push events.
+- Local SQLite is unencrypted. Saved answers, documents, and memories can
+  contain text from selected files. Raw tool previews are held in memory for
+  the current session. Deleting a conversation removes its saved messages and
+  linked task history. Content-free audit entries and external copies can
+  remain. Earlier answers may keep quotations from deleted documents or
+  memories.
+- Downgrading to v0.1.0 requires the database backup taken before the
+  upgrade. The v0.1.0 executable accepts only schema version 5 and below.
 
 ## Development on Linux
 

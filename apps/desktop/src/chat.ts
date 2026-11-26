@@ -1,4 +1,6 @@
+import type { AttemptContext } from "./knowledge";
 import type { GenerationStats, ModelConfig, Status } from "./inference";
+import type { KnowledgeCoverage, RetrievalMode } from "./knowledge";
 
 export type Appearance = "system" | "light" | "dark";
 
@@ -45,6 +47,10 @@ export type ModelReference = {
   id: number;
   fileName: string;
   settings: ModelSettings;
+  /** Registered from the verified app resource rather than imported (Task 06-A). */
+  bundled: boolean;
+  /** Settings follow the recommendation on every load until custom settings are saved. */
+  automaticSettings: boolean;
 };
 
 export type Bootstrap = {
@@ -61,6 +67,8 @@ export type BundledModel = {
   model: ModelReference | null;
   /** No user-imported model exists, so the UI may load the bundled one. */
   autoLoad: boolean;
+  /** The last Chat model loaded successfully; absent after an explicit unload (Task 06-C). */
+  restore?: { model: ModelReference; available: boolean } | null;
 };
 
 export type ConversationSummary = {
@@ -77,6 +85,9 @@ export type Message = {
   content: string;
   createdAt: number;
   stats: GenerationStats | null;
+  context?: AttemptContext | null;
+  /** Routing coverage of an ordinary attempt with selected documents (Task 06-C). */
+  routeCoverage?: import("./knowledge").KnowledgeCoverage | null;
 };
 
 export type Conversation = ConversationSummary & {
@@ -87,6 +98,7 @@ export type Conversation = ConversationSummary & {
 
 export type ChatEvent =
   | { kind: "started"; user: Message | null; assistant: Message }
+  | { kind: "knowledge"; coverage: KnowledgeCoverage }
   | { kind: "delta"; id: number; text: string };
 
 function upsert(messages: Message[], message: Message): Message[] {
@@ -96,6 +108,7 @@ function upsert(messages: Message[], message: Message): Message[] {
 }
 
 export function applyChatEvent(messages: Message[], event: ChatEvent): Message[] {
+  if (event.kind === "knowledge") return messages;
   if (event.kind === "started") {
     const withUser = event.user ? upsert(messages, event.user) : messages;
     return upsert(withUser, event.assistant);
@@ -176,7 +189,12 @@ export function validModelSettings(settings: ModelSettings): boolean {
 }
 
 /** Per-request chat options accepted by `send_message` and `regenerate`. */
-export type ChatOptions = { enableThinking?: boolean; maxTokens?: number };
+export type ChatOptions = {
+  enableThinking?: boolean;
+  maxTokens?: number;
+  /** Omitted or null for ordinary Chat. */
+  knowledge?: { mode: RetrievalMode; documentIds: number[]; grounding?: "auto" | "documents" } | null;
+};
 
 /** Sampling defaults of the backend (agent-core GenerationRequest). */
 export const samplingDefaults = { temperature: 0.7, topP: 0.8, topK: 20 } as const;
@@ -225,14 +243,19 @@ export function lowOutputLimit(settings: Pick<ModelSettings, "maxTokens">): bool
  * Build explicit per-turn options. Thinking is sent only when the person chose
  * it for this turn and the loaded model supports it; otherwise the turn is direct.
  */
-export function chatRequestOptions({ thinking, supportsThinking, maxTokens }: {
+export function chatRequestOptions({ thinking, supportsThinking, maxTokens, knowledge = null }: {
   thinking: boolean;
   supportsThinking: boolean;
   maxTokens?: number | null;
+  knowledge?: ChatOptions["knowledge"];
 }): ChatOptions {
   const options: ChatOptions = { enableThinking: thinking && supportsThinking };
   if (typeof maxTokens === "number" && Number.isInteger(maxTokens) && maxTokens >= 1 && maxTokens <= 4096) {
     options.maxTokens = maxTokens;
+  }
+  if (knowledge) {
+    options.knowledge = { mode: knowledge.mode, documentIds: [...knowledge.documentIds] };
+    if (knowledge.grounding === "documents") options.knowledge.grounding = "documents";
   }
   return options;
 }
@@ -306,8 +329,13 @@ export function continuationErrorCopy(error: CommandError): { title: string; det
     case "invalid_config":
       return {
         title: "This reply can't be continued",
-        detail: `${message ? `${message.replace(/\.?$/, ".")} ` : ""}Replies saved before continuation support, replies written by `
-          + "a different model, and replies that used every continuation can be regenerated instead.",
+        detail: `${message ? `${message.replace(/\.?$/, ".")} ` : ""}Replies that used documents or memory, replies saved before `
+          + "continuation support, replies written by a different model, and replies that used every continuation can be regenerated instead.",
+      };
+    case "contextual":
+      return {
+        title: "Answers that used documents or memory can't be continued",
+        detail: "Regenerate searches again with your current knowledge settings and keeps this answer as an earlier attempt.",
       };
     case "busy":
       return { title: "Another operation is running", detail: message || "Wait for it to finish, then try again." };

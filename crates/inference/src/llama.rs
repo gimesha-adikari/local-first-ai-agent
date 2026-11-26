@@ -149,11 +149,10 @@ page-number ::= [1-9] [0-9]*
     Some(rules)
 }
 
-/// Owns native resources on the inference worker. Fields drop in declaration order.
+/// Owns the chat model on the dedicated inference worker.
 #[derive(Default)]
 pub struct LlamaProvider {
     loaded: Option<LoadedModel>,
-    backend: Option<LlamaBackend>,
     evaluate_unreleased_agent_formats: bool,
 }
 
@@ -227,17 +226,7 @@ impl InferenceProvider for LlamaProvider {
         config.validate()?;
         let file_bytes = crate::gguf::validate(path)?;
         let start = Instant::now();
-        if self.backend.is_none() {
-            let mut backend = LlamaBackend::init().map_err(|_| {
-                InferenceError::new(
-                    ErrorCode::LoadFailed,
-                    "Could not initialize the llama.cpp CPU backend.",
-                )
-            })?;
-            backend.void_logs();
-            self.backend = Some(backend);
-        }
-        let backend = self.backend.as_ref().expect("backend initialized");
+        let backend = crate::backend::cpu_backend()?;
         let model = LlamaModel::load_from_file(
             backend,
             path,
@@ -341,12 +330,13 @@ impl InferenceProvider for LlamaProvider {
         request: &agent_core::agent::DecisionRequest,
         cancellation: &Cancellation,
     ) -> Result<agent_core::agent::DecisionResponse> {
-        let (Some(loaded), Some(backend)) = (&self.loaded, &self.backend) else {
+        let Some(loaded) = &self.loaded else {
             return Err(InferenceError::new(
                 ErrorCode::NoModel,
                 "Load a GGUF model first.",
             ));
         };
+        let backend = crate::backend::cpu_backend()?;
         // Decisions always run with Thinking off and grammar-constrained JSON.
         let Some(format) = loaded.agent_format.filter(|_| loaded.agent_enabled) else {
             return Err(InferenceError::new(
@@ -402,13 +392,19 @@ impl InferenceProvider for LlamaProvider {
         emit: &mut dyn FnMut(TextDelta) -> Result<()>,
     ) -> Result<GenerationStats> {
         request.validate()?;
-        let (Some(loaded), Some(backend)) = (&self.loaded, &self.backend) else {
+        let Some(loaded) = &self.loaded else {
             return Err(InferenceError::new(
                 ErrorCode::NoModel,
                 "Load a GGUF model first.",
             ));
         };
-        loaded.generate(backend, request, cancellation, emit, None)
+        loaded.generate(
+            crate::backend::cpu_backend()?,
+            request,
+            cancellation,
+            emit,
+            None,
+        )
     }
 }
 
@@ -471,6 +467,7 @@ impl LoadedModel {
             tokens_per_second: 0.0,
             excluded_turns: 0,
             output_budget: None,
+            context_usage: None,
             assistant_replay: None,
         };
         if cancel.is_cancelled() {
@@ -516,17 +513,45 @@ impl LoadedModel {
         } else {
             request.max_tokens
         };
-        let fitted = fit_context(&request.history, &request.prompt, context, reserve, measure);
-        let ((mut tokens, prefilled_thinking), excluded_turns) = match fitted {
-            Err(error)
-                if error.code == ErrorCode::ContextLimit
-                    && replay.is_none()
-                    && chat.is_some_and(|chat| chat.adaptive) =>
-            {
-                fit_context(&request.history, &request.prompt, context, 1, measure)?
-            }
-            result => result?,
+        let augmented_history = request.context.as_ref().map(|context| {
+            let mut history = request.history.clone();
+            context.append_system_instructions(&mut history.system);
+            history
+        });
+        let history = augmented_history.as_ref().unwrap_or(&request.history);
+        let mut usage = request.context.as_ref().map(|context| context.usage());
+        let fit = |output, usage| {
+            let augmented;
+            let latest = if let (Some(data), Some(usage)) = (&request.context, usage) {
+                augmented = data.render(&request.prompt, usage);
+                &augmented
+            } else {
+                &request.prompt
+            };
+            fit_context(history, latest, context, output, measure)
         };
+        let ((mut tokens, prefilled_thinking), excluded_turns) = loop {
+            match fit(reserve, usage) {
+                Err(error) if error.code == ErrorCode::ContextLimit => {
+                    if let Some(usage) = &mut usage {
+                        if usage.memories > 0 {
+                            usage.memories -= 1;
+                            continue;
+                        }
+                        if usage.sources > 0 {
+                            usage.sources -= 1;
+                            continue;
+                        }
+                    }
+                    if replay.is_none() && chat.is_some_and(|chat| chat.adaptive) {
+                        break fit(1, usage)?;
+                    }
+                    return Err(error);
+                }
+                result => break result?,
+            }
+        };
+        stats.context_usage = usage;
         let fingerprint = token_fingerprint(self.model_stamp, &tokens);
         let mut generated = Vec::new();
         let mut pending = Vec::new();
@@ -605,6 +630,9 @@ impl LoadedModel {
             stats.elapsed_ms = millis(started.elapsed());
             return Ok(stats);
         }
+        if let (Some(observer), Some(usage)) = (&request.context_observer, usage) {
+            observer.decoded(usage)?;
+        }
         stats.prompt_tokens_per_second =
             Some(tokens.len() as f64 / prefill.elapsed().as_secs_f64().max(f64::EPSILON));
 
@@ -644,7 +672,7 @@ impl LoadedModel {
                 })?;
             }
             stats.generated_tokens += 1;
-            if chat.is_some() {
+            if chat.is_some() && request.context.is_none() {
                 generated.push(token.0);
             }
             pending.extend(vocab.token_to_piece(token, true, None));
@@ -661,6 +689,7 @@ impl LoadedModel {
             stats.reason = FinishReason::Cancelled;
         }
         if chat.is_some()
+            && request.context.is_none()
             && stats.reason == FinishReason::TokenLimit
             && !generated.is_empty()
             && generated.len() < MAX_CHAT_ATTEMPT_TOKENS
@@ -1047,6 +1076,193 @@ mod tests {
         );
         assert!(result.generated_tokens > 0);
         assert!(result.prompt_tokens + result.generated_tokens as usize <= context as usize);
+    }
+
+    /// Task 06-A manual review cases through the router, the evidence prompt
+    /// and native generation. Model-dependent wording is printed; assertions
+    /// check only grounding properties.
+    #[test]
+    #[ignore = "routes the Task 06-A review cases through the local GGUF in AGENT_TEST_MODEL"]
+    fn real_routed_document_chat() {
+        use agent_core::{
+            chat_context::{ChatContext, ChatIntent, EvidenceTask, Grounding},
+            chat_route::route,
+            inference::ChatGeneration,
+        };
+        let path = std::path::PathBuf::from(std::env::var_os("AGENT_TEST_MODEL").unwrap());
+        let mut provider = LlamaProvider::default();
+        provider
+            .load(
+                &path,
+                ModelConfig {
+                    context_length: 4096,
+                    threads: 4,
+                },
+            )
+            .unwrap();
+        let passages = [
+            "Orchard Visitor Guide. The orchard gate opens at nine and closes at seven. Visitors may pick apples in rows A to D. Run the hand pump only at the well marked with a blue flag.",
+            "Orchard Visitor Guide, page 2. Parking is free on weekdays. Dogs must stay on a lead. Report lost items at the farm shop.",
+        ];
+        let cases = [
+            ("fins run in this selected file", ChatIntent::Search),
+            ("what it contain", ChatIntent::Overview),
+            ("what it do", ChatIntent::Overview),
+            ("Write a four-line poem about rain", ChatIntent::General),
+        ];
+        for (question, expected) in cases {
+            let plan = route(question, None, Grounding::Auto);
+            let (task, evidence) = match plan.intent {
+                ChatIntent::Search => (
+                    EvidenceTask::Search {
+                        target: plan.query.clone(),
+                    },
+                    passages
+                        .iter()
+                        .filter(|text| text.to_lowercase().contains(&plan.query))
+                        .map(|text| text.to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                ChatIntent::Overview => (
+                    EvidenceTask::Overview { total_chunks: 2 },
+                    passages.iter().map(|text| text.to_string()).collect(),
+                ),
+                // No passage is relevant to the poem, so automatic grounding
+                // answers it as ordinary Chat.
+                _ => (EvidenceTask::Answer, Vec::new()),
+            };
+            let intent = if plan.intent == ChatIntent::Question && evidence.is_empty() {
+                ChatIntent::General
+            } else {
+                plan.intent
+            };
+            assert_eq!(intent, expected, "{question}");
+            let mut request = GenerationRequest::new(question);
+            request.max_tokens = 160;
+            request.temperature = 0.0;
+            request.chat = Some(ChatGeneration {
+                adaptive: false,
+                replay: None,
+            });
+            if intent != ChatIntent::General {
+                request.context = Some(ChatContext {
+                    evidence: Some(evidence.clone()),
+                    memories: Vec::new(),
+                    task,
+                });
+            }
+            let mut answer = String::new();
+            provider
+                .generate(&request, &Cancellation::default(), &mut |delta| {
+                    answer.push_str(&delta.text);
+                    Ok(())
+                })
+                .unwrap();
+            // Drop any reasoning block; only the visible answer is checked.
+            let answer = answer
+                .rsplit_once("</think>")
+                .map_or(answer.as_str(), |(_, visible)| visible)
+                .trim()
+                .to_owned();
+            println!(
+                "--- {question:?} -> {intent:?} ({} passages)\n{answer}",
+                evidence.len()
+            );
+            let lower = answer.to_lowercase();
+            assert!(!answer.trim().is_empty(), "{question}");
+            assert!(
+                !lower.contains("cannot answer") && !lower.contains("no document evidence"),
+                "{question}: {answer}"
+            );
+            match intent {
+                ChatIntent::Overview => assert!(lower.contains("orchard"), "{answer}"),
+                ChatIntent::Search => {
+                    assert!(lower.contains("run") || lower.contains("[s1]"), "{answer}")
+                }
+                // An ordinary creative reply: several lines, no evidence refusal.
+                _ => assert!(
+                    answer
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count()
+                        >= 3,
+                    "{answer}"
+                ),
+            }
+        }
+    }
+
+    /// Task 06-C: a refinement re-answers the previous document question from
+    /// current evidence, with an ordinary answer in the conversation that must
+    /// not leak into the evidence turn.
+    #[test]
+    #[ignore = "checks Task 06-C refinements with the local GGUF in AGENT_TEST_MODEL"]
+    fn real_refinement_uses_current_evidence_only() {
+        use agent_core::{
+            chat::{ChatHistory, CompletedTurn},
+            chat_context::{ChatContext, EvidenceTask, Grounding},
+            chat_route::{route, routed_question},
+            inference::ChatGeneration,
+        };
+        let path = std::path::PathBuf::from(std::env::var_os("AGENT_TEST_MODEL").unwrap());
+        let mut provider = LlamaProvider::default();
+        provider
+            .load(
+                &path,
+                ModelConfig {
+                    context_length: 4096,
+                    threads: 4,
+                },
+            )
+            .unwrap();
+        let previous = "Which port does the backend use, and how do I start it?";
+        let evidence = vec![
+            "Backend guide. The backend listens on port 8080. Start it from the backend folder with bash run_dev.sh. Logs are written to logs/api.log, and the health check is at /healthz."
+                .to_owned(),
+        ];
+        let plan = route("make it shorter", Some(previous), Grounding::Documents);
+        assert!(plan.refinement.is_some());
+        let mut request =
+            GenerationRequest::new(routed_question(&plan, "make it shorter", Some(previous)));
+        request.max_tokens = 120;
+        request.temperature = 0.0;
+        request.chat = Some(ChatGeneration {
+            adaptive: false,
+            replay: None,
+        });
+        request.context = Some(ChatContext {
+            evidence: Some(evidence),
+            memories: Vec::new(),
+            task: EvidenceTask::Answer,
+        });
+        // The host clears earlier turns for evidence answers. Keep the ordinary
+        // poem out exactly as the host does.
+        let ordinary = CompletedTurn {
+            user: "Write a four-line poem about rain".into(),
+            assistant: "Soft rain falls on the quiet ground.".into(),
+        };
+        let mut history = ChatHistory {
+            system: String::new(),
+            turns: vec![ordinary],
+        };
+        history.turns.clear();
+        request.history = history;
+        let mut answer = String::new();
+        provider
+            .generate(&request, &Cancellation::default(), &mut |delta| {
+                answer.push_str(&delta.text);
+                Ok(())
+            })
+            .unwrap();
+        let answer = answer
+            .rsplit_once("</think>")
+            .map_or(answer.as_str(), |(_, visible)| visible)
+            .trim()
+            .to_owned();
+        println!("--- refinement\n{answer}");
+        assert!(answer.contains("8080"), "{answer}");
+        assert!(!answer.to_lowercase().contains("rain"), "{answer}");
+        assert!(answer.split_whitespace().count() < 60, "{answer}");
     }
 
     #[test]
@@ -1873,7 +2089,7 @@ mod tests {
         .unwrap();
         let before = model
             .generate(
-                provider.backend.as_ref().unwrap(),
+                crate::backend::cpu_backend().unwrap(),
                 &full,
                 &Cancellation::default(),
                 &mut |_| panic!("no decoding before context fit"),
@@ -1940,7 +2156,7 @@ mod tests {
             let mut first_piece = Some(sender);
             let stats = model
                 .generate(
-                    provider.backend.as_ref().unwrap(),
+                    crate::backend::cpu_backend().unwrap(),
                     &request,
                     &cancellation,
                     &mut |_| {

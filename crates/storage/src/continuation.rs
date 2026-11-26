@@ -48,7 +48,7 @@ fn plan(
     message_id: MessageId,
     model: ModelId,
 ) -> Result<(ContinuationPlan, u32)> {
-    let conversation = read_conversation(connection, id)?;
+    let mut conversation = read_conversation(connection, id)?;
     let mut assistant = conversation
         .messages
         .last()
@@ -66,6 +66,11 @@ fn plan(
     else {
         return Err(ineligible("This response has no saved token-limit state."));
     };
+    if super::chat_context::is_contextual(connection, message_id)? {
+        return Err(ineligible(
+            "Regenerate this response to retrieve current knowledge or memories again.",
+        ));
+    }
     let stored = connection.query_row(
         "SELECT model_id,settings,replay,continuation_count FROM chat_attempt_replay
          WHERE message_id=?1 AND replay IS NOT NULL",
@@ -92,6 +97,7 @@ fn plan(
             "This response reached its total generation limit.",
         ));
     }
+    super::chat_context::exclude_contextual_answers(connection, &mut conversation)?;
     let (mut history, prompt) = prepare_history(&conversation)?;
     if replay.excluded_turns > history.turns.len() {
         return Err(ineligible(

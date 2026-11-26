@@ -8,6 +8,8 @@ mod device;
 #[cfg(target_os = "linux")]
 mod filesystem;
 #[cfg(target_os = "linux")]
+pub mod knowledge;
+#[cfg(target_os = "linux")]
 mod pdf;
 
 #[cfg(target_os = "linux")]

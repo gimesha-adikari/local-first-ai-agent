@@ -30,6 +30,12 @@ pub enum ErrorCode {
     PickerFailed,
     Storage,
     NotFound,
+    Cancelled,
+    TimedOut,
+    EmbeddingUnavailable,
+    EmbeddingIncompatible,
+    EmbeddingIndexUnavailable,
+    MemoryLimit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,6 +112,10 @@ pub struct GenerationRequest {
     pub history: crate::chat::ChatHistory,
     #[serde(skip)]
     pub chat: Option<ChatGeneration>,
+    #[serde(skip)]
+    pub context: Option<crate::chat_context::ChatContext>,
+    #[serde(skip)]
+    pub context_observer: Option<crate::chat_context::ContextObserver>,
 }
 
 pub const MAX_CHAT_ATTEMPT_TOKENS: usize = 8192;
@@ -144,6 +154,8 @@ impl GenerationRequest {
             enable_thinking: false,
             history: crate::chat::ChatHistory::default(),
             chat: None,
+            context: None,
+            context_observer: None,
         }
     }
 
@@ -211,6 +223,8 @@ pub struct GenerationStats {
     pub output_budget: Option<OutputBudget>,
     #[serde(skip)]
     pub assistant_replay: Option<AssistantReplay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<crate::chat_context::ContextUsage>,
 }
 
 #[derive(Debug, Serialize)]

@@ -14,14 +14,21 @@ use agent_core::{
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 mod agent;
+pub mod chat_context;
 mod continuation;
 mod conversation;
+pub mod knowledge;
+pub mod memory;
+pub mod models;
+pub mod semantic;
 pub use continuation::ContinuationPlan;
 pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 11;
+const MODEL_COLUMNS: &str =
+    "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic'";
 const NEW_TITLE: &str = "New conversation";
 
 /// Local storage for one app instance. Exclusive locking protects crash recovery
@@ -97,11 +104,43 @@ impl SqliteStore {
             transaction
                 .execute_batch(include_str!("../migrations/005_bundled_model.sql"))
                 .map_err(sql_error)?;
+        }
+        if version < 6 {
+            transaction
+                .execute_batch(include_str!("../migrations/006_knowledge.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 7 {
+            transaction
+                .execute_batch(include_str!("../migrations/007_embeddings.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 8 {
+            transaction
+                .execute_batch(include_str!("../migrations/008_chat_context.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 9 {
+            transaction
+                .execute_batch(include_str!("../migrations/009_attempt_evidence.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 10 {
+            transaction
+                .execute_batch(include_str!("../migrations/010_model_management.sql"))
+                .map_err(sql_error)?;
+            models::classify_existing_settings(&transaction)?;
+        }
+        if version < 11 {
+            transaction
+                .execute_batch(include_str!("../migrations/011_routing_and_identity.sql"))
+                .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(sql_error)?;
         }
         agent::recover_interrupted(&transaction, None).map_err(|_| storage_error())?;
+        chat_context::recover_citations(&transaction)?;
         transaction
             .execute(
                 "UPDATE messages SET state = 'interrupted' WHERE state = 'streaming'",
@@ -118,6 +157,13 @@ impl SqliteStore {
         transaction.commit().map_err(sql_error)?;
         Ok(Self { connection })
     }
+}
+
+/// A listed model with its saved path.
+#[derive(Debug, Clone)]
+pub struct SavedModelRow {
+    pub reference: ModelReference,
+    pub path: PathBuf,
 }
 
 /// Result of registering the application-bundled model.
@@ -221,7 +267,7 @@ impl SqliteStore {
             .map_err(sql_error)?;
         let reference = transaction
             .query_row(
-                "SELECT id, file_name, settings FROM models WHERE id = ?1",
+                &format!("SELECT {MODEL_COLUMNS} FROM models WHERE id = ?1"),
                 [id],
                 model_reference,
             )
@@ -233,13 +279,84 @@ impl SqliteStore {
         })
     }
 
+    pub fn finish_chat_with_sources(
+        &mut self,
+        message_id: MessageId,
+        content: &str,
+        state: GenerationState,
+        stats: Option<&GenerationStats>,
+        candidates: &[knowledge::KnowledgeHit],
+    ) -> Result<()> {
+        if state == GenerationState::Streaming {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "Completing generation requires a final state.",
+            ));
+        }
+        let replay = stats.and_then(|stats| stats.assistant_replay.as_ref());
+        let replay = if state == GenerationState::Truncated {
+            replay
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|_| storage_error())?
+        } else {
+            None
+        };
+        let stats_usage = stats.and_then(|stats| stats.context_usage);
+        let stats = stats
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| storage_error())?;
+        let transaction = self.connection.transaction().map_err(sql_error)?;
+        let conversation: ConversationId = transaction
+            .query_row(
+                "UPDATE messages SET content = ?1, state = ?2, stats = ?3
+                 WHERE id = ?4 AND role = 'assistant' AND state = 'streaming'
+                 RETURNING conversation_id",
+                params![content, stored_state(state), stats, message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?
+            .ok_or_else(inactive_generation)?;
+        transaction
+            .execute(
+                "UPDATE chat_attempt_replay SET replay=?1 WHERE message_id=?2",
+                params![replay, message_id],
+            )
+            .map_err(sql_error)?;
+        if let Some(usage) = stats_usage.filter(|_| !candidates.is_empty()) {
+            chat_context::record_evidence(&transaction, message_id, candidates, usage.sources)?;
+        }
+        chat_context::mark_citations(&transaction, message_id, content)?;
+        touch_conversation(&transaction, conversation, unix_ms()?)?;
+        transaction.commit().map_err(sql_error)
+    }
+
+    pub fn chat_regeneration_prompt(&self, id: ConversationId) -> Result<String> {
+        self.connection.query_row(
+            "SELECT m.content, EXISTS(SELECT 1 FROM conversation_agent_turns l WHERE l.user_message_id=m.id)
+             FROM messages m WHERE m.conversation_id=?1 AND m.role='user'
+             ORDER BY m.position DESC LIMIT 1",
+            [id],
+            |row| Ok((row.get(0)?, row.get::<_, bool>(1)?)),
+        ).optional().map_err(sql_error)?.map_or_else(
+            || Err(InferenceError::new(ErrorCode::InvalidConfig, "Send a message before regenerating.")),
+            |(prompt, agent)| if agent {
+                Err(InferenceError::new(ErrorCode::InvalidConfig, "Send a new Chat message after an Agent turn."))
+            } else {
+                Ok(prompt)
+            },
+        )
+    }
+
     pub fn begin_chat(
         &mut self,
         id: ConversationId,
         action: TurnAction,
         model_name: Option<&str>,
     ) -> Result<PendingTurn> {
-        self.begin_chat_inner(id, action, model_name, None)
+        self.begin_chat_inner(id, action, model_name, None, None, None)
     }
 
     pub fn begin_chat_attempt(
@@ -250,7 +367,54 @@ impl SqliteStore {
         model_id: ModelId,
         settings: ModelSettings,
     ) -> Result<PendingTurn> {
-        self.begin_chat_inner(id, action, model_name, Some((model_id, settings)))
+        self.begin_chat_inner(
+            id,
+            action,
+            model_name,
+            Some((model_id, settings)),
+            None,
+            None,
+        )
+    }
+
+    /// An ordinary attempt that also records how a request with selected
+    /// documents was routed. The answer stays ordinary for history and Continue.
+    pub fn begin_routed_chat_attempt(
+        &mut self,
+        id: ConversationId,
+        action: TurnAction,
+        model_name: Option<&str>,
+        model_id: ModelId,
+        settings: ModelSettings,
+        route: &agent_core::chat_context::KnowledgeCoverage,
+    ) -> Result<PendingTurn> {
+        self.begin_chat_inner(
+            id,
+            action,
+            model_name,
+            Some((model_id, settings)),
+            None,
+            Some(route),
+        )
+    }
+
+    pub fn begin_contextual_chat_attempt(
+        &mut self,
+        id: ConversationId,
+        action: TurnAction,
+        model_name: Option<&str>,
+    ) -> Result<PendingTurn> {
+        self.begin_chat_with_context(id, action, model_name, Default::default())
+    }
+
+    pub fn begin_chat_with_context(
+        &mut self,
+        id: ConversationId,
+        action: TurnAction,
+        model_name: Option<&str>,
+        context: agent_core::chat_context::AttemptContext,
+    ) -> Result<PendingTurn> {
+        self.begin_chat_inner(id, action, model_name, None, Some(context), None)
     }
 
     fn begin_chat_inner(
@@ -259,6 +423,8 @@ impl SqliteStore {
         action: TurnAction,
         model_name: Option<&str>,
         recipe: Option<(ModelId, ModelSettings)>,
+        context: Option<agent_core::chat_context::AttemptContext>,
+        route: Option<&agent_core::chat_context::KnowledgeCoverage>,
     ) -> Result<PendingTurn> {
         let now = unix_ms()?;
         let transaction = self.connection.transaction().map_err(sql_error)?;
@@ -311,8 +477,9 @@ impl SqliteStore {
                 None
             }
         };
+        chat_context::exclude_contextual_answers(&transaction, &mut conversation)?;
         let (history, prompt) = prepare_history(&conversation)?;
-        let assistant = insert_message(
+        let mut assistant = insert_message(
             &transaction,
             id,
             next_position(&conversation)?,
@@ -329,8 +496,22 @@ impl SqliteStore {
                 )
                 .map_err(sql_error)?;
         }
+        if let Some(context) = context {
+            chat_context::save_context(&transaction, assistant.id, &context)?;
+            assistant.context = Some(Box::new(context));
+        }
         if let Some((model_id, settings)) = recipe {
             continuation::remember_attempt(&transaction, assistant.id, model_id, settings)?;
+        }
+        if let Some(route) = route {
+            let metadata = serde_json::to_string(route).map_err(|_| storage_error())?;
+            transaction
+                .execute(
+                    "INSERT INTO chat_route_coverage (message_id, metadata) VALUES (?1, ?2)",
+                    params![assistant.id, metadata],
+                )
+                .map_err(sql_error)?;
+            assistant.route_coverage = Some(Box::new(route.clone()));
         }
         if first_message && conversation.title == NEW_TITLE {
             title_from_prompt(&transaction, id, &prompt)?;
@@ -473,45 +654,7 @@ impl ChatStore for SqliteStore {
         state: GenerationState,
         stats: Option<&GenerationStats>,
     ) -> Result<()> {
-        if state == GenerationState::Streaming {
-            return Err(InferenceError::new(
-                ErrorCode::InvalidConfig,
-                "Completing generation requires a final state.",
-            ));
-        }
-        let replay = stats.and_then(|stats| stats.assistant_replay.as_ref());
-        let replay = if state == GenerationState::Truncated {
-            replay
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|_| storage_error())?
-        } else {
-            None
-        };
-        let stats = stats
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|_| storage_error())?;
-        let transaction = self.connection.transaction().map_err(sql_error)?;
-        let conversation: ConversationId = transaction
-            .query_row(
-                "UPDATE messages SET content = ?1, state = ?2, stats = ?3
-                 WHERE id = ?4 AND role = 'assistant' AND state = 'streaming'
-                 RETURNING conversation_id",
-                params![content, stored_state(state), stats, message_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_error)?
-            .ok_or_else(inactive_generation)?;
-        transaction
-            .execute(
-                "UPDATE chat_attempt_replay SET replay=?1 WHERE message_id=?2",
-                params![replay, message_id],
-            )
-            .map_err(sql_error)?;
-        touch_conversation(&transaction, conversation, unix_ms()?)?;
-        transaction.commit().map_err(sql_error)
+        self.finish_chat_with_sources(message_id, content, state, stats, &[])
     }
 
     fn preferences(&self) -> Result<Preferences> {
@@ -543,9 +686,10 @@ impl ChatStore for SqliteStore {
     fn recent_models(&self) -> Result<Vec<ModelReference>> {
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT id, file_name, settings FROM models ORDER BY last_used_at DESC, id DESC",
-            )
+            .prepare(&format!(
+                "SELECT {MODEL_COLUMNS} FROM models m WHERE {} ORDER BY last_used_at DESC, id DESC",
+                models::NOT_DUPLICATE
+            ))
             .map_err(sql_error)?;
         statement
             .query_map([], model_reference)
@@ -557,12 +701,12 @@ impl ChatStore for SqliteStore {
     fn model(&self, id: ModelId) -> Result<SavedModel> {
         self.connection
             .query_row(
-                "SELECT id, file_name, settings, path FROM models WHERE id = ?1",
+                &format!("SELECT {MODEL_COLUMNS}, path FROM models WHERE id = ?1"),
                 [id],
                 |row| {
                     Ok(SavedModel {
                         reference: model_reference(row)?,
-                        path: PathBuf::from(row.get::<_, String>(3)?),
+                        path: PathBuf::from(row.get::<_, String>(5)?),
                     })
                 },
             )
@@ -595,7 +739,8 @@ impl ChatStore for SqliteStore {
                  ON CONFLICT(path) DO UPDATE SET
                     file_name = excluded.file_name,
                     last_used_at = max(models.last_used_at, excluded.last_used_at)
-                 RETURNING id, file_name, settings",
+                 RETURNING id, file_name, settings, bundled_resource IS NOT NULL,
+                    settings_mode = 'automatic'",
                 params![path, name, encoded, unix_ms()?],
                 model_reference,
             )
@@ -640,8 +785,11 @@ fn read_conversation(connection: &Connection, id: ConversationId) -> Result<Conv
         .ok_or_else(not_found)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, position, role, state, content, created_at, stats
-             FROM messages WHERE conversation_id = ?1 ORDER BY position",
+            "SELECT m.id, m.position, m.role, m.state, m.content, m.created_at, m.stats,
+                    CASE WHEN x.message_id IS NOT NULL THEN coalesce(x.metadata,'{}') END, r.metadata
+             FROM messages m LEFT JOIN chat_context_attempts x ON x.message_id=m.id
+             LEFT JOIN chat_route_coverage r ON r.message_id=m.id
+             WHERE m.conversation_id = ?1 ORDER BY m.position",
         )
         .map_err(sql_error)?;
     conversation.messages = statement
@@ -682,6 +830,18 @@ fn read_message(row: &Row<'_>) -> rusqlite::Result<Message> {
         content: row.get(4)?,
         created_at: row.get(5)?,
         stats,
+        context: row
+            .get::<_, Option<String>>(7)?
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        route_coverage: row
+            .get::<_, Option<String>>(8)
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(|metadata| serde_json::from_str(metadata).ok()),
     })
 }
 
@@ -723,6 +883,8 @@ fn insert_message(
         content,
         created_at,
         stats: None,
+        context: None,
+        route_coverage: None,
     })
 }
 
@@ -749,6 +911,8 @@ fn model_reference(row: &Row<'_>) -> rusqlite::Result<ModelReference> {
         id: row.get(0)?,
         file_name: row.get(1)?,
         settings: json_column(row, 2)?,
+        bundled: row.get(3)?,
+        automatic_settings: row.get(4)?,
     })
 }
 

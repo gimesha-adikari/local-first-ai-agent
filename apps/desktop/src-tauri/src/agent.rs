@@ -569,6 +569,12 @@ fn saved_task_error(
         PdfUnsupported => "The PDF uses an unsupported feature.",
         PdfLimit => "The PDF exceeded the limits for local extraction.",
         PdfUnavailable => "Isolated PDF extraction is unavailable on this system.",
+        KnowledgeLimit => "The local knowledge limit was reached.",
+        KnowledgeNotFound => "The local knowledge document was not found.",
+        EmbeddingUnavailable => "The local embedding model is unavailable.",
+        EmbeddingIncompatible => "The embedding model or vectors are incompatible.",
+        EmbeddingIndexUnavailable => "The embedding index is unavailable.",
+        KnowledgeRevisionChanged => "The local knowledge document changed.",
     };
     (Some(code), Some(message))
 }

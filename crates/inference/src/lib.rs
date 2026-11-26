@@ -1,5 +1,9 @@
 //! Dedicated local inference worker and optional llama.cpp provider.
 
+#[cfg(feature = "llama")]
+mod backend;
+#[cfg(feature = "llama")]
+pub mod embedding;
 #[cfg(any(feature = "llama", test))]
 mod gguf;
 #[cfg(feature = "llama")]
