@@ -32,6 +32,8 @@ use storage::SqliteStore;
 pub mod chat;
 pub mod knowledge;
 pub mod models;
+pub mod network;
+pub mod policy;
 pub mod semantic;
 
 use knowledge::KnowledgeImports;

@@ -6,10 +6,13 @@ pub fn status() -> &'static str {
 }
 
 pub mod inference;
+pub mod intelligence;
 
+pub mod capability;
 pub mod chat;
 pub mod chat_context;
 pub mod chat_route;
+pub mod classification;
 
 pub mod agent;
 
