@@ -807,7 +807,8 @@ fn schema_eleven_context_and_memory_reload_with_conservative_labels() {
     store
         .connection
         .execute_batch(
-            "DROP TABLE intelligence_receipts;
+            "DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+         ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts;
          ALTER TABLE messages DROP COLUMN classification;
          PRAGMA user_version=11;",
         )

@@ -33,7 +33,7 @@ impl LocalInference {
         };
         let generate = Offer {
             capability: GENERATE,
-            provider: "local.llama-cpp/1",
+            provider: std::borrow::Cow::Borrowed("local.llama-cpp/1"),
             locality: Locality::OnDevice,
             input_modalities: &["text"],
             output_modalities: &["text"],
@@ -50,18 +50,17 @@ impl LocalInference {
                 }),
             },
             usage_units: &["input-token", "output-token"],
-            unit_prices: &[],
+            unit_prices: Vec::new(),
             provider_retention: Retention::None,
         };
+        let agent = model.supports_agent.then(|| Offer {
+            capability: AGENT_DECISION,
+            streaming: false,
+            structured_output: true,
+            ..generate.clone()
+        });
         let mut offers = vec![generate];
-        if model.supports_agent {
-            offers.push(Offer {
-                capability: AGENT_DECISION,
-                streaming: false,
-                structured_output: true,
-                ..generate
-            });
-        }
+        offers.extend(agent);
         Ok(offers)
     }
 

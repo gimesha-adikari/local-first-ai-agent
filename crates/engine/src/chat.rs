@@ -40,9 +40,13 @@ use crate::{
     Engine, OperationGuard, Platform,
     chat_session::{Candidates, ChatSession},
     database,
+    network::NetworkBoundary,
     policy::Policy,
     semantic::SemanticState,
 };
+
+#[path = "remote_chat.rs"]
+mod remote;
 
 /// Events streamed to the surface that started a Chat turn.
 #[derive(Serialize)]
@@ -353,6 +357,7 @@ struct ChatRuntime {
     policy: Arc<Policy>,
     database: Arc<Mutex<SqliteStore>>,
     semantic: Arc<SemanticState>,
+    boundary: Arc<NetworkBoundary>,
 }
 
 impl Engine {
@@ -406,6 +411,7 @@ impl Engine {
             policy: Arc::clone(&self.policy),
             database: Arc::clone(&self.database),
             semantic: Arc::clone(&self.semantic),
+            boundary: Arc::clone(&self.boundary),
         }
     }
 
@@ -492,40 +498,75 @@ impl ChatRuntime {
         cancellation: Cancellation,
         model_id: Option<ModelId>,
     ) -> Result<Message> {
-        let model_id = model_id
-            .ok_or_else(|| InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first."))?;
-        let status = self.adapter.status()?;
-        if status.phase != Phase::Ready {
-            return Err(InferenceError::new(
-                ErrorCode::Busy,
-                "Wait for the model to be ready.",
-            ));
-        }
+        // The saved selection decides the target. A remote provider is used
+        // only when local-only mode is off and it is explicitly selected;
+        // there is no fallback in either direction.
+        let selection = database(&self.database)?.intelligence_settings()?;
+        let remote = crate::providers::remote_target(&self.database, selection)?;
+        let local = match &remote {
+            Some(_) => None,
+            None => {
+                let model_id = model_id.ok_or_else(|| {
+                    InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first.")
+                })?;
+                let status = self.adapter.status()?;
+                if status.phase != Phase::Ready {
+                    return Err(InferenceError::new(
+                        ErrorCode::Busy,
+                        "Wait for the model to be ready.",
+                    ));
+                }
+                Some((model_id, status))
+            }
+        };
         let question = match &action {
             TurnAction::Send(content) => content.clone(),
             TurnAction::Regenerate => database(&self.database)?.chat_regeneration_prompt(id)?,
         };
         GenerationRequest::new(&question).validate()?;
-        let mut settings = database(&self.database)?
-            .model(model_id)?
-            .reference
-            .settings;
-        settings.enable_thinking = options.enable_thinking;
-        if let Some(max_tokens) = options.max_tokens {
-            settings.max_tokens = max_tokens;
-        }
-        settings.validate()?;
-        if settings.enable_thinking
-            && !status
-                .model
-                .as_ref()
-                .is_some_and(|model| model.supports_thinking)
-        {
-            return Err(InferenceError::new(
-                ErrorCode::InvalidConfig,
-                "This model does not support thinking mode. Send without thinking.",
-            ));
-        }
+        let recipe = match &local {
+            Some((model_id, status)) => {
+                let mut settings = database(&self.database)?
+                    .model(*model_id)?
+                    .reference
+                    .settings;
+                settings.enable_thinking = options.enable_thinking;
+                if let Some(max_tokens) = options.max_tokens {
+                    settings.max_tokens = max_tokens;
+                }
+                settings.validate()?;
+                if settings.enable_thinking
+                    && !status
+                        .model
+                        .as_ref()
+                        .is_some_and(|model| model.supports_thinking)
+                {
+                    return Err(InferenceError::new(
+                        ErrorCode::InvalidConfig,
+                        "This model does not support thinking mode. Send without thinking.",
+                    ));
+                }
+                Some((*model_id, settings))
+            }
+            None => {
+                if options.enable_thinking {
+                    return Err(InferenceError::new(
+                        ErrorCode::UnsupportedCapability,
+                        "Thinking mode is available only with a local model. Send without thinking.",
+                    ));
+                }
+                if options
+                    .max_tokens
+                    .is_some_and(|value| !(1..=32_768).contains(&value))
+                {
+                    return Err(InferenceError::new(
+                        ErrorCode::InvalidConfig,
+                        "Use 1–32768 output tokens.",
+                    ));
+                }
+                None
+            }
+        };
 
         let knowledge = options.knowledge;
         let strict = knowledge
@@ -597,7 +638,14 @@ impl ChatRuntime {
             _ => None,
         };
         check_chat_cancellation(&cancellation)?;
-        let model_name = status.model.map(|model| model.file_name);
+        let model_name = match (&local, &remote) {
+            (Some((_, status)), _) => status.model.as_ref().map(|model| model.file_name.clone()),
+            (None, Some((saved, _))) => Some(format!(
+                "{} · {}",
+                saved.settings.name, saved.settings.model
+            )),
+            (None, None) => None,
+        };
         let store = Arc::clone(&self.database);
         let preparation = cancellation.clone();
         let (mut turn, context, sources, memories, coverage, deterministic) = self
@@ -667,21 +715,29 @@ impl ChatRuntime {
                     // Ordinary Chat with documents selected keeps its routing
                     // coverage without becoming contextual, so history and
                     // Continue still work.
-                    (None, Some(route)) => db.begin_routed_chat_attempt(
-                        id,
-                        action,
-                        model_name.as_deref(),
-                        model_id,
-                        settings,
-                        route,
-                    )?,
-                    (None, None) => db.begin_chat_attempt(
-                        id,
-                        action,
-                        model_name.as_deref(),
-                        model_id,
-                        settings,
-                    )?,
+                    (None, Some(route)) => match recipe {
+                        Some((model_id, settings)) => db.begin_routed_chat_attempt(
+                            id,
+                            action,
+                            model_name.as_deref(),
+                            model_id,
+                            settings,
+                            route,
+                        )?,
+                        None => {
+                            db.begin_routed_remote_chat(id, action, model_name.as_deref(), route)?
+                        }
+                    },
+                    (None, None) => match recipe {
+                        Some((model_id, settings)) => db.begin_chat_attempt(
+                            id,
+                            action,
+                            model_name.as_deref(),
+                            model_id,
+                            settings,
+                        )?,
+                        None => db.begin_chat(id, action, model_name.as_deref())?,
+                    },
                 };
                 Ok((
                     turn,
@@ -744,6 +800,26 @@ impl ChatRuntime {
             turn.history.turns.clear();
             candidates.withheld.append(&mut candidates.history);
         }
+        let Some((_, settings)) = recipe else {
+            let target = remote.ok_or_else(|| {
+                InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first.")
+            })?;
+            return self
+                .stream_remote(
+                    remote::RemoteTurn {
+                        turn,
+                        context,
+                        candidates,
+                        coverage,
+                        sources,
+                        max_tokens: options.max_tokens,
+                        cancellation,
+                    },
+                    target,
+                    events,
+                )
+                .await;
+        };
         let mut request = settings.request(
             std::mem::take(&mut turn.prompt),
             std::mem::take(&mut turn.history),
@@ -897,7 +973,7 @@ impl ChatRuntime {
                 session_lock(&session)?
                     .as_mut()
                     .ok_or_else(session_error)?
-                    .authorize(&self.policy, Some(offer))?;
+                    .authorize(&self.policy, Some(&offer))?;
                 let pending = self.adapter.invoke(
                     Invocation::<Generate>::new(request, cancellation),
                     move |delta| {
@@ -921,7 +997,7 @@ impl ChatRuntime {
                 session_lock(&session)?
                     .as_mut()
                     .ok_or_else(session_error)?
-                    .submitted(offer);
+                    .submitted(&offer);
                 Ok(pending)
             });
             if pending.is_ok() {

@@ -86,6 +86,22 @@ pub fn content_key(path: &Path) -> std::io::Result<String> {
     Ok(format!("s1:{size}:{digest}"))
 }
 
+/// Reuse the listed row for the same weights. A row whose own file is gone,
+/// such as a formerly bundled model after a package upgrade, moves to the
+/// newly selected file and keeps its settings.
+fn reuse_row(
+    db: &mut storage::SqliteStore,
+    id: ModelId,
+    path: &Path,
+    name: &str,
+) -> Result<ModelReference> {
+    if !db.model(id)?.path.is_file() {
+        db.relocate_model(id, path, name)?;
+    }
+    db.mark_model_used(id)?;
+    db.model(id).map(|model| model.reference)
+}
+
 fn foreign_lease() -> InferenceError {
     InferenceError::new(
         ErrorCode::Busy,
@@ -138,7 +154,7 @@ impl Engine {
             .into_owned();
         let inspected = path.clone();
         let available = self.platform.available_memory();
-        let (key, recommended) = self
+        let (key, recommended, file_bytes) = self
             .blocking(move || {
                 let key = content_key(&inspected).map_err(|_| {
                     InferenceError::new(ErrorCode::InvalidModel, "Could not read the GGUF model.")
@@ -147,6 +163,7 @@ impl Engine {
                 Ok::<_, InferenceError>((
                     key,
                     recommended_for_model(trained_context, bytes, available),
+                    bytes,
                 ))
             })
             .await
@@ -180,17 +197,39 @@ impl Engine {
             if let Some(chosen) = &chosen
                 && let Some(existing) = db.model_with_sha256(chosen)?
             {
-                db.mark_model_used(existing.id)?;
-                return db.model(existing.id).map(|model| model.reference);
+                return reuse_row(&mut db, existing.id, &path, &name);
             }
             digest = chosen;
         }
+        // Only a file whose size matches a curated entry needs a full digest
+        // to decide whether it is the verified artifact.
+        if digest.is_none() && crate::manifest::candidates(file_bytes).next().is_some() {
+            let hashed = path.clone();
+            digest = self
+                .blocking(move || sha256_hex(&hashed).ok())
+                .await
+                .ok_or_else(inspection_failed)?;
+        }
+        let artifact = digest
+            .as_deref()
+            .and_then(|digest| crate::manifest::identify(file_bytes, digest))
+            .filter(|artifact| {
+                artifact
+                    .capabilities
+                    .contains(&agent_core::capability::GENERATE)
+            });
         let mut db = database(&self.database)?;
+        if let Some(digest) = &digest
+            && let Some(existing) = db.model_with_sha256(digest)?
+        {
+            return reuse_row(&mut db, existing.id, &path, &name);
+        }
         let reference = db.remember_model(&path, &name, recommended)?;
         db.set_model_content_key(reference.id, &key)?;
         if let Some(digest) = digest {
             db.set_model_sha256(reference.id, &digest)?;
         }
+        db.set_model_artifact(reference.id, artifact.map(|artifact| artifact.key))?;
         db.model(reference.id).map(|model| model.reference)
     }
 

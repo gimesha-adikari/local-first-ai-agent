@@ -25,7 +25,8 @@ fn schema_ten_classifies_recommended_rows_as_automatic() {
     store
         .connection
         .execute_batch(
-            "DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
+            "DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+         ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
              DROP TABLE chat_route_coverage; ALTER TABLE models DROP COLUMN content_sha256;
              DROP TABLE model_runtime; ALTER TABLE models DROP COLUMN settings_mode;
              ALTER TABLE models DROP COLUMN content_key; PRAGMA user_version=9;",
@@ -235,4 +236,30 @@ fn last_loaded_model_restores_unless_explicitly_unloaded() {
     assert!(store.chat_model_to_restore().unwrap().is_none());
     store.set_last_chat_model(model.id).unwrap();
     assert!(!store.chat_model_unloaded().unwrap());
+}
+
+#[test]
+fn a_row_whose_file_is_gone_moves_to_a_new_copy_and_keeps_settings() {
+    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let settings = ModelSettings::recommended(2048);
+    let bundled = store
+        .register_bundled_model(
+            "fixture-key",
+            Path::new("/usr/lib/app/models/a.gguf"),
+            "a.gguf",
+            settings,
+        )
+        .unwrap()
+        .reference;
+    store
+        .set_model_settings(bundled.id, settings, false)
+        .unwrap();
+    store
+        .relocate_model(bundled.id, Path::new("/home/user/models/a.gguf"), "a.gguf")
+        .unwrap();
+    let moved = store.model(bundled.id).unwrap();
+    assert_eq!(moved.path, Path::new("/home/user/models/a.gguf"));
+    assert!(!moved.reference.bundled);
+    assert!(!moved.reference.automatic_settings);
+    assert_eq!(moved.reference.settings, settings);
 }

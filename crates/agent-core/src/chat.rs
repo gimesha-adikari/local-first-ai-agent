@@ -337,6 +337,7 @@ impl ModelSettings {
             chat: None,
             context: None,
             context_observer: None,
+            images: Vec::new(),
         }
     }
 }
@@ -370,6 +371,9 @@ pub struct ModelReference {
     /// Settings follow the recommendation on every load until the user saves
     /// custom settings.
     pub automatic_settings: bool,
+    /// Key of the curated manifest entry whose size and SHA-256 this file
+    /// matched. `None` is an unverified user import.
+    pub artifact: Option<String>,
 }
 
 pub struct SavedModel {

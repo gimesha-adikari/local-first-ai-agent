@@ -31,13 +31,21 @@ use storage::SqliteStore;
 
 pub mod chat;
 mod chat_session;
+pub mod credentials;
+#[cfg(test)]
+mod fixture;
 pub mod knowledge;
+pub mod manifest;
 pub mod models;
 pub mod network;
 pub mod policy;
+pub mod providers;
 pub mod semantic;
+pub mod usage;
 
+use credentials::{CredentialSource, NoSecureStorage};
 use knowledge::KnowledgeImports;
+use network::{BoundaryConfig, NetworkBoundary};
 use semantic::SemanticState;
 
 /// Blocking work handed to the host, such as SQLite access or file hashing.
@@ -104,6 +112,8 @@ pub struct Engine {
     chat_cancellation: Arc<Mutex<Option<Cancellation>>>,
     semantic: Arc<SemanticState>,
     imports: KnowledgeImports,
+    boundary: Arc<NetworkBoundary>,
+    credentials: Arc<dyn CredentialSource>,
 }
 
 #[derive(Serialize)]
@@ -114,6 +124,7 @@ pub struct Bootstrap {
     models: Vec<ModelReference>,
     active_model_id: Option<ModelId>,
     inference: Status,
+    intelligence: agent_core::provider::IntelligenceSettings,
 }
 
 impl Engine {
@@ -126,11 +137,37 @@ impl Engine {
         database: SqliteStore,
         database_path: PathBuf,
     ) -> AgentResult<Self> {
+        Self::with_network(
+            platform,
+            worker,
+            database,
+            database_path,
+            Arc::new(NoSecureStorage),
+            BoundaryConfig::default(),
+        )
+    }
+
+    /// Create the engine with the host's secure storage and the network
+    /// boundary configuration. Saved providers are registered and the saved
+    /// local-only mode is applied before the engine is returned.
+    pub fn with_network(
+        platform: Arc<dyn Platform>,
+        worker: Arc<InferenceWorker>,
+        database: SqliteStore,
+        database_path: PathBuf,
+        credentials: Arc<dyn CredentialSource>,
+        network: BoundaryConfig,
+    ) -> AgentResult<Self> {
         let policy = Arc::new(policy::Policy::default());
         let semantic = Arc::new(SemanticState::new(Arc::clone(&policy))?);
         let database = Arc::new(Mutex::new(database));
         semantic.restore_remembered(Arc::clone(&database));
-        Ok(Self {
+        let boundary = Arc::new(NetworkBoundary::new(
+            Arc::clone(&policy),
+            Arc::clone(&credentials),
+            network,
+        ));
+        let engine = Self {
             platform,
             adapter: LocalInference::new(Arc::clone(&worker)),
             policy,
@@ -142,7 +179,21 @@ impl Engine {
             chat_cancellation: Arc::new(Mutex::new(None)),
             semantic,
             imports: KnowledgeImports::default(),
-        })
+            boundary,
+            credentials,
+        };
+        engine.restore_providers().map_err(|_| {
+            agent_core::agent::AgentError::new(
+                agent_core::agent::AgentErrorCode::StorageFailed,
+                "The provider configuration could not be read.",
+            )
+        })?;
+        Ok(engine)
+    }
+
+    /// The single network boundary, for verification by the host.
+    pub fn network(&self) -> &NetworkBoundary {
+        &self.boundary
     }
 
     /// Reserve the shared operation gate, failing while another operation
@@ -197,6 +248,7 @@ impl Engine {
             models: db.recent_models()?,
             active_model_id: self.active_model(),
             inference: self.worker.status()?,
+            intelligence: db.intelligence_settings()?,
         })
     }
 
@@ -264,3 +316,6 @@ impl Engine {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod remote_tests;

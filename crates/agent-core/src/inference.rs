@@ -36,6 +36,25 @@ pub enum ErrorCode {
     EmbeddingIncompatible,
     EmbeddingIndexUnavailable,
     MemoryLimit,
+    /// The deterministic policy refused the request.
+    PolicyDenied,
+    /// Normalized provider failures. Provider-specific details stay in the
+    /// adapter.
+    ProviderAuthentication,
+    ProviderRateLimited,
+    ProviderFiltered,
+    ProviderUnavailable,
+    ProviderRejected,
+    ProviderInvalidResponse,
+    /// The provider or its configuration lacks a requested capability.
+    UnsupportedCapability,
+    /// Secure storage has no credential for the provider.
+    CredentialMissing,
+    /// Secure storage is unavailable, locked or failed.
+    CredentialUnavailable,
+    BudgetExceeded,
+    /// A transport failure such as DNS, connection, TLS or a timeout.
+    NetworkFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -116,6 +135,9 @@ pub struct GenerationRequest {
     pub context: Option<crate::chat_context::ChatContext>,
     #[serde(skip)]
     pub context_observer: Option<crate::chat_context::ContextObserver>,
+    /// Typed image input for providers that advertise the image modality.
+    #[serde(skip)]
+    pub images: Vec<crate::classification::Classified<crate::capability::ImageInput>>,
 }
 
 pub const MAX_CHAT_ATTEMPT_TOKENS: usize = 8192;
@@ -171,6 +193,7 @@ impl GenerationRequest {
             chat: None,
             context: None,
             context_observer: None,
+            images: Vec::new(),
         }
     }
 

@@ -94,7 +94,7 @@ impl Script {
     }
 }
 
-struct Scripted(Script);
+pub(crate) struct Scripted(pub(crate) Script);
 
 impl InferenceProvider for Scripted {
     fn load(&mut self, _: &Path, config: ModelConfig) -> Result<ModelInfo> {
@@ -184,7 +184,7 @@ impl InferenceProvider for Scripted {
 }
 
 #[derive(Default)]
-struct Recorder(Mutex<Vec<Value>>);
+pub(crate) struct Recorder(Mutex<Vec<Value>>);
 
 impl ChatEventSink for Recorder {
     fn send(&self, event: ChatEvent) {

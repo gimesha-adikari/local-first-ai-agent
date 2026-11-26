@@ -37,6 +37,12 @@ pub const SYSTEM_TEXT: DataClass = DataClass {
     id: "core.system-text/1",
     sensitivity: Sensitivity::Content,
 };
+/// Requests that carry no personal content, such as model discovery and
+/// connection tests.
+pub const PROVIDER_CONTROL: DataClass = DataClass {
+    id: "core.provider-control/1",
+    sensitivity: Sensitivity::Public,
+};
 pub const SECRET: DataClass = DataClass {
     id: "core.secret/1",
     sensitivity: Sensitivity::Secret,
@@ -66,6 +72,7 @@ impl Default for DataClasses {
             QUERY,
             MODEL_OUTPUT,
             SYSTEM_TEXT,
+            PROVIDER_CONTROL,
             SECRET,
         ])
     }
@@ -136,6 +143,7 @@ impl Labels {
 
 /// No deserialization constructor. Only trusted ingress or a transformation
 /// in Rust can pair data with its provenance.
+#[derive(Debug)]
 pub struct Classified<T> {
     value: T,
     labels: Labels,

@@ -23,15 +23,15 @@ mod intelligence;
 pub mod knowledge;
 pub mod memory;
 pub mod models;
+pub mod providers;
 pub mod semantic;
 pub use continuation::ContinuationPlan;
 pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 12;
-const MODEL_COLUMNS: &str =
-    "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic'";
+const SCHEMA_VERSION: i64 = 13;
+const MODEL_COLUMNS: &str = "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic', artifact_key";
 const NEW_TITLE: &str = "New conversation";
 
 /// Local storage for one app instance. Exclusive locking protects crash recovery
@@ -143,11 +143,17 @@ impl SqliteStore {
             transaction
                 .execute_batch(include_str!("../migrations/012_intelligence.sql"))
                 .map_err(sql_error)?;
+        }
+        if version < 13 {
+            transaction
+                .execute_batch(include_str!("../migrations/013_providers.sql"))
+                .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(sql_error)?;
         }
         agent::recover_interrupted(&transaction, None).map_err(|_| storage_error())?;
+        providers::settle_interrupted(&transaction)?;
         chat_context::recover_citations(&transaction)?;
         transaction
             .execute(
@@ -431,6 +437,18 @@ impl SqliteStore {
             None,
             Some(route),
         )
+    }
+
+    /// A routed attempt answered by a remote provider. It has no local
+    /// model recipe, so it can never be continued with exact local replay.
+    pub fn begin_routed_remote_chat(
+        &mut self,
+        id: ConversationId,
+        action: TurnAction,
+        model_name: Option<&str>,
+        route: &agent_core::chat_context::KnowledgeCoverage,
+    ) -> Result<PendingTurn> {
+        self.begin_chat_inner(id, action, model_name, None, None, Some(route))
     }
 
     pub fn begin_contextual_chat_attempt(
@@ -743,7 +761,7 @@ impl ChatStore for SqliteStore {
                 |row| {
                     Ok(SavedModel {
                         reference: model_reference(row)?,
-                        path: PathBuf::from(row.get::<_, String>(5)?),
+                        path: PathBuf::from(row.get::<_, String>(6)?),
                     })
                 },
             )
@@ -777,7 +795,7 @@ impl ChatStore for SqliteStore {
                     file_name = excluded.file_name,
                     last_used_at = max(models.last_used_at, excluded.last_used_at)
                  RETURNING id, file_name, settings, bundled_resource IS NOT NULL,
-                    settings_mode = 'automatic'",
+                    settings_mode = 'automatic', artifact_key",
                 params![path, name, encoded, unix_ms()?],
                 model_reference,
             )
@@ -969,6 +987,7 @@ fn model_reference(row: &Row<'_>) -> rusqlite::Result<ModelReference> {
         settings: json_column(row, 2)?,
         bundled: row.get(3)?,
         automatic_settings: row.get(4)?,
+        artifact: row.get(5)?,
     })
 }
 

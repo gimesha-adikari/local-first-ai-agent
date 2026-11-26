@@ -4,7 +4,7 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
@@ -12,8 +12,8 @@ use std::{
 
 use agent_core::{
     capability::{
-        AGENT_DECISION, CapabilityId, CapabilityRegistry, EMBED, GENERATE, IMPORT, Locality,
-        RETRIEVE, Retention,
+        AGENT_DECISION, CapabilityId, CapabilityRegistry, DISCOVER, EMBED, GENERATE, IMPORT,
+        Locality, RETRIEVE, Retention,
     },
     classification::{
         AGENT_CONTEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY, MODEL_OUTPUT,
@@ -21,6 +21,8 @@ use agent_core::{
     },
     inference::Cancellation,
 };
+
+pub use crate::network::{Destination, RequestBinding};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
@@ -43,14 +45,6 @@ pub enum Denial {
     Revoked,
     Scope,
     Unavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Destination {
-    pub id: &'static str,
-    /// Exact transport target registered by the trusted engine.
-    pub endpoint: &'static str,
-    pub locality: Locality,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +92,7 @@ pub struct Operation {
     locality: Locality,
     connectivity: Connectivity,
     destination: Option<Destination>,
+    request: Option<RequestBinding>,
     retention: Retention,
 }
 
@@ -117,6 +112,7 @@ impl Operation {
             Locality::OnDevice,
             Connectivity::Offline,
             None,
+            None,
             retention,
         )
     }
@@ -130,6 +126,7 @@ impl Operation {
         intended_locality: Locality,
         connectivity: Connectivity,
         destination: Option<Destination>,
+        request: Option<RequestBinding>,
         retention: Retention,
     ) -> Self {
         Self {
@@ -139,11 +136,26 @@ impl Operation {
             purpose,
             labels,
             intended_locality,
-            locality: destination.map_or(Locality::OnDevice, |target| target.locality),
+            locality: destination
+                .as_ref()
+                .map_or(Locality::OnDevice, Destination::locality),
             connectivity,
             destination,
+            request,
             retention,
         }
+    }
+
+    pub fn destination(&self) -> Option<&Destination> {
+        self.destination.as_ref()
+    }
+
+    pub(crate) fn request_binding(&self) -> Option<&RequestBinding> {
+        self.request.as_ref()
+    }
+
+    pub fn retention(&self) -> Retention {
+        self.retention
     }
 
     pub fn labels(&self) -> &Labels {
@@ -175,15 +187,17 @@ struct Grants {
 pub struct Policy {
     capabilities: CapabilityRegistry,
     classes: DataClasses,
-    destinations: BTreeMap<&'static str, Destination>,
-    local_only: bool,
+    /// Registered by the trusted provider configuration. Changing or
+    /// removing an entry invalidates every operation bound to the old value.
+    destinations: RwLock<BTreeMap<Arc<str>, Destination>>,
+    local_only: AtomicBool,
     grants: Mutex<Grants>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
         Self::new(
-            CapabilityRegistry::new([GENERATE, AGENT_DECISION, EMBED, IMPORT, RETRIEVE]),
+            CapabilityRegistry::new([GENERATE, AGENT_DECISION, EMBED, IMPORT, RETRIEVE, DISCOVER]),
             DataClasses::default(),
             [],
             true,
@@ -201,27 +215,55 @@ impl Policy {
         let mut known = BTreeMap::new();
         let mut conflicts = std::collections::BTreeSet::new();
         for destination in destinations {
-            if destination.id.is_empty()
-                || destination.endpoint.is_empty()
-                || destination.locality == Locality::OnDevice
+            let id = destination.shared_id();
+            if let Some(other) = known.insert(Arc::clone(&id), destination.clone())
+                && other != destination
             {
-                continue;
-            }
-            if known
-                .insert(destination.id, destination)
-                .is_some_and(|other| other != destination)
-            {
-                conflicts.insert(destination.id);
+                conflicts.insert(id);
             }
         }
         known.retain(|id, _| !conflicts.contains(id));
         Self {
             capabilities,
             classes,
-            destinations: known,
-            local_only,
+            destinations: RwLock::new(known),
+            local_only: AtomicBool::new(local_only),
             grants: Mutex::default(),
         }
+    }
+
+    /// Register or replace a destination. Only the trusted provider
+    /// configuration calls this. Operations bound to a replaced value fail
+    /// their next check, including in-flight transport liveness checks.
+    pub fn register_destination(&self, destination: Destination) -> Result<(), Denial> {
+        self.destinations
+            .write()
+            .map_err(|_| Denial::Unavailable)?
+            .insert(destination.shared_id(), destination);
+        Ok(())
+    }
+
+    pub fn unregister_destination(&self, id: &str) -> Result<bool, Denial> {
+        Ok(self
+            .destinations
+            .write()
+            .map_err(|_| Denial::Unavailable)?
+            .remove(id)
+            .is_some())
+    }
+
+    pub fn registered_destination(&self, id: &str) -> Option<Destination> {
+        self.destinations.read().ok()?.get(id).cloned()
+    }
+
+    /// Local-only mode denies every operation whose locality is not on the
+    /// device, before any resolution or connection.
+    pub fn set_local_only(&self, local_only: bool) {
+        self.local_only.store(local_only, Ordering::Release);
+    }
+
+    pub fn is_local_only(&self) -> bool {
+        self.local_only.load(Ordering::Acquire)
     }
 
     fn check(&self, operation: &Operation) -> Result<(), Denial> {
@@ -258,14 +300,24 @@ impl Policy {
             return Err(Denial::UngovernedProvider);
         }
         if operation.locality != operation.intended_locality
-            || (self.local_only && operation.locality != Locality::OnDevice)
+            || (self.is_local_only() && operation.locality != Locality::OnDevice)
         {
             return Err(Denial::Locality);
         }
-        match (operation.destination, operation.connectivity) {
-            (None, Connectivity::Offline) => Ok(()),
-            (Some(target), Connectivity::ThroughBoundary)
-                if self.destinations.get(target.id) == Some(&target) =>
+        match (
+            &operation.destination,
+            &operation.request,
+            operation.connectivity,
+        ) {
+            (None, None, Connectivity::Offline) => Ok(()),
+            (Some(target), Some(request), Connectivity::ThroughBoundary)
+                if request.is_valid()
+                    && self
+                        .destinations
+                        .read()
+                        .map_err(|_| Denial::Unavailable)?
+                        .get(target.id())
+                        == Some(target) =>
             {
                 Ok(())
             }
@@ -410,15 +462,32 @@ impl Policy {
         Ok(())
     }
 
-    /// Final check and handoff share the revoke lock. The handoff must be one
-    /// bounded transmission commitment, never a response wait or redirect.
-    pub(crate) fn transmit<T>(
+    /// Check every condition for a handoff without consuming the sharing
+    /// grant. The transport calls this before resolution and connection.
+    pub(crate) fn admit(
         &self,
         operation: &Operation,
         process: GrantId,
         share: GrantId,
-        send: impl FnOnce() -> T,
-    ) -> Result<T, Denial> {
+    ) -> Result<(), Denial> {
+        let grants = self.grants.lock().map_err(|_| Denial::Unavailable)?;
+        self.check(operation)?;
+        self.check_share(operation)?;
+        let now = Instant::now();
+        verify_grant(&grants, Permission::Process, operation, process, now)?;
+        verify_grant(&grants, Permission::Share, operation, share, now)
+    }
+
+    /// Final check and consumption of the one-handoff sharing grant, under
+    /// the same lock as revocation. The transport writes the first request
+    /// byte only after this succeeds. A revocation ordered after the commit
+    /// stops further writes and discards the response.
+    pub(crate) fn commit(
+        &self,
+        operation: &Operation,
+        process: GrantId,
+        share: GrantId,
+    ) -> Result<(), Denial> {
         let mut grants = self.grants.lock().map_err(|_| Denial::Unavailable)?;
         self.check(operation)?;
         self.check_share(operation)?;
@@ -430,9 +499,11 @@ impl Policy {
             .get_mut(&share)
             .ok_or(Denial::MissingGrant)?
             .used = true;
-        Ok(send())
+        Ok(())
     }
 
+    /// Liveness after commit: the transport checks this while writing and
+    /// before delivering each response piece.
     pub(crate) fn accept_response(
         &self,
         operation: &Operation,

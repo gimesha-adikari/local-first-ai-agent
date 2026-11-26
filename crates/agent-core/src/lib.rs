@@ -18,4 +18,6 @@ pub mod agent;
 
 pub mod knowledge;
 
+pub mod provider;
+
 pub mod semantic;

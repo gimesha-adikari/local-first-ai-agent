@@ -7,7 +7,9 @@ use agent_core::{
     chat_context::ContextUsage,
     classification::{DataClass, Labels},
     inference::{Cancellation, ErrorCode, GenerationStats, InferenceError, Result},
-    intelligence::{ContextSource, ProviderRecord, Receipt, SessionState},
+    intelligence::{
+        ContextSource, EgressRecord, ProviderRecord, Receipt, SessionState, UsageBasis,
+    },
 };
 
 use crate::policy::{Denial, Operation, Permission, Policy, Session};
@@ -45,6 +47,8 @@ pub(crate) struct ChatSession {
     provider: Option<ProviderRecord>,
     authorization: Option<&'static str>,
     output_class: DataClass,
+    external: Vec<EgressRecord>,
+    remote_usage: Option<(Vec<Usage>, UsageBasis)>,
 }
 
 struct Decoded {
@@ -67,10 +71,56 @@ impl ChatSession {
             provider: None,
             authorization: None,
             output_class,
+            external: Vec::new(),
+            remote_usage: None,
         }
     }
 
-    pub fn authorize(&mut self, policy: &Policy, provider: Option<Offer>) -> Result<()> {
+    /// The policy session that remote operations of this turn bind to.
+    pub fn policy_session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Authorize saving a remote provider's answer locally. Processing and
+    /// sharing are authorized separately, per operation, at the boundary.
+    pub fn authorize_remote(&mut self, policy: &Policy, offer: &Offer) -> Result<()> {
+        if offer.capability != GENERATE || offer.locality == Locality::OnDevice {
+            return Err(policy_error(Denial::Locality));
+        }
+        let operation = Operation::local(
+            &self.session,
+            GENERATE,
+            "chat",
+            self.candidates.labels(self.output_class),
+            Retention::SavedLocally,
+        );
+        self.authorization = Some(
+            policy
+                .authorize_local(Permission::Retain, &operation)
+                .map_err(policy_error)?,
+        );
+        Ok(())
+    }
+
+    /// Classes of everything placed in the request, without the output class.
+    pub fn input_labels(&self) -> Option<Labels> {
+        let decoded = self.decoded.as_ref()?;
+        let mut labels = Labels::default();
+        for source in &decoded.used {
+            labels.inherit(&source.labels);
+        }
+        Some(labels)
+    }
+
+    pub fn record_external(&mut self, record: EgressRecord) {
+        self.external.push(record);
+    }
+
+    pub fn record_usage(&mut self, usage: Vec<Usage>, basis: UsageBasis) {
+        self.remote_usage = Some((usage, basis));
+    }
+
+    pub fn authorize(&mut self, policy: &Policy, provider: Option<&Offer>) -> Result<()> {
         if provider.is_some_and(|offer| {
             offer.capability != GENERATE || offer.locality != Locality::OnDevice
         }) {
@@ -97,9 +147,9 @@ impl ChatSession {
         Ok(())
     }
 
-    pub fn submitted(&mut self, offer: Offer) {
+    pub fn submitted(&mut self, offer: &Offer) {
         self.provider = Some(ProviderRecord {
-            id: offer.provider,
+            id: offer.provider.clone(),
             locality: offer.locality,
             retention: offer.provider_retention,
         });
@@ -182,7 +232,7 @@ impl ChatSession {
             },
             |decoded| (decoded.used, decoded.withheld, decoded.labels),
         );
-        let usage = stats.map_or_else(Vec::new, |stats| {
+        let local_usage = stats.map_or_else(Vec::new, |stats| {
             vec![
                 Usage {
                     unit: "input-token",
@@ -210,8 +260,13 @@ impl ChatSession {
             withheld,
             output_labels,
             application_retention: Retention::SavedLocally,
-            external: Vec::new(),
-            usage,
+            usage_basis: self
+                .remote_usage
+                .as_ref()
+                .map(|(_, basis)| *basis)
+                .or(stats.map(|_| UsageBasis::Measured)),
+            usage: self.remote_usage.map_or(local_usage, |(usage, _)| usage),
+            external: self.external,
         }
     }
 }
