@@ -87,3 +87,9 @@ export function capabilityGuidance(info: Pick<ModelInfo, "fileName" | "supportsA
 export function agentUnavailableText(info: Pick<ModelInfo, "fileName"> | null): string {
   return info ? `${modelLabel(info.fileName)} supports Chat only. Agent needs ${advancedModelName}.` : "The loaded model can't run Agent tasks";
 }
+
+/** Display data for curated manifest entries (engine `manifest.rs`, version 1). */
+export const curatedArtifacts: Record<string, { name: string; license: string }> = {
+  "lfm2.5-1.2b-instruct-q4_k_m": { name: "LFM2.5 1.2B Instruct (Q4_K_M)", license: "LFM Open License v1.0" },
+  "bge-small-en-v1.5-f16": { name: "BGE small English v1.5 (F16)", license: "MIT" },
+};

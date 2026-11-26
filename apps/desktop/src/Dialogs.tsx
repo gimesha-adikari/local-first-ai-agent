@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import lfmLicense from "../../../third_party/model-licenses/LFM2.5-1.2B-Instruct/LICENSE?raw";
 import { formatBytes, remainingLabel } from "./agent";
+import { curatedArtifacts } from "./models";
 import type { AgentScopeDisplay } from "./agentTypes";
 import {
   lowOutputLimit, settingChanges, shortOutputLimit, validModelSettings,
@@ -123,8 +124,9 @@ export function ModelLicense() {
     <section className="settings-section" aria-label={`${builtInModelName} license`}>
       <h4>{builtInModelName} license and notices</h4>
       <p className="hint">
-        The built-in model is LFM2.5-1.2B-Instruct by Liquid AI, Inc., distributed unmodified under the LFM Open License v1.0.
-        That license covers only the model file, not this app.
+        LFM2.5-1.2B-Instruct by Liquid AI, Inc. is licensed under the LFM Open License v1.0. The app no longer ships it; earlier
+        packages did, and you can import the same file as a checksum-verified local model. That license covers only the model
+        file, not this app.
       </p>
       <p className="hint">
         <strong>Commercial use is restricted.</strong> It is licensed only while the using organization, with its affiliates, has
@@ -178,10 +180,21 @@ function LoadedModelBanner({ snapshot }: { snapshot: Bootstrap }) {
   );
 }
 
+/** Curated manifest identity: a file is verified only by exact size and SHA-256. */
+function verificationBadge(model: ModelReference) {
+  const artifact = model.artifact ? curatedArtifacts[model.artifact] : null;
+  if (artifact) {
+    return <span className="badge badge-verified" title={`${artifact.name} · ${artifact.license} · checksum verified`}>Verified</span>;
+  }
+  if (model.bundled) return null;
+  return <span className="badge badge-muted" title="This file is not in the curated manifest. It was not verified.">Unverified</span>;
+}
+
 function ModelBadges({ model }: { model: ModelReference }) {
   return (
     <span className="model-badges">
       <span className={`badge ${model.bundled ? "badge-verified" : "badge-muted"}`}>{model.bundled ? "Built-in" : "Imported"}</span>
+      {verificationBadge(model)}
       <span className={`badge ${model.automaticSettings ? "badge-ready" : "badge-warning"}`}>{model.automaticSettings ? "Automatic" : "Custom"}</span>
     </span>
   );

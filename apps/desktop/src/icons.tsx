@@ -51,6 +51,7 @@ export const SunIcon = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r=
 export const MoonIcon = (p: IconProps) => <Icon {...p}><path d="M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z" /></Icon>;
 export const MonitorIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="4.5" width="17" height="11.5" rx="1.5" /><path d="M9 20h6M12 16v4" /></Icon>;
 export const UploadIcon = (p: IconProps) => <Icon {...p}><path d="M12 15.5v-11M7.5 9 12 4.5 16.5 9" /><path d="M4.5 15v3.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V15" /></Icon>;
+export const CloudIcon = (p: IconProps) => <Icon {...p}><path d="M7.5 18.5h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 7.4 9.1 4.75 4.75 0 0 0 7.5 18.5z" /></Icon>;
 export const PowerIcon = (p: IconProps) => <Icon {...p}><path d="M12 3.5v8" /><path d="M7 6.5a7 7 0 1 0 10 0" /></Icon>;
 
 export const BookIcon = (p: IconProps) => <Icon {...p}><path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H18.5v13H6.5A1.5 1.5 0 0 0 5 18.5z" /><path d="M5 18.5A1.5 1.5 0 0 0 6.5 20h12v-3" /><path d="M9 8h6" /></Icon>;
