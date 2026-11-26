@@ -103,6 +103,8 @@ function upsertAttempt(attempts: AssistantAttempt[], message: Message, modelName
  * own Chat turn; a regeneration appends an attempt to the latest Chat turn.
  */
 export function applyChatEventToTurns(turns: UnifiedTurn[], event: ChatEvent, modelName: string | null): UnifiedTurn[] {
+  // Coverage arrives before `started` and is tracked by the caller, not in turns.
+  if (event.kind === "knowledge") return turns;
   if (event.kind === "started") {
     if (event.user) {
       const id = String(event.user.id);

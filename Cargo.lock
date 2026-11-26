@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agent-core",
  "gio",
@@ -1660,15 +1660,17 @@ dependencies = [
 
 [[package]]
 name = "inference"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agent-core",
  "futures-channel",
  "futures-executor",
+ "libc",
  "llama-cpp-2",
  "minijinja",
  "minijinja-contrib",
  "serde",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2036,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "local-first-ai-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agent-core",
  "agent-tools",
@@ -3397,7 +3399,7 @@ checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
 
 [[package]]
 name = "storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agent-core",
  "rusqlite",

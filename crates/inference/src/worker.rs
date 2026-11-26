@@ -122,11 +122,19 @@ impl InferenceWorker {
     pub fn generate(
         &self,
         request: GenerationRequest,
+        emit: impl FnMut(TextDelta) -> Result<()> + Send + 'static,
+    ) -> Result<Pending<GenerationStats>> {
+        self.generate_with_cancellation(request, Cancellation::default(), emit)
+    }
+
+    pub fn generate_with_cancellation(
+        &self,
+        request: GenerationRequest,
+        cancellation: Cancellation,
         mut emit: impl FnMut(TextDelta) -> Result<()> + Send + 'static,
     ) -> Result<Pending<GenerationStats>> {
         request.validate()?;
         let state = self.reserve(Phase::Generating, Phase::Ready)?;
-        let cancellation = Cancellation::default();
         let worker_cancellation = cancellation.clone();
         self.submit(
             state,

@@ -1,5 +1,5 @@
 import {
-  useEffect, useId, useRef, useState,
+  useEffect, useId, useLayoutEffect, useRef, useState,
   type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode, type RefObject,
 } from "react";
 import { AlertIcon, CloseIcon, InfoIcon } from "./icons";
@@ -127,8 +127,10 @@ export function MenuSeparator() {
 
 /** A non-modal popover panel anchored to a trigger button. */
 export function Popover({
-  label, trigger, children, align = "start", placement = "above", disabled = false, triggerClassName = "",
+  label, trigger, children, align = "start", placement = "above", disabled = false, triggerClassName = "", panelClassName = "", fitViewport = false,
 }: {
+  panelClassName?: string;
+  fitViewport?: boolean;
   label: string;
   trigger: ReactNode;
   children: ReactNode;
@@ -145,8 +147,37 @@ export function Popover({
   const close = useRef(() => setOpen(false)).current;
   useDismiss(open, close, root);
 
+  useLayoutEffect(() => {
+    const node = panel.current;
+    if (!open || !fitViewport || !node) return;
+    const fit = () => {
+      node.style.translate = "";
+      const bounds = node.getBoundingClientRect();
+      const left = Math.max(12, Math.min(bounds.left, document.documentElement.clientWidth - bounds.width - 12));
+      node.style.translate = `${left - bounds.left}px`;
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [open, fitViewport]);
+
   useEffect(() => {
-    if (open) panel.current?.querySelector<HTMLElement>("input,select,button,textarea")?.focus();
+    if (open) panel.current?.querySelector<HTMLElement>("input:enabled,select:enabled,button:enabled,textarea:enabled")?.focus();
+  }, [open]);
+
+  // A control that disables itself (such as "All" once everything is
+  // selected) drops focus to the page, outside this root. Escape still closes.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target instanceof Node ? event.target : null;
+      if (target && root.current?.contains(target)) return;
+      setOpen(false);
+      button.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, [open]);
 
   return (
@@ -163,7 +194,7 @@ export function Popover({
         {trigger}
       </button>
       {open && (
-        <div id={id} ref={panel} role="dialog" aria-label={label} className={`popover menu-${align} menu-${placement}`}>
+        <div id={id} ref={panel} role="dialog" aria-label={label} className={`popover menu-${align} menu-${placement} ${panelClassName}`}>
           {children}
         </div>
       )}
@@ -179,7 +210,7 @@ export function Dialog({
   children: ReactNode;
   onClose: () => void;
   busy?: boolean;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl";
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();

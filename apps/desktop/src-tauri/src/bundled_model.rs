@@ -8,11 +8,12 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
 
 use agent_core::{
-    chat::{ChatStore, ModelReference, ModelSettings},
+    chat::{ChatStore, ModelId, ModelReference},
     inference::{ErrorCode, InferenceError, Result},
 };
 use serde::Serialize;
@@ -65,6 +66,17 @@ pub struct BundledModel {
     pub model: Option<ModelReference>,
     /// True when no user-imported model exists, so the UI may load it.
     pub auto_load: bool,
+    /// The last Chat model loaded successfully, to load at launch. Absent after
+    /// an explicit unload.
+    pub restore: Option<ModelRestore>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRestore {
+    pub model: ModelReference,
+    /// False when the saved file is not readable now; nothing is loaded.
+    pub available: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -91,7 +103,7 @@ fn stamp_line(spec: &BundledSpec, path: &Path, metadata: &fs::Metadata) -> Optio
     ))
 }
 
-fn sha256_hex(path: &Path) -> std::io::Result<String> {
+pub(crate) fn sha256_hex(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; 1 << 20];
@@ -125,6 +137,68 @@ fn write_stamp(path: &Path, line: &str) {
     if written.is_err() || fs::rename(&temporary, path).is_err() {
         let _ = fs::remove_file(&temporary);
     }
+}
+
+/// Sampled content identity: file size and the SHA-256 of the first and last
+/// MiB. Equal identities are treated as the same weights at different paths.
+/// Reads at most 2 MiB and never modifies the file.
+pub fn content_key(path: &Path) -> std::io::Result<String> {
+    use std::io::{Seek, SeekFrom};
+    const SAMPLE: u64 = 1 << 20;
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; SAMPLE as usize];
+    let head = file.read(&mut buffer)?;
+    hasher.update(&buffer[..head]);
+    if size > SAMPLE {
+        file.seek(SeekFrom::Start(size.saturating_sub(SAMPLE).max(SAMPLE)))?;
+        let mut tail = Vec::with_capacity(SAMPLE as usize);
+        file.take(SAMPLE).read_to_end(&mut tail)?;
+        hasher.update(&tail);
+    }
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("s1:{size}:{digest}"))
+}
+
+/// Record sampled identities for listed files that can be read now, compute
+/// full digests only for rows whose sampled identity matches another row, then
+/// collapse rows with equal full digests. Unreadable files, such as an
+/// unmounted drive, stay listed as separate models.
+pub fn reconcile_models(
+    db: &Mutex<storage::SqliteStore>,
+    verified: Option<(ModelId, &str)>,
+) -> Result<()> {
+    let pending = database(db)?.models_without_content_key()?;
+    let keys: Vec<_> = pending
+        .into_iter()
+        .filter_map(|(id, path)| content_key(&path).ok().map(|key| (id, key)))
+        .collect();
+    {
+        let mut db = database(db)?;
+        for (id, key) in keys {
+            db.set_model_content_key(id, &key)?;
+        }
+        // The bundled file was just verified against its pinned digest.
+        if let Some((id, sha256)) = verified {
+            db.set_model_sha256(id, sha256)?;
+        }
+    }
+    let candidates = database(db)?.duplicate_candidates()?;
+    let digests: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|(id, path)| sha256_hex(&path).ok().map(|digest| (id, digest)))
+        .collect();
+    let mut db = database(db)?;
+    for (id, digest) in digests {
+        db.set_model_sha256(id, &digest)?;
+    }
+    db.merge_duplicate_models()?;
+    Ok(())
 }
 
 /// Verify the resource by size and SHA-256. A stamp keyed by path, size and
@@ -173,16 +247,12 @@ pub fn register(
                 },
                 model: None,
                 auto_load: false,
+                restore: None,
             });
         }
     };
-    let mut settings = db.preferences()?.defaults;
-    if settings == ModelSettings::recommended(8192) {
-        settings = recommended_for_model(LFM25_TRAINED_CONTEXT, spec.bytes);
-    } else {
-        settings.model.context_length = 4096;
-        settings.max_tokens = settings.max_tokens.min(settings.model.context_length - 1);
-    }
+    // A new row starts with automatic settings. Existing rows keep theirs.
+    let mut settings = recommended_for_model(LFM25_TRAINED_CONTEXT, spec.bytes);
     // LFM2.5-Instruct has no switchable Thinking mode.
     settings.enable_thinking = false;
     let registration = db.register_bundled_model(spec.key, &path, spec.file_name, settings)?;
@@ -190,6 +260,7 @@ pub fn register(
         state: BundledState::Ready,
         model: Some(registration.reference),
         auto_load: registration.only_model,
+        restore: None,
     })
 }
 
@@ -216,7 +287,32 @@ pub async fn prepare_bundled_model(
         tauri::async_runtime::spawn_blocking(move || verify(&LFM25, &resource_dir, &stamp_dir))
             .await
             .map_err(|_| unavailable())?;
-    register(&mut *database(&state.database)?, &LFM25, verification)
+    let mut bundled = register(&mut *database(&state.database)?, &LFM25, verification)?;
+    let store = Arc::clone(&state.database);
+    let verified = bundled.model.as_ref().map(|model| model.id);
+    tauri::async_runtime::spawn_blocking(move || {
+        reconcile_models(&store, verified.map(|id| (id, LFM25.sha256)))
+    })
+    .await
+    .map_err(|_| unavailable())??;
+    let db = database(&state.database)?;
+    if let Some(model) = &bundled.model {
+        bundled.model = Some(db.model(model.id)?.reference);
+    }
+    let unloaded = db.chat_model_unloaded()?;
+    // Restore the last Chat model that loaded successfully, unless the user
+    // explicitly unloaded it. A missing file is reported and not loaded.
+    bundled.restore = db.chat_model_to_restore()?.map(|saved| ModelRestore {
+        available: saved.path.is_file(),
+        model: saved.reference,
+    });
+    // Without a model to restore, load the bundled model automatically only
+    // when it is the sole listed choice, and never after an explicit unload.
+    bundled.auto_load = bundled.restore.is_none()
+        && bundled.model.is_some()
+        && db.recent_models()?.len() == 1
+        && !unloaded;
+    Ok(bundled)
 }
 
 #[cfg(test)]
@@ -346,5 +442,90 @@ mod tests {
         assert!(LFM25.resource.ends_with(LFM25.file_name));
         assert_eq!(LFM25.sha256.len(), 64);
         assert!(LFM25.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    /// Reconciles a disposable copy of a real profile database. Prints the
+    /// listed models before and after; never touches the original profile.
+    #[test]
+    #[ignore = "uses AGENT_PROFILE_DB_COPY, a scratch copy of a real profile database"]
+    fn real_profile_copy_collapses_duplicate_models() {
+        let path = PathBuf::from(std::env::var_os("AGENT_PROFILE_DB_COPY").unwrap());
+        let store = Mutex::new(storage::SqliteStore::open(&path).unwrap());
+        let describe = |store: &Mutex<storage::SqliteStore>| {
+            store
+                .lock()
+                .unwrap()
+                .recent_models()
+                .unwrap()
+                .into_iter()
+                .map(|model| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        model.id,
+                        model.file_name,
+                        if model.bundled { "bundled" } else { "imported" },
+                        if model.automatic_settings {
+                            "automatic"
+                        } else {
+                            "custom"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        println!("before: {:?}", describe(&store));
+        reconcile_models(&store, None).unwrap();
+        println!("after: {:?}", describe(&store));
+        let listed = describe(&store);
+        let lfm = listed
+            .iter()
+            .filter(|entry| entry.contains("LFM2.5-1.2B-Instruct"))
+            .count();
+        assert_eq!(lfm, 1, "copies of the same LFM2.5 weights collapse");
+    }
+
+    /// Synthetic files that share size, first and last MiB, but differ in the
+    /// middle must stay separate; real copies of the same GGUF consolidate.
+    #[test]
+    #[ignore = "hashes AGENT_TEST_MODEL and AGENT_TEST_MODEL_COPY (two copies of one GGUF)"]
+    fn full_digests_decide_consolidation() {
+        let scratch = Scratch::new();
+        let mut bytes = vec![7u8; 3 << 20];
+        let a = scratch.0.join("models/a.gguf");
+        fs::write(&a, &bytes).unwrap();
+        bytes[(3 << 20) / 2] = 8;
+        let b = scratch.0.join("models/b.gguf");
+        fs::write(&b, &bytes).unwrap();
+        assert_eq!(content_key(&a).unwrap(), content_key(&b).unwrap());
+        let original = PathBuf::from(std::env::var_os("AGENT_TEST_MODEL").unwrap());
+        let copy = PathBuf::from(std::env::var_os("AGENT_TEST_MODEL_COPY").unwrap());
+        let store = Mutex::new(storage::SqliteStore::open(Path::new(":memory:")).unwrap());
+        {
+            let mut db = store.lock().unwrap();
+            for (path, name) in [
+                (&a, "a.gguf"),
+                (&b, "b.gguf"),
+                (&original, "lfm.gguf"),
+                (&copy, "lfm.gguf"),
+            ] {
+                db.remember_model(
+                    path,
+                    name,
+                    agent_core::chat::ModelSettings::recommended(4096),
+                )
+                .unwrap();
+            }
+        }
+        reconcile_models(&store, None).unwrap();
+        let listed = store.lock().unwrap().recent_models().unwrap();
+        let names: Vec<_> = listed
+            .iter()
+            .map(|model| model.file_name.as_str())
+            .collect();
+        println!("listed: {names:?}");
+        assert_eq!(names.iter().filter(|name| **name == "lfm.gguf").count(), 1);
+        assert!(names.contains(&"a.gguf") && names.contains(&"b.gguf"));
+        // The original files were only read.
+        assert_eq!(fs::read(&b).unwrap(), bytes);
     }
 }

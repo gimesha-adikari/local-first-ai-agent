@@ -7,7 +7,7 @@ application. The Linux release embeds its frontend assets.
 | --- | --- |
 | crates/agent-core | Chat and task domain, storage and inference contracts, context selection, budgets, and permission policy |
 | crates/inference | Dedicated worker, GGUF validation, llama.cpp, template rendering, and tokenizer-backed budgeting |
-| crates/storage | Versioned SQLite schema, chat and task history, permission audit, model references, and preferences |
+| crates/storage | Versioned SQLite schema (through version 11), chat and task history, permission audit, model references, preferences, the local knowledge index, vectors, and personal memory |
 | crates/tools | Typed native tools, scoped read-only file handles, trusted application discovery and dispatch |
 | apps/desktop/src-tauri | App data directory, native picker, command validation, generation coordination, and streaming IPC |
 | apps/desktop/src | Conversation UI, composer, scoped Markdown rendering, model controls, and settings |
@@ -29,6 +29,35 @@ instance cannot recover an active writer's messages. The database lives under
 the OS local application data directory. Its exact path appears in Settings.
 On Unix, the app creates the chat directory and database with owner-only
 permissions. Ordinary SQLite persistence is **not encrypted at rest**.
+
+## Local knowledge
+
+The Linux host imports one explicitly selected document at a time after
+native retention consent. A bounded worker reads the pinned file and
+extracts TXT, Markdown or PDF text. PDFs use the isolated Poppler path
+shared with the Agent. The storage adapter commits metadata, source
+references and FTS5 text in one transaction. Search and deletion operate
+on SQLite after the original file handle has closed. See the
+[Task 01 handoff](task-v0.2.0-01-handoff.md) for the IPC and limits.
+
+Semantic and hybrid search embed passages with a user-imported BGE-small-en-v1.5
+GGUF, run in the inference worker's embedding path. The vectors are stored in
+SQLite. Retrieval applies a relevance floor and margin in `agent_core::semantic`.
+Hybrid search applies the floor before reciprocal rank fusion. Natural-language
+questions are classified by `agent_core::chat_route` into search, overview,
+question or general intent. Each intent has a bounded evidence source: an FTS
+phrase match, the directly read passages, relevance-filtered retrieval, or no
+evidence. Grounded Chat with no qualifying passage returns a fixed reply
+without calling the model.
+
+Contextual attempts (schemas 9 and 11) record fitted source and memory counts
+and coverage. Historical coverage never copies document excerpts or memory text.
+Replacing or deleting a document never rewrites that history.
+
+Personal memory is separate from document evidence. Explicitly saved memories
+(up to 512, 1–1,024 UTF-8 bytes each) are off by default. When enabled, up to
+three relevant memories are added as background to ordinary and contextual
+answers. Nothing is extracted automatically.
 
 ## Inference context
 
@@ -74,7 +103,7 @@ A native picker authorizes a local GGUF path, which Rust stores in the model
 reference table. The view receives model reference IDs and file names. Load
 requests resolve IDs in Rust, including references to drives that may be
 disconnected. The main window capability grants only the named chat, model,
-preference, and Agent commands. The release content security policy permits
+preference, Agent, and knowledge commands. The release content security policy permits
 embedded assets and Tauri IPC.
 
 Generated Markdown is untrusted. The view disables raw HTML, external images,

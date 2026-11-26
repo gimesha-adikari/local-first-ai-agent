@@ -7,18 +7,34 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::agent::AgentSession;
+use crate::{
+    agent::AgentSession,
+    chat_context::{KnowledgeSelection, retrieval_error, retrieval_query},
+    semantic::SemanticState,
+};
 use agent_core::{
+    agent::{AgentError, AgentErrorCode},
     chat::{
         ChatStore, Conversation, ConversationId, ConversationSummary, GenerationState, Message,
         MessageId, ModelId, ModelReference, ModelSettings, Preferences, TurnAction,
         validate_system_prompt, validate_title,
     },
-    inference::{ErrorCode, GenerationRequest, GenerationStats, InferenceError, ModelInfo, Result},
+    chat_context::{
+        AttemptContext, ChatContext, ChatIntent, ContextObserver, EvidenceTask, Grounding,
+        no_evidence_answer,
+    },
+    chat_route::{RoutePlan, route, routed_question},
+    inference::{
+        Cancellation, ErrorCode, GenerationRequest, GenerationStats, InferenceError, ModelInfo,
+        Result,
+    },
+    semantic::{BGE_KEY, UnitVector},
 };
 use inference::{InferenceWorker, Pending, Phase, Status};
 use serde::{Deserialize, Serialize};
-use storage::SqliteStore;
+use storage::{
+    SqliteStore, chat_context::KnowledgeCoverage, knowledge::KnowledgeHit, semantic::RetrievalMode,
+};
 use tauri::{State, ipc::Channel};
 
 pub struct Desktop {
@@ -28,6 +44,7 @@ pub struct Desktop {
     pub database_path: PathBuf,
     pub operations: Arc<AtomicBool>,
     pub active_model: AtomicI64,
+    pub chat_cancellation: Mutex<Option<Cancellation>>,
 }
 
 pub(crate) fn database(db: &Mutex<SqliteStore>) -> Result<MutexGuard<'_, SqliteStore>> {
@@ -45,6 +62,37 @@ impl Drop for OperationGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
+}
+
+struct ChatCancellation<'a>(&'a Mutex<Option<Cancellation>>);
+
+impl Drop for ChatCancellation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+}
+
+fn cancellation_lock(
+    slot: &Mutex<Option<Cancellation>>,
+) -> Result<MutexGuard<'_, Option<Cancellation>>> {
+    slot.lock().map_err(|_| {
+        InferenceError::new(
+            ErrorCode::WorkerStopped,
+            "The Chat cancellation slot is unavailable.",
+        )
+    })
+}
+
+fn check_chat_cancellation(cancellation: &Cancellation) -> Result<()> {
+    if cancellation.is_explicitly_cancelled() {
+        return Err(InferenceError::new(
+            ErrorCode::Cancelled,
+            "Chat preparation was cancelled.",
+        ));
+    }
+    Ok(())
 }
 
 impl Desktop {
@@ -174,23 +222,71 @@ pub async fn choose_model(state: State<'_, Desktop>) -> Result<Option<ModelRefer
         })?
         .to_string_lossy()
         .into_owned();
-    let defaults = database(&state.database)?.preferences()?.defaults;
-    let defaults = if defaults == ModelSettings::recommended(8192) {
-        let path = path.to_path_buf();
-        tauri::async_runtime::spawn_blocking(move || {
-            let (trained_context, bytes) = inference::trained_context(&path)?;
-            Ok(recommended_for_model(trained_context, bytes))
+    let path = path.to_path_buf();
+    let inspected = path.clone();
+    let (key, recommended) = tauri::async_runtime::spawn_blocking(move || {
+        let key = crate::bundled_model::content_key(&inspected).map_err(|_| {
+            InferenceError::new(ErrorCode::InvalidModel, "Could not read the GGUF model.")
+        })?;
+        let (trained_context, bytes) = inference::trained_context(&inspected)?;
+        Ok::<_, InferenceError>((key, recommended_for_model(trained_context, bytes)))
+    })
+    .await
+    .map_err(|_| {
+        InferenceError::new(ErrorCode::InvalidModel, "Could not inspect the GGUF model.")
+    })??;
+    // A sampled match only nominates candidates. The same weights at another
+    // path reuse the listed row and its settings only when full digests match.
+    let candidates = database(&state.database)?.models_with_content_key(&key)?;
+    let mut digest = None;
+    if !candidates.is_empty() {
+        let chosen = path.clone();
+        let unknown: Vec<_> = candidates
+            .iter()
+            .filter(|(_, _, sha)| sha.is_none())
+            .map(|(id, path, _)| (*id, path.clone()))
+            .collect();
+        let (chosen, known) = tauri::async_runtime::spawn_blocking(move || {
+            let chosen = crate::bundled_model::sha256_hex(&chosen).ok();
+            let known: Vec<_> = unknown
+                .into_iter()
+                .filter_map(|(id, path)| {
+                    crate::bundled_model::sha256_hex(&path)
+                        .ok()
+                        .map(|sha| (id, sha))
+                })
+                .collect();
+            (chosen, known)
         })
         .await
         .map_err(|_| {
             InferenceError::new(ErrorCode::InvalidModel, "Could not inspect the GGUF model.")
-        })??
-    } else {
-        defaults
-    };
-    database(&state.database)?
-        .remember_model(path, &name, defaults)
-        .map(Some)
+        })?;
+        let mut db = database(&state.database)?;
+        for (id, sha) in &known {
+            db.set_model_sha256(*id, sha)?;
+        }
+        if let Some(chosen) = &chosen
+            && let Some(existing) = db.model_with_sha256(chosen)?
+        {
+            db.mark_model_used(existing.id)?;
+            return db.model(existing.id).map(|model| Some(model.reference));
+        }
+        digest = chosen;
+    }
+    let mut db = database(&state.database)?;
+    let reference = db.remember_model(&path, &name, recommended)?;
+    db.set_model_content_key(reference.id, &key)?;
+    if let Some(digest) = digest {
+        db.set_model_sha256(reference.id, &digest)?;
+    }
+    db.model(reference.id).map(|model| Some(model.reference))
+}
+
+/// Listed models after collapsing copies of the same weights.
+#[tauri::command]
+pub fn list_models(state: State<'_, Desktop>) -> Result<Vec<ModelReference>> {
+    database(&state.database)?.recent_models()
 }
 
 #[tauri::command]
@@ -204,6 +300,24 @@ async fn wait_for<T>(pending: Pending<T>) -> Result<T> {
     })?
 }
 
+/// Recommended settings for a model file on this machine.
+async fn recommended_for_file(path: PathBuf, current: ModelSettings) -> Result<ModelSettings> {
+    let mut settings = tauri::async_runtime::spawn_blocking(move || {
+        let (trained_context, bytes) = inference::trained_context(&path)?;
+        Ok::<_, InferenceError>(recommended_for_model(trained_context, bytes))
+    })
+    .await
+    .map_err(|_| {
+        InferenceError::new(ErrorCode::InvalidModel, "Could not inspect the GGUF model.")
+    })??;
+    // Thinking is a per-request choice; keep whatever the row already holds.
+    settings.enable_thinking = current.enable_thinking;
+    Ok(settings)
+}
+
+/// Loads a model. Settings equal to the saved settings mean "use this
+/// model's settings": automatic models are re-recommended for the current
+/// hardware. Different settings are an explicit choice and become custom.
 #[tauri::command]
 pub async fn load_model(
     state: State<'_, Desktop>,
@@ -212,14 +326,23 @@ pub async fn load_model(
 ) -> Result<ModelInfo> {
     let _operation = state.reserve()?;
     settings.validate()?;
-    let path = database(&state.database)?.model(model_id)?.path;
-    let info = wait_for(state.worker.load(path, settings.model)?).await?;
-    let saved = {
-        let mut db = database(&state.database)?;
-        db.save_model_settings(model_id, settings)
-            .and_then(|()| db.mark_model_used(model_id))
+    let saved = database(&state.database)?.model(model_id)?;
+    let explicit = settings != saved.reference.settings;
+    let automatic = saved.reference.automatic_settings && !explicit;
+    let settings = if automatic {
+        recommended_for_file(saved.path.clone(), saved.reference.settings).await?
+    } else {
+        settings
     };
-    if let Err(error) = saved {
+    settings.validate()?;
+    let info = wait_for(state.worker.load(saved.path, settings.model)?).await?;
+    let stored = {
+        let mut db = database(&state.database)?;
+        db.set_model_settings(model_id, settings, automatic)
+            .and_then(|()| db.mark_model_used(model_id))
+            .and_then(|()| db.set_last_chat_model(model_id))
+    };
+    if let Err(error) = stored {
         let _ = wait_for(state.worker.unload()?).await;
         return Err(error);
     }
@@ -227,6 +350,7 @@ pub async fn load_model(
     Ok(info)
 }
 
+/// Saves settings for later loads. Changed settings become custom.
 #[tauri::command]
 pub fn save_model_settings(
     state: State<'_, Desktop>,
@@ -244,7 +368,33 @@ pub fn save_model_settings(
             "Unload the model before changing context length or CPU threads.",
         ));
     }
-    database(&state.database)?.save_model_settings(model_id, settings)
+    let mut db = database(&state.database)?;
+    let saved = db.model(model_id)?.reference;
+    let automatic = saved.automatic_settings && saved.settings == settings;
+    db.set_model_settings(model_id, settings, automatic)
+}
+
+/// Returns a model to automatic settings and stores the current
+/// recommendation. A loaded model keeps its context and threads until it is
+/// loaded again.
+#[tauri::command]
+pub async fn reset_model_settings(
+    state: State<'_, Desktop>,
+    model_id: ModelId,
+) -> Result<ModelReference> {
+    let _operation = state.reserve()?;
+    let saved = database(&state.database)?.model(model_id)?;
+    let mut settings = recommended_for_file(saved.path, saved.reference.settings).await?;
+    if state.active_model() == Some(model_id)
+        && let Some(model) = state.worker.status()?.model
+    {
+        // Sampling applies now; context and threads apply at the next load.
+        settings.model = model.config;
+        settings.max_tokens = settings.max_tokens.min(model.config.context_length - 1);
+    }
+    let mut db = database(&state.database)?;
+    db.set_model_settings(model_id, settings, true)?;
+    Ok(db.model(model_id)?.reference)
 }
 
 #[tauri::command]
@@ -252,6 +402,7 @@ pub async fn unload_model(state: State<'_, Desktop>) -> Result<()> {
     let _operation = state.reserve()?;
     wait_for(state.worker.unload()?).await?;
     state.active_model.store(0, Ordering::Release);
+    database(&state.database)?.set_chat_model_unloaded(true)?;
     Ok(())
 }
 
@@ -261,6 +412,9 @@ pub enum ChatEvent {
     Started {
         user: Option<Message>,
         assistant: Box<Message>,
+    },
+    Knowledge {
+        coverage: KnowledgeCoverage,
     },
     Delta {
         id: MessageId,
@@ -303,6 +457,7 @@ pub struct ChatOptions {
     #[serde(default)]
     enable_thinking: bool,
     max_tokens: Option<u32>,
+    knowledge: Option<KnowledgeSelection>,
 }
 
 #[cfg(test)]
@@ -322,12 +477,16 @@ fn chat_options_default_to_direct_and_use_camel_case() {
 
 async fn run_turn(
     state: &Desktop,
+    semantic: &SemanticState,
     id: ConversationId,
     action: TurnAction,
     options: ChatOptions,
     events: Channel<ChatEvent>,
 ) -> Result<Message> {
     let _operation = state.reserve()?;
+    let cancellation = Cancellation::default();
+    *cancellation_lock(&state.chat_cancellation)? = Some(cancellation.clone());
+    let _active_chat = ChatCancellation(&state.chat_cancellation);
     let model_id = state
         .active_model()
         .ok_or_else(|| InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first."))?;
@@ -338,34 +497,167 @@ async fn run_turn(
             "Wait for the model to be ready.",
         ));
     }
-    if let TurnAction::Send(content) = &action {
-        GenerationRequest::new(content).validate()?;
-    }
-    let (mut turn, settings) = {
-        let mut db = database(&state.database)?;
-        let mut settings = db.model(model_id)?.reference.settings;
-        settings.enable_thinking = options.enable_thinking;
-        if let Some(max_tokens) = options.max_tokens {
-            settings.max_tokens = max_tokens;
-        }
-        settings.validate()?;
-        if settings.enable_thinking
-            && !status
-                .model
-                .as_ref()
-                .is_some_and(|model| model.supports_thinking)
-        {
-            return Err(InferenceError::new(
-                ErrorCode::InvalidConfig,
-                "This model does not support thinking mode. Send without thinking.",
-            ));
-        }
-        let model_name = status.model.as_ref().map(|model| model.file_name.as_str());
-        (
-            db.begin_chat_attempt(id, action, model_name, model_id, settings)?,
-            settings,
-        )
+    let question = match &action {
+        TurnAction::Send(content) => content.clone(),
+        TurnAction::Regenerate => database(&state.database)?.chat_regeneration_prompt(id)?,
     };
+    GenerationRequest::new(&question).validate()?;
+    let mut settings = database(&state.database)?
+        .model(model_id)?
+        .reference
+        .settings;
+    settings.enable_thinking = options.enable_thinking;
+    if let Some(max_tokens) = options.max_tokens {
+        settings.max_tokens = max_tokens;
+    }
+    settings.validate()?;
+    if settings.enable_thinking
+        && !status
+            .model
+            .as_ref()
+            .is_some_and(|model| model.supports_thinking)
+    {
+        return Err(InferenceError::new(
+            ErrorCode::InvalidConfig,
+            "This model does not support thinking mode. Send without thinking.",
+        ));
+    }
+
+    let knowledge = options.knowledge;
+    let strict = knowledge
+        .as_ref()
+        .is_some_and(|selection| selection.grounding == Grounding::Documents);
+    let mut previous = None;
+    let plan = match &knowledge {
+        Some(selection) => {
+            selection.validate()?;
+            previous = database(&state.database)?
+                .previous_document_question(id, matches!(action, TurnAction::Regenerate))?;
+            Some(route(&question, previous.as_deref(), selection.grounding))
+        }
+        None => None,
+    };
+    // A refinement restates the previous question for the model; the saved
+    // user message keeps the original text.
+    let prompt = plan
+        .as_ref()
+        .filter(|plan| plan.refinement.is_some())
+        .map(|plan| routed_question(plan, &question, previous.as_deref()));
+    // Only questions are ranked against the request. Searches and overviews
+    // read the selected documents directly and never need the dense model.
+    let query = plan
+        .as_ref()
+        .filter(|plan| plan.intent == ChatIntent::Question)
+        .and_then(|plan| retrieval_query(&plan.query));
+    let mut requested_mode = None;
+    let vector = match (&knowledge, &query) {
+        (Some(selection), Some(query)) if selection.mode != RetrievalMode::Keyword => {
+            match semantic
+                .embed_chat_query(query.clone(), cancellation.clone())
+                .await
+            {
+                Ok(vector) => Some(vector),
+                Err(error) if selection.grounding == Grounding::Auto && dense_unusable(&error) => {
+                    requested_mode = Some(selection.mode);
+                    None
+                }
+                Err(error) => return Err(retrieval_error(error)),
+            }
+        }
+        _ => None,
+    };
+    check_chat_cancellation(&cancellation)?;
+    let model_name = status.model.map(|model| model.file_name);
+    let store = Arc::clone(&state.database);
+    let preparation = cancellation.clone();
+    let (mut turn, context, sources, coverage, deterministic) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut db = database(&store)?;
+            check_chat_cancellation(&preparation)?;
+            let retrieval = match (knowledge, plan) {
+                (Some(selection), Some(plan)) => Some(
+                    prepare_knowledge(
+                        &db,
+                        &selection,
+                        &plan,
+                        query.as_deref(),
+                        vector.as_ref(),
+                        requested_mode,
+                    )
+                    .map_err(retrieval_error)?,
+                ),
+                _ => None,
+            };
+            let memory_enabled = db.memory_enabled()?;
+            let (sources, coverage, task) = retrieval.map_or_else(
+                || (Vec::new(), None, EvidenceTask::Answer),
+                |retrieval| (retrieval.sources, Some(retrieval.coverage), retrieval.task),
+            );
+            // A General route keeps the documents available but supplies no
+            // evidence, so it is an ordinary attempt unless memories apply.
+            let grounded = coverage
+                .as_ref()
+                .is_some_and(|coverage| coverage.intent != Some(ChatIntent::General));
+            // Grounded Chat without evidence gets a fixed reply instead of a model
+            // answer that could draw on history or memory.
+            let deterministic = (grounded && sources.is_empty()).then(|| no_evidence_answer(&task));
+            // Personal memory never supplements documents-only answers.
+            let memories = if strict || deterministic.is_some() {
+                Vec::new()
+            } else {
+                db.relevant_memories(&question)?
+            };
+            let context = (grounded || !memories.is_empty()).then(|| ChatContext {
+                evidence: grounded.then(|| sources.iter().map(|hit| hit.text.clone()).collect()),
+                memories,
+                task,
+            });
+            check_chat_cancellation(&preparation)?;
+            let turn = match (&context, &coverage) {
+                (Some(_), _) => db.begin_chat_with_context(
+                    id,
+                    action,
+                    model_name.as_deref(),
+                    AttemptContext {
+                        coverage: coverage.clone(),
+                        memory_enabled: Some(memory_enabled),
+                        fitted: None,
+                    },
+                )?,
+                // Ordinary Chat with documents selected keeps its routing coverage
+                // without becoming contextual, so history and Continue still work.
+                (None, Some(route)) => db.begin_routed_chat_attempt(
+                    id,
+                    action,
+                    model_name.as_deref(),
+                    model_id,
+                    settings,
+                    route,
+                )?,
+                (None, None) => {
+                    db.begin_chat_attempt(id, action, model_name.as_deref(), model_id, settings)?
+                }
+            };
+            Ok((turn, context, sources, coverage, deterministic))
+        })
+        .await
+        .map_err(|_| {
+            InferenceError::new(ErrorCode::WorkerStopped, "Chat preparation stopped.")
+        })??;
+    if let Some(text) = deterministic {
+        return finish_without_generation(state, turn, events, coverage, text);
+    }
+    if let Some(prompt) = prompt {
+        turn.prompt = prompt;
+    }
+    // Evidence answers see no earlier turns: ordinary answers in history must
+    // never stand in for documents, and contextual answers are already omitted.
+    if context
+        .as_ref()
+        .is_some_and(|context| context.evidence.is_some())
+    {
+        turn.history.turns.clear();
+    }
     let mut request = settings.request(
         std::mem::take(&mut turn.prompt),
         std::mem::take(&mut turn.history),
@@ -374,18 +666,182 @@ async fn run_turn(
         adaptive: options.max_tokens.is_none(),
         replay: None,
     });
-    stream_chat(state, turn, request, events, None).await
+    request.context = context;
+    stream_chat(
+        state,
+        turn,
+        request,
+        events,
+        StreamContext {
+            previous: None,
+            cancellation,
+            sources,
+            coverage,
+        },
+    )
+    .await
+}
+
+/// Save and stream a fixed reply for grounded Chat without evidence.
+fn finish_without_generation(
+    state: &Desktop,
+    turn: agent_core::chat::PendingTurn,
+    events: Channel<ChatEvent>,
+    coverage: Option<KnowledgeCoverage>,
+    text: String,
+) -> Result<Message> {
+    let mut assistant = turn.assistant;
+    let id = assistant.id;
+    let mut db = database(&state.database)?;
+    if let Some(context) = assistant.context.clone() {
+        db.checkpoint_chat_evidence(
+            id,
+            &context,
+            agent_core::chat_context::ContextUsage::default(),
+            &[],
+        )?;
+    }
+    if let Some(coverage) = coverage {
+        let _ = events.send(ChatEvent::Knowledge { coverage });
+    }
+    let _ = events.send(ChatEvent::Started {
+        user: turn.user,
+        assistant: Box::new(assistant.clone()),
+    });
+    let _ = events.send(ChatEvent::Delta {
+        id,
+        text: text.clone(),
+    });
+    db.finish(id, &text, GenerationState::Complete, None)?;
+    assistant.content = text;
+    assistant.state = GenerationState::Complete;
+    if assistant.context.is_some() {
+        assistant.context = db.chat_attempt_context(id)?.map(Box::new);
+    }
+    Ok(assistant)
+}
+
+fn dense_unusable(error: &AgentError) -> bool {
+    matches!(
+        error.code,
+        AgentErrorCode::EmbeddingUnavailable
+            | AgentErrorCode::EmbeddingIndexUnavailable
+            | AgentErrorCode::EmbeddingIncompatible
+    )
+}
+
+struct PreparedKnowledge {
+    coverage: KnowledgeCoverage,
+    sources: Vec<KnowledgeHit>,
+    task: EvidenceTask,
+}
+
+/// Retrieve evidence for a routed request. Under automatic grounding a
+/// question with no relevant passage becomes General, and an unusable dense
+/// model or index falls back to keyword ranking with the requested mode kept
+/// in coverage.
+fn prepare_knowledge(
+    db: &SqliteStore,
+    selection: &KnowledgeSelection,
+    plan: &RoutePlan,
+    query: Option<&str>,
+    vector: Option<&UnitVector>,
+    requested_mode: Option<RetrievalMode>,
+) -> agent_core::agent::AgentResult<PreparedKnowledge> {
+    let ids = &selection.document_ids;
+    let (retrieval, task, mut intent) = match plan.intent {
+        ChatIntent::Search => (
+            db.search_for_chat(&plan.query, ids, selection.mode)?,
+            EvidenceTask::Search {
+                target: plan.query.clone(),
+            },
+            ChatIntent::Search,
+        ),
+        ChatIntent::Overview => {
+            let retrieval = db.overview_for_chat(ids, selection.mode)?;
+            let total_chunks = retrieval
+                .coverage
+                .overview
+                .iter()
+                .map(|document| document.total_chunks)
+                .sum();
+            (
+                retrieval,
+                EvidenceTask::Overview { total_chunks },
+                ChatIntent::Overview,
+            )
+        }
+        ChatIntent::Question | ChatIntent::General => {
+            let mut requested_mode = requested_mode;
+            let mode = if requested_mode.is_some() {
+                RetrievalMode::Keyword
+            } else {
+                selection.mode
+            };
+            let retrieval = match db.retrieve_for_chat(query, ids, mode, BGE_KEY, vector) {
+                Err(error)
+                    if selection.grounding == Grounding::Auto
+                        && mode != RetrievalMode::Keyword
+                        && dense_unusable(&error) =>
+                {
+                    requested_mode = Some(mode);
+                    db.retrieve_for_chat(query, ids, RetrievalMode::Keyword, BGE_KEY, None)?
+                }
+                result => result?,
+            };
+            let mut retrieval = retrieval;
+            retrieval.coverage.requested_mode = requested_mode;
+            (retrieval, EvidenceTask::Answer, ChatIntent::Question)
+        }
+    };
+    // Automatic grounding answers an unrelated request as ordinary Chat, but
+    // an explicit document question without evidence stays grounded.
+    if intent == ChatIntent::Question
+        && retrieval.sources.is_empty()
+        && selection.grounding == Grounding::Auto
+        && !plan.refers_to_documents
+    {
+        intent = ChatIntent::General;
+    }
+    let mut coverage = retrieval.coverage;
+    coverage.intent = Some(intent);
+    coverage.grounding = Some(selection.grounding);
+    Ok(PreparedKnowledge {
+        coverage,
+        sources: retrieval.sources,
+        task,
+    })
+}
+
+#[derive(Default)]
+struct StreamContext {
+    previous: Option<GenerationStats>,
+    cancellation: Cancellation,
+    sources: Vec<KnowledgeHit>,
+    coverage: Option<KnowledgeCoverage>,
 }
 
 async fn stream_chat(
     state: &Desktop,
     turn: agent_core::chat::PendingTurn,
-    request: GenerationRequest,
+    mut request: GenerationRequest,
     events: Channel<ChatEvent>,
-    previous: Option<GenerationStats>,
+    context: StreamContext,
 ) -> Result<Message> {
+    let StreamContext {
+        previous,
+        cancellation,
+        sources,
+        coverage,
+    } = context;
     let mut assistant = turn.assistant;
     let message_id = assistant.id;
+    if let Some(context) = assistant.context.clone() {
+        let store = Arc::clone(&state.database);
+        request.context_observer = Some(ContextObserver::new(move |usage| {
+            database(&store)?.checkpoint_chat_evidence(message_id, &context, usage, &sources)
+        }));
+    }
     let transcript = Arc::new(Mutex::new(Transcript {
         text: assistant.content.clone(),
         checkpoint_at: Instant::now(),
@@ -398,15 +854,21 @@ async fn stream_chat(
         // hold back deltas until the initial message has been sent.
         let _first_event = transcript_lock(&transcript)?;
         let deltas = events.clone();
-        let pending = state.worker.generate(request, move |delta| {
-            transcript_lock(&buffer)?.push(&delta.text, &db, message_id)?;
-            let _ = deltas.send(ChatEvent::Delta {
-                id: message_id,
-                text: delta.text,
-            });
-            Ok(())
-        });
+        let pending =
+            state
+                .worker
+                .generate_with_cancellation(request, cancellation, move |delta| {
+                    transcript_lock(&buffer)?.push(&delta.text, &db, message_id)?;
+                    let _ = deltas.send(ChatEvent::Delta {
+                        id: message_id,
+                        text: delta.text,
+                    });
+                    Ok(())
+                });
         if pending.is_ok() {
+            if let Some(coverage) = coverage {
+                let _ = events.send(ChatEvent::Knowledge { coverage });
+            }
             let _ = events.send(ChatEvent::Started {
                 user: turn.user,
                 assistant: Box::new(assistant.clone()),
@@ -440,12 +902,16 @@ async fn stream_chat(
     };
     assistant.content = content;
     assistant.state = GenerationState::from_output(generated.reason, &assistant.content);
-    database(&state.database)?.finish(
+    let mut db = database(&state.database)?;
+    db.finish(
         message_id,
         &assistant.content,
         assistant.state,
         Some(&generated),
     )?;
+    if assistant.context.is_some() {
+        assistant.context = db.chat_attempt_context(message_id)?.map(Box::new);
+    }
     assistant.stats = Some(generated);
     Ok(assistant)
 }
@@ -453,6 +919,7 @@ async fn stream_chat(
 #[tauri::command]
 pub async fn send_message(
     state: State<'_, Desktop>,
+    semantic: State<'_, SemanticState>,
     id: ConversationId,
     content: String,
     options: Option<ChatOptions>,
@@ -460,6 +927,7 @@ pub async fn send_message(
 ) -> Result<Message> {
     run_turn(
         &state,
+        &semantic,
         id,
         TurnAction::Send(content),
         options.unwrap_or_default(),
@@ -471,12 +939,14 @@ pub async fn send_message(
 #[tauri::command]
 pub async fn regenerate(
     state: State<'_, Desktop>,
+    semantic: State<'_, SemanticState>,
     id: ConversationId,
     options: Option<ChatOptions>,
     events: Channel<ChatEvent>,
 ) -> Result<Message> {
     run_turn(
         &state,
+        &semantic,
         id,
         TurnAction::Regenerate,
         options.unwrap_or_default(),
@@ -589,7 +1059,10 @@ pub async fn continue_chat(
         plan.turn,
         request,
         events,
-        Some(plan.previous_stats),
+        StreamContext {
+            previous: Some(plan.previous_stats),
+            ..StreamContext::default()
+        },
     )
     .await
 }
@@ -602,5 +1075,13 @@ pub fn stop_generation(state: State<'_, Desktop>) -> Result<bool> {
             "Cancel the active agent task from Agent mode.",
         ));
     }
+    if let Some(cancellation) = cancellation_lock(&state.chat_cancellation)?.as_ref() {
+        cancellation.cancel();
+        return Ok(true);
+    }
     state.worker.cancel()
 }
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod routing_tests;

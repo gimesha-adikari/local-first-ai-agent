@@ -92,6 +92,18 @@ void (async () => {
     }
     assert(active.taskId === third.taskId && active.turnId === third.turnId && active.approval === null, "Wrong active execution");
     assert(active.taskTimeoutMs === 300000 && active.tool === null && active.startedAt > 0, "Missing active timing or tool");
+    const search = (mode) => ipc.invoke("knowledge_retrieve", {
+      mode, request: { query: "fixture", documentIds: null, limit: 1 },
+    });
+    let denseError;
+    try {
+      await search("semantic");
+    } catch (error) {
+      denseError = error;
+    }
+    assert(denseError?.code === "busy", "Semantic retrieval did not honor the Agent CPU lease");
+    assert((await search("keyword")).hits.length === 0, "Agent blocked independent keyword retrieval");
+
     assert(await ipc.invoke("cancel_agent_task", { taskId: "9999999999" }) === false, "Wrong task cancelled");
     assert(await ipc.invoke("cancel_agent_task", { taskId: third.taskId }) === true, "Active cancellation rejected");
     assert((await terminal(third.taskId)).event.state === "cancelled", "Cancellation was not terminal");

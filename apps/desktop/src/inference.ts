@@ -28,6 +28,8 @@ export type GenerationStats = {
   excludedTurns: number;
   /** Requested ceiling and effective output for the latest segment (Task 03-A). */
   outputBudget?: OutputBudget | null;
+  /** Sources and memories that fit in the prompt of a contextual attempt (v0.2.0 Task 03). */
+  contextUsage?: { sources: number; memories: number } | null;
 };
 
 export type OutputBudget = { requested: number; effective: number; contextLength: number };

@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, type KeyboardEvent, type RefObject } from "react";
+import { useId, useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { maxTaskTimeoutSeconds, scopeSummary, validTimeout } from "./agent";
 import type { AgentScopeDisplay } from "./agentTypes";
 import { lowOutputLimit, shortOutputLimit, type ModelReference } from "./chat";
@@ -21,8 +21,10 @@ export default function Composer({
   savedMaxTokens, outputOverride, onOutputOverride, contextLength, onOpenModelSettings,
   timeout, onTimeoutChange,
   scopes, scopeRemaining, scopeAction, scopeError, onGrant, onRevoke, onManageAccess, grantDisabled,
-  lockMenus = false, placeholder, status,
+  lockMenus = false, placeholder, status, knowledgeControl = null,
 }: {
+  /** Chat-only knowledge selection control. */
+  knowledgeControl?: ReactNode;
   /** While an approval is pending, close and disable menus so nothing covers its controls. */
   lockMenus?: boolean;
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -173,6 +175,8 @@ export default function Composer({
               </>
             )}
           </Menu>
+
+          {mode === "chat" && knowledgeControl}
 
           {mode === "chat" && thinkingSupported && (
             <button type="button" className="composer-pill" aria-pressed={thinking}

@@ -82,9 +82,11 @@ fn refuses_a_newer_schema_and_rolls_back_a_failed_migration() {
     manual
         .execute_batch(
             "CREATE TABLE models (preserved TEXT);
-         INSERT INTO models VALUES ('keep this');
-         PRAGMA user_version = 7;",
+         INSERT INTO models VALUES ('keep this');",
         )
+        .unwrap();
+    manual
+        .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
         .unwrap();
     drop(manual);
 
@@ -95,7 +97,7 @@ fn refuses_a_newer_schema_and_rolls_back_a_failed_migration() {
     let version: i64 = manual
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, SCHEMA_VERSION + 1);
     manual.pragma_update(None, "user_version", 0).unwrap();
     drop(manual);
 
@@ -287,6 +289,7 @@ fn persists_ordered_attempts_and_uses_latest_completed_regeneration() {
         tokens_per_second: 2.0,
         excluded_turns: 0,
         output_budget: None,
+        context_usage: None,
         assistant_replay: None,
     };
     store
@@ -417,6 +420,7 @@ fn synthetic_replay_stats() -> GenerationStats {
         tokens_per_second: 2.0,
         excluded_turns: 0,
         output_budget: None,
+        context_usage: None,
         assistant_replay: Some(agent_core::inference::AssistantReplay {
             prompt_fingerprint: 42,
             generated: vec![13, 17],
@@ -706,7 +710,7 @@ fn v4_profile_migrates_to_bundled_schema_without_changing_models() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, SCHEMA_VERSION);
     let models = store.recent_models().unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].file_name, "old.gguf");
@@ -731,3 +735,18 @@ fn v4_profile_migrates_to_bundled_schema_without_changing_models() {
         .unwrap();
     assert_eq!(integrity, "ok");
 }
+
+#[path = "knowledge_tests.rs"]
+mod knowledge_tests;
+
+#[path = "semantic_tests.rs"]
+mod semantic_tests;
+
+#[path = "chat_context_tests.rs"]
+mod chat_context_tests;
+
+#[path = "relevance_tests.rs"]
+mod relevance_tests;
+
+#[path = "model_tests.rs"]
+mod model_tests;

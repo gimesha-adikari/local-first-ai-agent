@@ -1,23 +1,20 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useState, type FormEvent, type ReactNode } from "react";
 import lfmLicense from "../../../third_party/model-licenses/LFM2.5-1.2B-Instruct/LICENSE?raw";
 import { formatBytes, remainingLabel } from "./agent";
 import type { AgentScopeDisplay } from "./agentTypes";
 import {
-  lowOutputLimit, matchesRecommended, recommendedChatSettings, settingChanges, shortOutputLimit, validModelSettings,
-  type Appearance, type Bootstrap, type BundledModel, type ModelReference, type ModelSettings, type Preferences,
-  type RecommendedChatSettings,
+  lowOutputLimit, settingChanges, shortOutputLimit, validModelSettings,
+  type Bootstrap, type BundledModel, type ModelReference, type ModelSettings, type RecommendedChatSettings,
 } from "./chat";
 import {
-  AgentIcon, ChatIcon, CheckIcon, ChevronRightIcon, CloseIcon, CubeIcon, FileIcon, FolderIcon, LockIcon, MonitorIcon,
-  MoonIcon, PowerIcon, Spinner, SunIcon, ThinkIcon, UploadIcon,
+  AgentIcon, ChatIcon, CheckIcon, ChevronRightIcon, CloseIcon, CubeIcon, FileIcon, FolderIcon, LockIcon,
+  PowerIcon, Spinner, ThinkIcon, UploadIcon,
 } from "./icons";
 import type { ModelInfo } from "./inference";
 import {
-  advancedModelName, builtInModelName, capabilityGuidance, modelCapabilities, modelLabel, modelProfile,
+  advancedModelName, builtInModelName, capabilityGuidance, modelCapabilities, modelLabel, referenceProfile,
 } from "./models";
-import { errorMessage } from "./inference";
-import { Callout, Dialog, Segmented, Switch } from "./ui";
+import { Callout, Dialog, Switch } from "./ui";
 
 export { Dialog } from "./ui";
 
@@ -49,10 +46,10 @@ function ModelFields({
         {settingsFields.map(({ key, title, unit, min, max, step, reload, hint }) => (
           <label className="field" key={key}>
             <span>{title}{unit && <small> {unit}</small>}</span>
-            <input type="number" min={min} max={max} step={step} disabled={busy || (loaded && reload)}
+            <input type="number" min={min} max={max} step={step} disabled={busy}
               value={Number.isNaN(settings[key]) ? "" : settings[key]}
               onChange={(event) => setSettings({ ...settings, [key]: event.currentTarget.valueAsNumber })} />
-            <small className="hint">{loaded && reload ? "Takes effect after the model reloads. Unload it to edit here." : hint}</small>
+            <small className="hint">{loaded && reload ? `${hint} Applies when the model reloads.` : hint}</small>
           </label>
         ))}
       </div>
@@ -72,13 +69,13 @@ function ModelFields({
 }
 
 /** Plain-language summary of a settings set. */
-function settingsSummary(settings: ModelSettings) {
+export function settingsSummary(settings: ModelSettings) {
   return `Replies up to ${settings.maxTokens.toLocaleString()} tokens · ${settings.contextLength.toLocaleString()}-token `
     + `total context · Thinking ${settings.enableThinking ? "on" : "off"}`;
 }
 
 /** Collapsed section for numeric model controls. */
-function Advanced({ open, onToggle, children }: { open: boolean; onToggle: (open: boolean) => void; children: ReactNode }) {
+export function Advanced({ open, onToggle, children }: { open: boolean; onToggle: (open: boolean) => void; children: ReactNode }) {
   return (
     <details className="advanced-settings" open={open} onToggle={(event) => onToggle(event.currentTarget.open)}>
       <summary><ChevronRightIcon size={14} />Advanced settings</summary>
@@ -87,7 +84,7 @@ function Advanced({ open, onToggle, children }: { open: boolean; onToggle: (open
   );
 }
 
-function OutputLimitExplanation() {
+export function OutputLimitExplanation() {
   return (
     <p className="hint">
       Instructions, your input, conversation history and generated output all share the context. The output limit is a
@@ -98,67 +95,7 @@ function OutputLimitExplanation() {
   );
 }
 
-/**
- * Recommendation for the loaded model from `recommended_chat_settings`. Nothing
- * is saved until the person picks an explicit action; context and thread changes
- * need a reload.
- */
-function RecommendedSettings({
-  saved, recommended, disabled, onReview, onApply, onReload,
-}: {
-  saved: ModelSettings;
-  recommended: RecommendedChatSettings;
-  disabled: boolean;
-  onReview: (settings: ModelSettings) => void;
-  onApply: (settings: ModelSettings) => void;
-  onReload: (settings: ModelSettings) => void;
-}) {
-  const next = recommended.settings;
-  const changes = settingChanges(saved, next);
-  const needsReload = changes.some((change) => change.reload);
-  const valid = validModelSettings(next);
-  const trained = recommended.trainedContext;
-  return (
-    <section className="recommended-panel" aria-label="Recommended settings">
-      <div className="section-heading-row">
-        <h4>Recommended settings</h4>
-        {changes.length === 0 && <span className="hint inline-ok"><CheckIcon size={13} />In use</span>}
-      </div>
-      <p className="hint">{settingsSummary(next)}.</p>
-      {trained === null ? (
-        <p className="hint">The loaded model couldn't be checked, so this is the general recommendation.</p>
-      ) : next.contextLength < Math.min(trained, 8192) ? (
-        <p className="hint">The recommendation uses a smaller context based on available memory.</p>
-      ) : trained < 8192 && (
-        <p className="hint">This model was trained with {trained.toLocaleString()} tokens of context, so the recommendation uses that.</p>
-      )}
-      {changes.length > 0 && (
-        <>
-          <p className="hint">
-            Changes from your saved settings: {changes.map((change) => `${change.label} ${change.from} → ${change.to}`).join(" · ")}.
-            {needsReload && " The model reloads to apply them."}
-          </p>
-          <div className="recommended-actions">
-            {needsReload ? (
-              <button type="button" className="primary-button small" disabled={disabled || !valid} onClick={() => onReload(next)}>
-                Use recommended and reload
-              </button>
-            ) : (
-              <button type="button" className="primary-button small" disabled={disabled || !valid} onClick={() => onApply(next)}>
-                Use recommended
-              </button>
-            )}
-            <button type="button" className="ghost-button small" disabled={disabled} onClick={() => onReview(next)}>
-              Review in Advanced settings
-            </button>
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
-function Capabilities({ fileName, info }: { fileName: string; info: ModelInfo | null }) {
+export function Capabilities({ fileName, info }: { fileName: string; info: ModelInfo | null }) {
   const known = modelCapabilities(fileName, info);
   if (!known) return <p className="hint">Thinking and Agent support are checked when the model loads.</p>;
   const icons = { chat: <ChatIcon size={13} />, thinking: <ThinkIcon size={13} />, agent: <AgentIcon size={13} /> };
@@ -203,143 +140,60 @@ export function ModelLicense() {
   );
 }
 
-export function SettingsDialog({ snapshot, onSave, onClose, onManageModels }: {
-  snapshot: Bootstrap;
-  onSave: (preferences: Preferences) => void;
-  onClose: () => void;
-  onManageModels: () => void;
-}) {
-  const [preferences, setPreferences] = useState(snapshot.preferences);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const valid = validModelSettings(preferences.defaults);
-  const changed = JSON.stringify(preferences) !== JSON.stringify(snapshot.preferences);
-  // No model is loaded for this choice, so the general recommendation applies.
-  const recommended = recommendedChatSettings().settings;
-  const usingRecommended = matchesRecommended(preferences.defaults, recommended);
+export type ModelAction = "import" | "load" | "unload" | "switch" | "save" | "reset";
+
+/** Loaded-model summary shown above the library. */
+function LoadedModelBanner({ snapshot }: { snapshot: Bootstrap }) {
   const info = snapshot.inference.model;
-  const active = snapshot.models.find((model) => model.id === snapshot.activeModelId) ?? null;
-  const activeName = info ? modelLabel(info.fileName) : active ? modelLabel(active.fileName) : null;
-  const guidance = capabilityGuidance(info);
-
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (saving || !valid) return;
-    setError(null);
-    setSaving(true);
-    try {
-      await invoke("save_preferences", { preferences });
-      onSave(preferences);
-      onClose();
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setSaving(false);
-    }
+  const phase = snapshot.inference.phase;
+  const reference = snapshot.models.find((model) => model.id === snapshot.activeModelId) ?? null;
+  if (phase === "loading" || phase === "unloading") {
+    return (
+      <div className="loaded-banner" role="status">
+        <Spinner size={13} /><span><strong>{phase === "loading" ? "Loading a model…" : "Unloading…"}</strong></span>
+      </div>
+    );
   }
-
+  if (!info) {
+    return (
+      <div className="loaded-banner is-empty" role="status">
+        <span className="status-dot" aria-hidden="true" />
+        <span><strong>No model loaded</strong><small>Choose a model below and load it to chat.</small></span>
+      </div>
+    );
+  }
   return (
-    <Dialog title="Settings" onClose={onClose} busy={saving} size="md">
-      <form className="dialog-form" onSubmit={(event) => void save(event)}>
-        <section className="settings-section">
-          <h3>Appearance</h3>
-          <Segmented<Appearance> label="Appearance" value={preferences.appearance} disabled={saving}
-            onChange={(appearance) => setPreferences({ ...preferences, appearance })}
-            options={[
-              { value: "system", label: "System", icon: <MonitorIcon size={14} /> },
-              { value: "light", label: "Light", icon: <SunIcon size={14} /> },
-              { value: "dark", label: "Dark", icon: <MoonIcon size={14} /> },
-            ]} />
-        </section>
-
-        <section className="settings-section">
-          <h3>Responses</h3>
-          <Switch label="Enter sends a message" checked={preferences.enterToSend} disabled={saving}
-            description={preferences.enterToSend ? "Shift+Enter adds a new line." : "Enter adds a new line. Use the send button to send."}
-            onChange={(enterToSend) => setPreferences({ ...preferences, enterToSend })} />
-          <div className="setting-row">
-            <div>
-              <strong>Settings for newly imported models</strong>
-              <p className="hint">
-                {usingRecommended ? "Recommended" : "Custom"}: {settingsSummary(preferences.defaults)}. Each model keeps its own
-                settings; change those in Models.
-              </p>
-            </div>
-            {usingRecommended ? (
-              <span className="hint inline-ok"><CheckIcon size={13} />Recommended</span>
-            ) : (
-              <button type="button" className="secondary-button small" disabled={saving}
-                title={settingsSummary(recommended)}
-                onClick={() => setPreferences({ ...preferences, defaults: recommended })}>
-                Use recommended
-              </button>
-            )}
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <h3>Model</h3>
-          <div className="setting-row">
-            <div>
-              <strong>{activeName ?? "No model loaded"}</strong>
-              <p className="hint">
-                {info ? modelProfile(info.fileName)?.role ?? "Loaded" : "Choose or import a model in Models."}
-              </p>
-            </div>
-            <button type="button" className="secondary-button small" disabled={saving || changed}
-              title={changed ? "Save or cancel your changes first" : undefined} onClick={onManageModels}>
-              Manage models…
-            </button>
-          </div>
-          {info && <Capabilities fileName={info.fileName} info={info} />}
-          {guidance && <p className="hint">{guidance}</p>}
-        </section>
-
-        <section className="settings-section">
-          <h3>Privacy and files</h3>
-          <ul className="privacy-list">
-            <li>Everything runs on this computer. Chat and Agent need no internet connection, and the app doesn't download models.</li>
-            <li>Conversations, including your messages and the model's answers, are saved on this computer in an ordinary SQLite database. It isn't encrypted.</li>
-            <li>The agent can read only files and folders you select. Access is read-only, expires automatically, and ends when the app closes.</li>
-            <li>Saved answers can contain text or facts from files you selected. Raw file previews aren't saved; they stay in memory for recent turns only.</li>
-            <li>Deleting a conversation removes its messages and Agent history. Content-free permission audit entries can remain, and existing backups or copies aren't affected.</li>
-          </ul>
-          <div className="data-location">
-            <span>Database</span>
-            <code>{snapshot.databasePath}</code>
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <Advanced open={advancedOpen || !valid} onToggle={setAdvancedOpen}>
-            <p className="hint">Defaults for newly imported models. Existing models keep their own saved settings.</p>
-            <ModelFields settings={preferences.defaults} busy={saving}
-              setSettings={(defaults) => setPreferences({ ...preferences, defaults })} />
-            <OutputLimitExplanation />
-          </Advanced>
-        </section>
-
-        <ModelLicense />
-
-        {!valid && <p className="error-text">Set an output limit smaller than the context length, and keep every value in range.</p>}
-        {error && <p className="error-text" role="alert">{error}</p>}
-        <div className="dialog-actions">
-          <button type="button" className="ghost-button" onClick={onClose} disabled={saving}>Cancel</button>
-          <button className="primary-button" type="submit" disabled={saving || !valid || !changed}>
-            {saving ? "Saving…" : "Save settings"}
-          </button>
-        </div>
-      </form>
-    </Dialog>
+    <div className="loaded-banner" role="status" aria-label="Loaded model">
+      <span className="status-dot status-ready" aria-hidden="true" />
+      <span>
+        <strong>Loaded now: {modelLabel(info.fileName)}</strong>
+        <small>
+          {[reference ? (reference.bundled ? "Built-in" : "Imported") : null,
+            reference ? (reference.automaticSettings ? "Automatic settings" : "Custom settings") : null,
+            `${info.config.contextLength.toLocaleString()}-token context`, `${info.config.threads} threads`,
+          ].filter(Boolean).join(" · ")}
+        </small>
+      </span>
+    </div>
   );
 }
 
-export type ModelAction = "import" | "load" | "unload" | "switch" | "save";
+function ModelBadges({ model }: { model: ModelReference }) {
+  return (
+    <span className="model-badges">
+      <span className={`badge ${model.bundled ? "badge-verified" : "badge-muted"}`}>{model.bundled ? "Built-in" : "Imported"}</span>
+      <span className={`badge ${model.automaticSettings ? "badge-ready" : "badge-warning"}`}>{model.automaticSettings ? "Automatic" : "Custom"}</span>
+    </span>
+  );
+}
 
-export function ModelsDialog({
-  snapshot, selectedId, onSelect, action, operationLocked, error, notice, onImport, onLoad, onUnload, onSaveSettings, onClose,
-  recommended, onReload, bundled,
+/**
+ * The model library and per-model settings, shown as the Models category of
+ * Settings. Drafts are owned by the caller so they survive category switches.
+ */
+export function ModelsPanel({
+  snapshot, selectedId, onSelect, action, operationLocked, error, notice, onImport, onLoad, onUnload, onSaveSettings,
+  recommended, onReload, bundled, onResetSettings, drafts, onDraft,
 }: {
   snapshot: Bootstrap;
   selectedId: number | null;
@@ -352,15 +206,17 @@ export function ModelsDialog({
   onLoad: (reference: ModelReference, settings: ModelSettings) => void;
   onUnload: () => void;
   onSaveSettings: (reference: ModelReference, settings: ModelSettings) => void;
-  onClose: () => void;
   recommended: RecommendedChatSettings | null;
   onReload: (reference: ModelReference, settings: ModelSettings) => void;
   bundled: BundledModel["state"] | "checking" | "unavailable";
+  /** Return to automatic settings; `reload` also reloads the loaded model so context and threads apply. */
+  onResetSettings: (reference: ModelReference, reload: boolean) => void;
+  drafts: Readonly<Record<number, ModelSettings>>;
+  onDraft: (id: number, settings: ModelSettings | null) => void;
 }) {
   const selected = snapshot.models.find((model) => model.id === selectedId) ?? snapshot.models[0] ?? null;
-  const [draft, setDraft] = useState<{ id: number; settings: ModelSettings } | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const settings = draft && selected && draft.id === selected.id ? draft.settings : selected?.settings ?? null;
+  const settings = selected ? drafts[selected.id] ?? selected.settings : null;
   const info = snapshot.inference.model;
   const phase = snapshot.inference.phase;
   const loadedId = phase === "ready" || phase === "generating" ? snapshot.activeModelId : null;
@@ -368,15 +224,23 @@ export function ModelsDialog({
   const busy = operationLocked || action !== null || phase === "loading" || phase === "unloading" || phase === "generating";
   const valid = settings ? validModelSettings(settings) : false;
   const dirty = !!(settings && selected && JSON.stringify(settings) !== JSON.stringify(selected.settings));
-  const setSettings = (next: ModelSettings) => selected && setDraft({ id: selected.id, settings: next });
-  const profile = selected ? modelProfile(selected.fileName) : null;
+  const setSettings = (next: ModelSettings) => selected && onDraft(selected.id, next);
+  const discard = () => selected && onDraft(selected.id, null);
+  const profile = selected ? referenceProfile(selected) : null;
   const selectedInfo = selectedLoaded ? info : null;
   const guidance = capabilityGuidance(selectedInfo);
-  const hasBuiltIn = snapshot.models.some((model) => modelProfile(model.fileName)?.builtIn);
+  const hasBuiltIn = snapshot.models.some((model) => model.bundled);
+  // Context and threads of a loaded model change only when it loads again.
+  const pendingReload = !!(selectedLoaded && info && settings
+    && (settings.contextLength !== info.config.contextLength || settings.threads !== info.config.threads));
+  const savedPendingReload = !!(selectedLoaded && info && selected
+    && (selected.settings.contextLength !== info.config.contextLength || selected.settings.threads !== info.config.threads));
+  const recommendationDiffers = !!(selected && !selected.automaticSettings && selectedLoaded && recommended
+    && settingChanges(selected.settings, recommended.settings).length > 0);
 
   return (
-    <Dialog title="Models" size="lg" onClose={onClose} busy={action === "load" || action === "switch" || action === "unload"}
-      description="Models run on this computer's processor. Nothing is sent online.">
+    <div className="models-panel">
+      <LoadedModelBanner snapshot={snapshot} />
       {operationLocked && <p className="hint">Model changes are available after the current response or task ends.</p>}
       <div className="models-layout">
         <div className="models-library">
@@ -406,15 +270,19 @@ export function ModelsDialog({
             <ul className="library-list" aria-label="Your models">
               {snapshot.models.map((model) => {
                 const loaded = model.id === loadedId;
-                const tip = modelProfile(model.fileName);
+                const unsaved = !!drafts[model.id] && JSON.stringify(drafts[model.id]) !== JSON.stringify(model.settings);
                 return (
                   <li key={model.id}>
                     <button type="button" className="library-item" aria-current={selected?.id === model.id ? "true" : undefined}
-                      onClick={() => { onSelect(model.id); setDraft(null); }}>
+                      onClick={() => onSelect(model.id)}>
                       <CubeIcon size={16} />
                       <span className="library-text">
                         <span className="library-name" title={model.fileName}>{modelLabel(model.fileName)}</span>
-                        <small>{[loaded ? "Loaded" : null, tip?.role ?? (loaded ? null : "Not loaded")].filter(Boolean).join(" · ")}</small>
+                        <small>
+                          {[loaded ? "Loaded" : null, model.bundled ? "Built-in" : "Imported",
+                            model.automaticSettings ? "Automatic" : "Custom", unsaved ? "Unsaved changes" : null,
+                          ].filter(Boolean).join(" · ")}
+                        </small>
                       </span>
                       {loaded && <span className="status-dot status-ready" aria-label="Loaded" />}
                     </button>
@@ -440,6 +308,7 @@ export function ModelsDialog({
               <div className="detail-heading">
                 <div>
                   <h3 title={selected.fileName}>{modelLabel(selected.fileName)}</h3>
+                  <ModelBadges model={selected} />
                   <p className="hint">{profile ? `${profile.role} · ${selected.fileName}` : selected.fileName}</p>
                 </div>
                 <div className="detail-actions">
@@ -480,46 +349,85 @@ export function ModelsDialog({
                 </p>
               )}
 
-              {selectedLoaded && recommended ? (
-                <RecommendedSettings saved={selected.settings} recommended={recommended} disabled={busy}
-                  onReview={(next) => { setSettings(next); setAdvancedOpen(true); }}
-                  onApply={(next) => { setDraft(null); onSaveSettings(selected, next); }}
-                  onReload={(next) => { setDraft(null); onReload(selected, next); }} />
-              ) : !selectedLoaded && (
-                <p className="hint">Load this model to see its recommended settings.</p>
-              )}
+              <section className={`settings-mode${selected.automaticSettings ? " is-automatic" : ""}`} aria-label="Configuration">
+                <div className="section-heading-row">
+                  <h4>{selected.automaticSettings ? "Automatic configuration" : "Custom configuration"}</h4>
+                  {selected.automaticSettings && <span className="hint inline-ok"><CheckIcon size={13} />Recommended</span>}
+                </div>
+                <p className="hint">
+                  {selected.automaticSettings
+                    ? `Recommended settings for this model and computer are applied every time it loads. Nothing to do. ${settingsSummary(selected.settings)}.`
+                    : `Your saved settings are used exactly as set. ${settingsSummary(selected.settings)}.`}
+                </p>
+                {recommendationDiffers && recommended && (
+                  <p className="hint">
+                    The current recommendation differs: {settingChanges(selected.settings, recommended.settings)
+                      .map((change) => `${change.label} ${change.from} → ${change.to}`).join(" · ")}.
+                  </p>
+                )}
+                {!selected.automaticSettings && (
+                  <div className="recommended-actions">
+                    {selectedLoaded ? (
+                      <>
+                        <button type="button" className="primary-button small" disabled={busy}
+                          onClick={() => { discard(); onResetSettings(selected, true); }}>
+                          {action === "reset" ? <Spinner size={13} /> : null}Reset to automatic and reload
+                        </button>
+                        <button type="button" className="ghost-button small" disabled={busy}
+                          onClick={() => { discard(); onResetSettings(selected, false); }}>
+                          Reset without reloading
+                        </button>
+                      </>
+                    ) : (
+                      <button type="button" className="primary-button small" disabled={busy}
+                        onClick={() => { discard(); onResetSettings(selected, false); }}>
+                        {action === "reset" ? <Spinner size={13} /> : null}Reset to automatic
+                      </button>
+                    )}
+                  </div>
+                )}
+                {savedPendingReload && !dirty && info && (
+                  <p className="hint reload-note">
+                    The model is running with a {info.config.contextLength.toLocaleString()}-token context and {info.config.threads} threads.
+                    The saved context and threads apply after it reloads.{" "}
+                    <button type="button" className="link-button" disabled={busy}
+                      onClick={() => onLoad(selected, selected.settings)}>Reload now</button>
+                  </p>
+                )}
+              </section>
 
               <Advanced open={advancedOpen || dirty} onToggle={setAdvancedOpen}>
-                <p className="hint">Saved for {modelLabel(selected.fileName)} only. {settingsSummary(settings)}.</p>
+                <p className="hint">
+                  Saved for {modelLabel(selected.fileName)} only.
+                  {selected.automaticSettings ? " Saving a change switches this model to custom settings." : ""}
+                </p>
                 <ModelFields settings={settings} setSettings={setSettings} busy={busy} loaded={selectedLoaded}
                   supportsThinking={selectedInfo ? selectedInfo.supportsThinking : profile?.thinking ?? true} />
                 {!valid && <p className="error-text">Keep the output limit below the context length and every value in range.</p>}
-                {selectedLoaded && info && (settings.contextLength !== info.config.contextLength || settings.threads !== info.config.threads) && (
-                  <p className="hint">
-                    The model is running with a {info.config.contextLength.toLocaleString()}-token context and {info.config.threads} threads.
-                    These values apply after it reloads.
-                    {valid && (
-                      <> <button type="button" className="link-button" disabled={busy}
-                        onClick={() => { setDraft(null); onReload(selected, settings); }}>Save and reload now</button></>
-                    )}
+                {pendingReload && dirty && info && (
+                  <p className="hint reload-note">
+                    Context length and CPU threads apply only when the model loads, so saving these reloads it.
                   </p>
                 )}
                 <OutputLimitExplanation />
                 <div className="dialog-actions">
-                  {dirty && <button type="button" className="ghost-button" disabled={busy} onClick={() => setDraft(null)}>Discard changes</button>}
-                  <button type="button" className="secondary-button" disabled={busy || !valid || !dirty}
-                    onClick={() => { onSaveSettings(selected, settings); }}>
-                    {action === "save" ? "Saving…" : "Save settings"}
-                  </button>
+                  {dirty && <button type="button" className="ghost-button" disabled={busy} onClick={discard}>Discard changes</button>}
+                  {pendingReload && dirty ? (
+                    <button type="button" className="primary-button" disabled={busy || !valid}
+                      onClick={() => { discard(); onReload(selected, settings); }}>Save and reload</button>
+                  ) : (
+                    <button type="button" className="secondary-button" disabled={busy || !valid || !dirty}
+                      onClick={() => { discard(); onSaveSettings(selected, settings); }}>
+                      {action === "save" ? "Saving…" : "Save as custom settings"}
+                    </button>
+                  )}
                 </div>
               </Advanced>
-
-              {profile?.builtIn && <ModelLicense />}
             </>
           )}
         </div>
       </div>
-    </Dialog>
+    </div>
   );
 }
 

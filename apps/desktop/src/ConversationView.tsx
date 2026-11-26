@@ -1,6 +1,6 @@
 import { AgentTurnView } from "./AgentView";
 import type { ContinuationStatus } from "./chat";
-import { ChatTurnView, type ChatActions } from "./ChatView";
+import { ChatTurnView, type ChatActions, type KnowledgeContext } from "./ChatView";
 import { Spinner } from "./icons";
 import { Callout } from "./ui";
 import {
@@ -14,8 +14,11 @@ import type { AgentController } from "./useAgent";
  */
 export default function ConversationView({
   conversation, loadedAt, agent, busy, generating, contextLength, pendingAgentPrompt,
-  chatActions, continuation, onDetails,
+  chatActions, continuation, onDetails, knowledge, pendingChat,
 }: {
+  knowledge: KnowledgeContext;
+  /** A Chat request still preparing (knowledge or memory) before its turn is saved. */
+  pendingChat: { prompt: string | null; label: string } | null;
   conversation: UnifiedConversation;
   loadedAt: number;
   agent: AgentController;
@@ -38,7 +41,8 @@ export default function ConversationView({
         if (turn.kind === "chat") {
           return (
             <ChatTurnView key={turn.id} turn={turn} latest={latest && regenerable} busy={busy}
-              contextLength={contextLength} actions={chatActions} continuation={latest ? continuation : null} />
+              contextLength={contextLength} actions={chatActions} continuation={latest ? continuation : null}
+              knowledge={knowledge} />
           );
         }
         const live = agent.turns[turn.id];
@@ -59,6 +63,14 @@ export default function ConversationView({
           <div className="user-turn" aria-label="You"><p>{pendingAgentPrompt}</p></div>
           <div className="assistant-turn agent-turn">
             <p className="activity-live" role="status"><Spinner size={13} />Starting Agent turn…</p>
+          </div>
+        </div>
+      )}
+      {pendingChat && (
+        <div className="turn-group">
+          {pendingChat.prompt !== null && <div className="user-turn" aria-label="You"><p>{pendingChat.prompt}</p></div>}
+          <div className="assistant-turn">
+            <p className="activity-live" role="status"><Spinner size={13} />{pendingChat.label}</p>
           </div>
         </div>
       )}

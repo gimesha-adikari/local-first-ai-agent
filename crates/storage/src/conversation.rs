@@ -253,13 +253,15 @@ impl SqliteStore {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT u.id,u.content, substr(a.content,1,8192),a.state
+                "SELECT u.id,u.content,
+                    CASE WHEN x.message_id IS NULL THEN substr(a.content,1,8192) END,a.state
              FROM messages u LEFT JOIN messages a ON a.id=(
                 SELECT older.id FROM messages older WHERE older.conversation_id=u.conversation_id
                   AND older.position>u.position AND older.position<coalesce((
                     SELECT min(n.position) FROM messages n WHERE n.conversation_id=u.conversation_id
                        AND n.position>u.position AND n.role='user'),9223372036854775807)
                   AND older.role='assistant' ORDER BY older.position DESC LIMIT 1)
+             LEFT JOIN chat_context_attempts x ON x.message_id=a.id
              WHERE u.conversation_id=?1 AND u.role='user'
              ORDER BY u.position DESC LIMIT ?2",
             )

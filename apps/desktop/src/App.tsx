@@ -8,19 +8,27 @@ import {
   type Bootstrap, type BundledModel, type ChatEvent, type ContinuationStatus, type Conversation, type ConversationSummary, type Message,
   type ModelReference, type ModelSettings, type RecommendedChatSettings,
 } from "./chat";
-import { type RegenerateRequest } from "./ChatView";
+import { type KnowledgeContext, type RegenerateRequest } from "./ChatView";
 import ConversationView from "./ConversationView";
 import Composer, { modelLabel, type ComposerMode } from "./Composer";
 import DetailsDrawer from "./DetailsDrawer";
 import {
-  AccessDialog, EditConversationDialog, ModelsDialog, SettingsDialog, type ModelAction,
+  AccessDialog, EditConversationDialog, type ModelAction,
 } from "./Dialogs";
+import { SettingsDialog, type SettingsCategory } from "./Settings";
 import {
   AgentIcon, ArrowDownIcon, ChatIcon, EditIcon, MoreIcon, NoteIcon, PanelRightIcon, Spinner, TrashIcon,
 } from "./icons";
 import { errorMessage, type ModelInfo, type Status } from "./inference";
 import {
-  advancedModelName, agentUnavailableText, builtInModelName, capabilityGuidance, modelProfile,
+  defaultSelection, isContextual, knowledgeErrorCopy, knowledgeOption, knowledgeReadiness, preparationLabel, pruneSelection,
+  selectionIndexCoverage, type KnowledgeCoverage, type KnowledgeSelection,
+} from "./knowledge";
+import KnowledgeControl from "./KnowledgeControl";
+import KnowledgeView from "./KnowledgeView";
+import MemoryView from "./MemoryView";
+import {
+  advancedModelName, agentUnavailableText, builtInModelName, capabilityGuidance, referenceProfile,
 } from "./models";
 import Sidebar, { type RecentItem, type RecordItem } from "./Sidebar";
 import { Callout, IconButton, Menu, MenuItem } from "./ui";
@@ -29,10 +37,16 @@ import {
   type AgentTurnIdentity, type UnifiedConversation,
 } from "./unified";
 import { useAgent } from "./useAgent";
+import { useKnowledge } from "./useKnowledge";
 
-type Modal = "models" | "settings" | "access" | "rename" | "delete" | "instructions";
+type Modal = "settings" | "access" | "rename" | "delete" | "instructions";
 type Operation = "opening" | "creating" | "saving" | "generating";
-type View = { kind: "empty" } | { kind: "conversation"; id: number } | { kind: "record"; taskId: string };
+type View = { kind: "empty" } | { kind: "conversation"; id: number } | { kind: "record"; taskId: string }
+  | { kind: "knowledge" } | { kind: "memory" };
+type PendingChat = { conversationId: number; prompt: string | null; label: string };
+type ChatNotice = { tone: "error" | "neutral" | "warning"; title: string; detail: string; fix?: "model" | "index" | "select" };
+
+const preparationCodes = new Set(["embedding_unavailable", "embedding_index_unavailable", "embedding_incompatible"]);
 
 const toUnified = (conversation: Conversation): UnifiedConversation => ({
   id: conversation.id, title: conversation.title, systemPrompt: conversation.systemPrompt,
@@ -87,6 +101,12 @@ export default function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
   const [modal, setModal] = useState<Modal | null>(null);
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("general");
+  /**
+   * Coverage of routed turns that saved none, such as ordinary Chat with
+   * documents selected. Kept for this session only, keyed by assistant message.
+   */
+  const [liveCoverage, setLiveCoverage] = useState<ReadonlyMap<number, KnowledgeCoverage>>(() => new Map());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const narrow = useMediaQuery(narrowQuery);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia(narrowQuery).matches);
@@ -107,6 +127,10 @@ export default function App() {
   const [autoLoad, setAutoLoad] = useState<ModelReference | null>(null);
   /** Bundled model verification: hashing the resource on first launch takes a few seconds. */
   const [bundled, setBundled] = useState<BundledModel["state"] | "checking" | "unavailable">("checking");
+  const [selection, setSelection] = useState<KnowledgeSelection>(defaultSelection);
+  const [memoryEnabled, setMemoryEnabled] = useState<boolean | null>(null);
+  const [pendingChat, setPendingChat] = useState<PendingChat | null>(null);
+  const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
   const viewRef = useRef<View>({ kind: "empty" });
   const agent = useAgent({ onTurnSettled: (identity) => settleTurn(identity) });
   viewRef.current = view;
@@ -117,6 +141,31 @@ export default function App() {
   const composer = useRef<HTMLTextAreaElement>(null);
   const initialized = snapshot !== null;
   const appearance = snapshot?.preferences.appearance ?? "system";
+  const knowledge = useKnowledge({ enabled: initialized });
+
+  useEffect(() => {
+    if (!initialized) return;
+    void invoke<boolean>("memory_retrieval_enabled").then(setMemoryEnabled).catch(() => setMemoryEnabled(false));
+  }, [initialized]);
+
+  async function changeMemoryEnabled(value: boolean) {
+    await invoke("memory_set_retrieval_enabled", { enabled: value });
+    setMemoryEnabled(value);
+  }
+
+  // Deleted documents leave the selection; nothing is ever added implicitly.
+  useEffect(() => {
+    if (!knowledge.loaded) return;
+    setSelection((current) => {
+      const documentIds = pruneSelection(current.documentIds, knowledge.documents);
+      return documentIds === current.documentIds ? current : { ...current, documentIds };
+    });
+  }, [knowledge.loaded, knowledge.documents]);
+
+  const selectionCoverage = useMemo(() => knowledge.loaded
+    ? selectionIndexCoverage(selection.documentIds, knowledge.indexStates) : null,
+  [knowledge.loaded, knowledge.indexStates, selection.documentIds]);
+  const readiness = knowledgeReadiness({ selection, embedding: knowledge.embedding, coverage: selectionCoverage });
 
   useEffect(() => {
     let active = true;
@@ -139,6 +188,15 @@ export default function App() {
             : { ...current, models: [...current.models, model] }));
           setSelectedModelId((current) => current ?? model.id);
           if (bundled.autoLoad && initial.activeModelId === null) setAutoLoad(model);
+        }
+        // Restore the last Chat model that loaded successfully.
+        const restore = bundled.restore;
+        if (restore && initial.activeModelId === null) {
+          if (restore.available) setAutoLoad(restore.model);
+          else setChatNotice({
+            tone: "warning", title: `${modelLabel(restore.model.fileName)} wasn't found`,
+            detail: "The last model's file isn't readable now, so nothing was loaded. Reconnect its drive, or choose a model in Models.",
+          });
         }
         // A corrupted resource is explained in the new-thread view and in Models.
       }).catch(() => {
@@ -186,7 +244,7 @@ export default function App() {
   }, [drawerOpen, narrow, sidebarCollapsed]);
 
   // Keep the newest content in view unless the person scrolled up to read.
-  const viewKey = view.kind === "conversation" ? `conversation-${view.id}` : view.kind === "record" ? `record-${view.taskId}` : "empty";
+  const viewKey = view.kind === "conversation" ? `conversation-${view.id}` : view.kind === "record" ? `record-${view.taskId}` : view.kind;
   useLayoutEffect(() => {
     follow.current = true;
     setShowJump(false);
@@ -194,7 +252,7 @@ export default function App() {
   useLayoutEffect(() => {
     const node = scroll.current;
     if (node && follow.current) node.scrollTop = node.scrollHeight;
-  }, [conversation?.turns, agent.turns, pendingAgent, viewKey, operation]);
+  }, [conversation?.turns, agent.turns, pendingAgent, pendingChat, viewKey, operation]);
 
   // Late content (journal details, native results) can grow the thread after the
   // first scroll; keep following it while the person hasn't scrolled up.
@@ -224,7 +282,7 @@ export default function App() {
 
   const agentBusy = agent.running || agent.starting;
   const chatBusy = operation !== null;
-  const busy = chatBusy || agentBusy || modelAction !== null;
+  const busy = chatBusy || agentBusy || modelAction !== null || knowledge.holdsLease;
   const generating = operation === "generating";
   const phase = snapshot?.inference.phase ?? "empty";
   const modelInfo = snapshot?.inference.model ?? null;
@@ -242,11 +300,20 @@ export default function App() {
   // replay seed, model fingerprint and request caps; the UI only offers the action.
   const candidate = conversation && !generating ? latestChatAttempt(conversation.turns) : null;
   const candidateId = continuationCandidate(candidate) ? candidate!.id : null;
+  const candidateContextual = isContextual(candidate);
   const conversationId = conversation?.id ?? null;
   const activeModelId = snapshot?.activeModelId ?? null;
   useEffect(() => {
     if (candidateId === null || conversationId === null) {
       setContinuation(null);
+      return;
+    }
+    // Answers that used documents or memory have no continuation seed: offer Regenerate.
+    if (candidateContextual) {
+      setContinuation({
+        messageId: candidateId, remaining: null, checking: false,
+        blocked: continuationErrorCopy({ code: "contextual", message: "" }),
+      });
       return;
     }
     if (!modelReady) {
@@ -270,7 +337,7 @@ export default function App() {
         }
       });
     return () => { active = false; };
-  }, [conversationId, candidateId, modelReady, activeModelId, loadedAt]);
+  }, [conversationId, candidateId, candidateContextual, modelReady, activeModelId, loadedAt]);
   const continuationView: ContinuationStatus | null = continuation && continueFailure?.messageId === continuation.messageId
     ? { ...continuation, blocked: continueFailure } : continuation;
 
@@ -316,12 +383,25 @@ export default function App() {
     }
   }
 
+  function openDestination(kind: "knowledge" | "memory") {
+    if (operationRef.current !== null || agent.starting) return;
+    if (narrow) setSidebarCollapsed(true);
+    const target: View = { kind };
+    viewRef.current = target;
+    setView(target);
+    setConversation(null);
+    setDrawerTurnId(null);
+    setDrawerOpen(false);
+    setError(null);
+  }
+
   function newThread() {
     if (operationRef.current !== null || agent.starting) return;
     setView({ kind: "empty" });
     setConversation(null);
     setDrawerTurnId(null);
     setError(null);
+    setChatNotice(null);
     agent.setError(null);
     if (narrow) setSidebarCollapsed(true);
     focusComposer();
@@ -331,6 +411,7 @@ export default function App() {
     if (operationRef.current !== null || agent.starting) return;
     if (narrow) setSidebarCollapsed(true);
     setError(null);
+    setChatNotice(null);
     if (view.kind === "conversation" && view.id === id) return;
     if (!begin("opening")) return;
     const target: View = { kind: "conversation", id };
@@ -385,15 +466,23 @@ export default function App() {
   }
 
   async function generate(kind: "send" | "regenerate" | "continue", regenerate: RegenerateRequest = {}, messageId?: number) {
-    if (!snapshot || !modelReady) return;
+    if (!snapshot || !modelReady || knowledge.holdsLease) return;
     const content = draft;
     if (kind === "send" && !content.trim()) return;
     if (kind === "regenerate" && !canRegenerateLatest(conversation)) return;
     if (kind === "continue" && (!conversation || messageId === undefined
-      || latestChatAttempt(conversation.turns)?.id !== messageId)) return;
+      || latestChatAttempt(conversation.turns)?.id !== messageId
+      || isContextual(latestChatAttempt(conversation.turns)))) return;
     if (Number.isNaN(parsedOverride)) return;
+    // Send and Regenerate use the current selection; Continue never searches.
+    const knowledgeRequest = kind === "continue" ? null : knowledgeOption(selection);
+    if (kind !== "continue" && selection.enabled && readiness.blocked) {
+      setChatNotice({ tone: "warning", title: readiness.blocked.title, detail: readiness.blocked.detail, fix: readiness.blocked.fix });
+      return;
+    }
     if (!begin("generating")) return;
     setContinueFailure(null);
+    setChatNotice(null);
 
     const ensured = await ensureConversation();
     if (!ensured) {
@@ -406,14 +495,37 @@ export default function App() {
     const options = chatRequestOptions({
       thinking, supportsThinking,
       maxTokens: regenerate.maxTokens ?? (parsedOverride === null ? null : parsedOverride),
+      knowledge: knowledgeRequest,
     });
     const generation = ++request.current;
     follow.current = true;
+    const count = knowledgeRequest?.documentIds.length ?? 0;
+    if (knowledgeRequest || (memoryEnabled && kind !== "continue")) {
+      setPendingChat({
+        conversationId: id, prompt: kind === "send" ? content : null,
+        label: knowledgeRequest ? `Searching ${count} selected ${count === 1 ? "document" : "documents"}…` : "Preparing…",
+      });
+    }
+    let started = false;
+    let routed: KnowledgeCoverage | null = null;
     const events = new Channel<ChatEvent>((event) => {
       if (request.current !== generation) return;
+      if (event.kind === "knowledge") {
+        routed = event.coverage;
+        const label = preparationLabel(event.coverage);
+        setPendingChat((current) => current && current.conversationId === id ? { ...current, label } : current);
+        return;
+      }
       if (event.kind === "started") {
-        if (event.user && kind === "send") setDraft("");
+        started = true;
+        const coverage = routed;
+        if (coverage && !event.assistant.context?.coverage) {
+          setLiveCoverage((current) => new Map(current).set(event.assistant.id, coverage));
+        }
+        // Keep edits made while the request was preparing.
+        if (event.user && kind === "send") setDraft((current) => (current === content ? "" : current));
         setOutputOverride("");
+        setPendingChat(null);
       }
       setConversation((current) => current?.id === id
         ? { ...current, turns: applyChatEventToTurns(current.turns, event, modelName) }
@@ -435,19 +547,47 @@ export default function App() {
       }
       sent = kind === "send";
     } catch (failure) {
+      const typed = commandError(failure);
       if (kind === "continue" && messageId !== undefined) {
-        setContinueFailure({ messageId, ...continuationErrorCopy(commandError(failure)) });
+        setContinueFailure({ messageId, ...continuationErrorCopy(typed) });
+      } else if (!started && typed.code === "cancelled") {
+        setChatNotice({
+          tone: "neutral", title: "Stopped before the answer started",
+          detail: kind === "send" ? "Nothing was saved. Your message is still in the composer." : "Nothing was saved.",
+        });
+      } else if (!started && preparationCodes.has(typed.code)) {
+        const copy = knowledgeErrorCopy(typed);
+        setChatNotice({
+          tone: "warning", title: copy.title,
+          detail: `${copy.detail}${kind === "send" ? " Nothing was saved; your message is still in the composer." : ""}`,
+          fix: typed.code === "embedding_unavailable" ? "model" : "index",
+        });
+        void knowledge.refreshEmbedding();
       } else {
         failureMessage = errorMessage(failure);
       }
     } finally {
       request.current++;
+      setPendingChat(null);
       // A rejected request may still have saved the user message and a partial reply.
       try {
         const saved = await loadConversation(id);
         if (kind === "send" && (sent || saved.turns.some((turn) =>
           turn.user.content === content && !before.has(turn.id)))) {
           setDraft((current) => (current === content ? "" : current));
+        }
+        // A first message that never started leaves no empty conversation behind.
+        if (ensured.created && !started && saved.turns.length === 0) {
+          try {
+            await invoke("delete_conversation", { id });
+            if (viewRef.current.kind === "conversation" && viewRef.current.id === id) {
+              viewRef.current = { kind: "empty" };
+              setView({ kind: "empty" });
+              setConversation(null);
+            }
+          } catch {
+            // The empty conversation stays; it can be deleted from its menu.
+          }
         }
       } catch (failure) {
         if (!failureMessage) failureMessage = errorMessage(failure);
@@ -540,7 +680,7 @@ export default function App() {
     } catch (failure) {
       const message = errorMessage(failure);
       setModelError(message);
-      if (modal !== "models") setError(message);
+      if (!(modal === "settings" && settingsCategory === "models")) setError(message);
       return false;
     } finally {
       setModelAction(null);
@@ -559,9 +699,12 @@ export default function App() {
         }
         setSnapshot((current) => current && { ...current, inference: { phase: "loading", model: null } });
         const model = await invoke<ModelInfo>("load_model", { modelId: reference.id, settings });
+        // Automatic models load with the current recommendation, so read back
+        // the saved settings instead of assuming the requested ones.
+        const models = await invoke<ModelReference[]>("list_models").catch(() => null);
         setSnapshot((current) => current && {
           ...current,
-          models: [{ ...reference, settings }, ...current.models.filter(({ id }) => id !== reference.id)],
+          models: models ?? [{ ...reference, settings }, ...current.models.filter(({ id }) => id !== reference.id)],
           activeModelId: reference.id,
           inference: { phase: "ready", model },
         });
@@ -604,7 +747,12 @@ export default function App() {
     await modelOperation("import", async () => {
       const reference = await invoke<ModelReference | null>("choose_model");
       if (reference) {
-        setSnapshot((current) => current && { ...current, models: [reference, ...current.models.filter(({ id }) => id !== reference.id)] });
+        // A copy of a listed model reuses that entry instead of adding a duplicate.
+        const models = await invoke<ModelReference[]>("list_models").catch(() => null);
+        setSnapshot((current) => current && {
+          ...current,
+          models: models ?? [reference, ...current.models.filter(({ id }) => id !== reference.id)],
+        });
         setSelectedModelId(reference.id);
         setModelNotice(`Imported ${modelLabel(reference.fileName)}.`);
       }
@@ -614,11 +762,54 @@ export default function App() {
   async function saveModelSettings(reference: ModelReference, settings: ModelSettings) {
     return modelOperation("save", async () => {
       await invoke("save_model_settings", { modelId: reference.id, settings });
+      const changed = JSON.stringify(settings) !== JSON.stringify(reference.settings);
       setSnapshot((current) => current && {
         ...current,
-        models: current.models.map((model) => (model.id === reference.id ? { ...model, settings } : model)),
+        models: current.models.map((model) => (model.id === reference.id
+          ? { ...model, settings, automaticSettings: model.automaticSettings && !changed } : model)),
       });
       setModelNotice("Settings saved.");
+    });
+  }
+
+  /** Refresh the library from the host: deduplicated rows with their saved settings and modes. */
+  async function refreshModels() {
+    const models = await invoke<ModelReference[]>("list_models").catch(() => null);
+    if (models) setSnapshot((current) => current && { ...current, models });
+  }
+
+  /**
+   * Return a model to automatic settings. With `reload`, the loaded model is
+   * reloaded so the recommended context and threads apply now.
+   */
+  async function resetModelSettings(reference: ModelReference, reload: boolean) {
+    return modelOperation("reset", async () => {
+      const updated = await invoke<ModelReference>("reset_model_settings", { modelId: reference.id });
+      setSnapshot((current) => current && {
+        ...current,
+        models: current.models.map((model) => (model.id === updated.id ? updated : model)),
+      });
+      const active = snapshot?.activeModelId === reference.id;
+      if (reload && active) {
+        try {
+          await invoke("unload_model");
+          setSnapshot((current) => current && { ...current, activeModelId: null, inference: { phase: "loading", model: null } });
+          // The saved settings are passed back unchanged, so the host applies the current recommendation.
+          const model = await invoke<ModelInfo>("load_model", { modelId: reference.id, settings: updated.settings });
+          setSnapshot((current) => current && { ...current, activeModelId: reference.id, inference: { phase: "ready", model } });
+        } catch (failure) {
+          await refreshStatus();
+          throw failure;
+        } finally {
+          await refreshModels();
+        }
+        setModelNotice(`Automatic settings restored. ${modelLabel(reference.fileName)} reloaded with the recommended configuration.`);
+        return;
+      }
+      await refreshModels();
+      setModelNotice(active
+        ? "Automatic settings restored. Context and threads apply the next time the model loads."
+        : "Automatic settings restored. They apply when the model loads.");
     });
   }
 
@@ -645,7 +836,8 @@ export default function App() {
           activeModelId: reference.id,
           inference: { phase: "ready", model },
         });
-        setModelNotice(`Settings saved. ${modelLabel(reference.fileName)} reloaded with ${model.config.contextLength.toLocaleString()} tokens of context.`);
+        await refreshModels();
+        setModelNotice(`Custom settings saved. ${modelLabel(reference.fileName)} reloaded with ${model.config.contextLength.toLocaleString()} tokens of context.`);
       } catch (failure) {
         await refreshStatus();
         throw failure;
@@ -687,13 +879,24 @@ export default function App() {
     }
   }
 
-  function openModal(next: Modal) {
+  /** `reselect` points the library at the loaded model, as when Models is opened from elsewhere. */
+  function prepareModels(reselect = true) {
+    if (reselect) setSelectedModelId(snapshot?.activeModelId ?? selectedModelId ?? snapshot?.models[0]?.id ?? null);
+    void checkRecommended();
+    void refreshModels();
+  }
+
+  /** Models and Settings share one categorized dialog; "models" opens its Models category. */
+  function openModal(next: Modal | "models", category?: SettingsCategory) {
     setModelError(null);
     setModelNotice(null);
     setEditError(null);
-    if (next === "models") {
-      setSelectedModelId(snapshot?.activeModelId ?? selectedModelId ?? snapshot?.models[0]?.id ?? null);
-      void checkRecommended();
+    if (next === "models" || next === "settings") {
+      const target = next === "models" ? "models" : category ?? settingsCategory;
+      if (target === "models") prepareModels();
+      setSettingsCategory(target);
+      setModal("settings");
+      return;
     }
     setModal(next);
   }
@@ -709,7 +912,9 @@ export default function App() {
     .map((task) => ({ key: `record-${task.id}`, id: task.id, title: recordTitle(task.createdAt), updatedAt: task.updatedAt, state: task.state })),
   [agent.tasks]);
 
-  const currentKey = view.kind === "conversation" ? `conversation-${view.id}` : view.kind === "record" ? `record-${view.taskId}` : null;
+  const currentKey = view.kind === "conversation" ? `conversation-${view.id}` : view.kind === "record" ? `record-${view.taskId}`
+    : view.kind === "knowledge" || view.kind === "memory" ? view.kind : null;
+  const destination = view.kind === "knowledge" || view.kind === "memory";
   const activeHere = !!agent.active && view.kind === "conversation" && view.id === agent.active.conversationId;
   const returnToAgent = !!agent.active && !activeHere;
   const activeTitle = agent.active ? summaries.find((item) => item.id === agent.active?.conversationId)?.title ?? "another conversation" : null;
@@ -718,7 +923,7 @@ export default function App() {
 
   const title = view.kind === "conversation" ? conversation?.title ?? "Conversation"
     : view.kind === "record" ? recordTitle(agent.tasks.find((task) => task.id === view.taskId)?.createdAt ?? Date.now())
-      : "New thread";
+      : view.kind === "knowledge" ? "Knowledge" : view.kind === "memory" ? "Memory" : "New thread";
 
   // Details drawer: the chosen Agent turn, or the latest one in this conversation.
   const drawerTurn = view.kind === "conversation" && conversation
@@ -744,20 +949,37 @@ export default function App() {
 
   const showLimitBanner = mode === "chat" && modelReady && !!activeReference && lowOutputLimit(activeReference.settings)
     && dismissedLimit !== activeReference.id && view.kind !== "record";
+  const knowledgeBlocked = mode === "chat" && selection.enabled && !!readiness.blocked;
+  const leaseText = knowledge.indexing ? "Building a semantic index. Chat and Agent are available when it finishes."
+    : knowledge.modelAction === "choosing" ? "Loading the semantic search model…"
+      : knowledge.modelAction === "unloading" ? "Unloading the semantic search model…" : null;
+  const lockReason = generating ? "Wait for the current answer to finish"
+    : agentBusy ? "Wait for the Agent turn to finish"
+      : modelAction || phase === "loading" ? "Wait for the chat model to finish loading" : null;
+  const knowledgeContext = useMemo<KnowledgeContext>(() => {
+    const names = new Map(knowledge.documents.map((document) => [document.id, document.name]));
+    return {
+      revision: knowledge.sourceRevision,
+      documentName: (id) => names.get(id) ?? null,
+      liveCoverage: (id) => liveCoverage.get(id) ?? null,
+    };
+  }, [knowledge.sourceRevision, knowledge.documents, liveCoverage]);
 
   const canSend = !busy && !!draft.trim() && (mode === "agent"
     ? agentAvailable && validTimeout(Number(taskTimeout))
-    : !!snapshot && modelReady && !Number.isNaN(parsedOverride));
+    : !!snapshot && modelReady && !Number.isNaN(parsedOverride) && !knowledgeBlocked);
 
   const composerStatus = !snapshot ? (startupError ? "The app couldn't start." : "Starting…")
-    : generating ? (stopping ? "Stopping…" : "Generating locally…")
+    : generating ? (stopping ? "Stopping…" : pendingChat ? pendingChat.label : "Generating locally…")
       : agent.running ? (activeHere
         ? (agent.activeApproval ? "Waiting for your approval. Approve, deny or cancel above." : "Agent is working. You can cancel at any time.")
         : `An Agent turn is running in “${shorten(activeTitle ?? "another conversation", 40)}”.`)
         : modelAction ? statusText
+          : leaseText ? leaseText
           : !modelReady ? (bundled === "checking" && !snapshot.models.length ? "Checking the built-in assistant…"
             : phase === "loading" ? "Loading model…" : "Load a model to start · Everything runs on this device")
             : mode === "agent" ? (agentUnavailable ?? "Agent uses only tools and files you allow · Local only")
+              : knowledgeBlocked ? `${readiness.blocked!.title}. ${readiness.blocked!.detail}`
               : `Local inference · ${snapshot.preferences.enterToSend ? "Enter to send, Shift+Enter for a new line" : "Use the send button to send"}`;
 
   const inThread = view.kind === "conversation" && !!conversation?.turns.length;
@@ -766,8 +988,8 @@ export default function App() {
     : (inThread ? "Reply…" : "Ask anything…");
 
   const loadingReference = snapshot?.models.find((model) => model.id === selectedModelId) ?? null;
-  const loadingBuiltIn = !!(autoLoad || (loadingReference && modelProfile(loadingReference.fileName)?.builtIn));
-  const chatGuidance = modelInfo && modelProfile(modelInfo.fileName)?.builtIn && !supportsAgent
+  const loadingBuiltIn = !!(autoLoad || loadingReference?.bundled);
+  const chatGuidance = modelInfo && activeReference && referenceProfile(activeReference)?.builtIn && !supportsAgent
     ? `You're using ${builtInModelName}, the built-in lightweight assistant, for Chat. For Agent tasks and Thinking, select or import ${advancedModelName}.`
     : null;
 
@@ -841,6 +1063,7 @@ export default function App() {
         query={query} onQuery={setQuery} searchError={searchError} items={recent} records={records} currentKey={currentKey}
         navigationDisabled={generating || operation === "opening"} onOpen={(item) => void openConversation(item.id)}
         onOpenRecord={openRecord}
+        onKnowledge={() => openDestination("knowledge")} onMemory={() => openDestination("memory")}
         onModels={() => openModal("models")} onSettings={() => openModal("settings")} loading={!snapshot} />
 
       {overlay && (
@@ -870,10 +1093,17 @@ export default function App() {
               )}
             </Menu>
           )}
-          <IconButton label={drawerOpen ? "Hide details" : "Show details"} aria-pressed={drawerOpen}
-            onClick={() => setDrawerOpen((value) => !value)}><PanelRightIcon size={18} /></IconButton>
+          {!destination && (
+            <IconButton label={drawerOpen ? "Hide details" : "Show details"} aria-pressed={drawerOpen}
+              onClick={() => setDrawerOpen((value) => !value)}><PanelRightIcon size={18} /></IconButton>
+          )}
         </header>
 
+        {view.kind === "knowledge" ? (
+          <div className="thread-scroll"><KnowledgeView knowledge={knowledge} lockReason={lockReason} /></div>
+        ) : view.kind === "memory" ? (
+          <div className="thread-scroll"><MemoryView enabled={memoryEnabled} onEnabledChange={changeMemoryEnabled} /></div>
+        ) : (<>
         <div className="thread-scroll" ref={scroll} onScroll={onScroll} tabIndex={-1}>
           <div className="thread" aria-live={view.kind === "empty" ? undefined : "polite"} aria-busy={generating || agent.running}>
             {operation === "opening" ? <p className="empty-line" role="status">Opening conversation…</p>
@@ -881,7 +1111,7 @@ export default function App() {
                 : view.kind === "record" ? (
                   <LegacyRecord summary={agent.tasks.find((task) => task.id === view.taskId) ?? null}
                     detail={agent.details[view.taskId] ?? null} onDetails={() => setDrawerOpen(true)} />
-                ) : conversation && conversation.turns.length === 0 && !pendingAgent ? emptyState
+                ) : conversation && conversation.turns.length === 0 && !pendingAgent && pendingChat?.conversationId !== conversation.id ? emptyState
                   : conversation && (
                     <ConversationView conversation={conversation} loadedAt={loadedAt} agent={agent}
                       busy={busy || !modelReady} generating={generating} contextLength={contextLength}
@@ -891,7 +1121,8 @@ export default function App() {
                         onContinue: (messageId) => void generate("continue", {}, messageId),
                         onOpenLimits: () => openModal("models"),
                       }}
-                      continuation={continuationView}
+                      continuation={continuationView} knowledge={knowledgeContext}
+                      pendingChat={pendingChat?.conversationId === conversation.id ? pendingChat : null}
                       onDetails={(turnId) => { setDrawerTurnId(turnId); setDrawerOpen(true); }} />
                   )}
           </div>
@@ -921,6 +1152,25 @@ export default function App() {
               {error}
             </Callout>
           )}
+          {chatNotice && mode === "chat" && (
+            <Callout tone={chatNotice.tone} role={chatNotice.tone === "neutral" ? "status" : "alert"} title={chatNotice.title}
+              actions={<>
+                {(chatNotice.fix === "model" || chatNotice.fix === "index") && (
+                  <button type="button" className="secondary-button small" onClick={() => { setChatNotice(null); openDestination("knowledge"); }}>
+                    Open Knowledge
+                  </button>
+                )}
+                {chatNotice.fix && selection.mode !== "keyword" && (
+                  <button type="button" className="secondary-button small"
+                    onClick={() => { setSelection((current) => ({ ...current, mode: "keyword" })); setChatNotice(null); }}>
+                    Use Keyword instead
+                  </button>
+                )}
+                <button type="button" className="link-button" onClick={() => setChatNotice(null)}>Dismiss</button>
+              </>}>
+              {chatNotice.detail}
+            </Callout>
+          )}
           {mode === "agent" && agent.error && !agent.activeApproval && (
             <Callout tone="error" role="alert" title="Agent"
               actions={<button type="button" className="link-button" onClick={() => agent.setError(null)}>Dismiss</button>}>
@@ -948,7 +1198,8 @@ export default function App() {
             showStop={generating || agent.running}
             stopLabel={agent.running ? "Cancel Agent turn" : "Stop generating"}
             canStop={agent.running ? !agent.cancelling
-              : generating && conversation?.turns.at(-1)?.assistants.at(-1)?.message.state === "streaming" && !stopping}
+              : generating && !stopping && (pendingChat !== null
+                || conversation?.turns.at(-1)?.assistants.at(-1)?.message.state === "streaming")}
             stopping={agent.running ? agent.cancelling : stopping}
             enterToSend={snapshot?.preferences.enterToSend ?? true}
             models={snapshot?.models ?? []} activeModelId={modelReady || phase === "generating" ? snapshot?.activeModelId ?? null : null}
@@ -963,27 +1214,43 @@ export default function App() {
             scopes={agent.scopes} scopeRemaining={agent.scopeRemaining} scopeAction={agent.scopeAction}
             scopeError={agent.scopeError} onGrant={(kind) => void agent.grant(kind)}
             onRevoke={(scope) => void revokeScope(scope)} onManageAccess={() => openModal("access")}
-            grantDisabled={busy} lockMenus={!!agent.activeApproval} placeholder={placeholder} status={composerStatus} />
+            grantDisabled={busy} lockMenus={!!agent.activeApproval} placeholder={placeholder} status={composerStatus}
+            knowledgeControl={(
+              <KnowledgeControl selection={selection} onChange={(next) => { setSelection(next); setChatNotice(null); }}
+                documents={knowledge.documents} loaded={knowledge.loaded} indexStates={knowledge.indexStates}
+                readiness={readiness} memoryEnabled={memoryEnabled} disabled={!!agent.activeApproval || !snapshot}
+                onOpenKnowledge={() => openDestination("knowledge")} onOpenMemory={() => openDestination("memory")} />
+            )} />
         </div>
+        </>)}
       </main>
 
-      <DetailsDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)}
-        view={view.kind} conversation={view.kind === "conversation" ? conversation : null} model={modelInfo}
+      <DetailsDrawer open={drawerOpen && !destination} onClose={() => setDrawerOpen(false)}
+        view={view.kind === "knowledge" || view.kind === "memory" ? "empty" : view.kind} conversation={view.kind === "conversation" ? conversation : null} model={modelInfo}
         onEditConversation={(kind) => openModal(kind)} agentTask={drawerTask}
         scopes={agent.scopes} scopeRemaining={agent.scopeRemaining} onManageAccess={() => openModal("access")} />
 
       {snapshot && modal === "settings" && (
-        <SettingsDialog snapshot={snapshot} onSave={(preferences) => setSnapshot({ ...snapshot, preferences })}
-          onClose={() => setModal(null)} onManageModels={() => openModal("models")} />
-      )}
-      {snapshot && modal === "models" && (
-        <ModelsDialog snapshot={snapshot} selectedId={selectedModelId} onSelect={setSelectedModelId}
-          action={modelAction} operationLocked={chatBusy || agentBusy} error={modelError} notice={modelNotice}
-          onImport={() => void importModel()} onLoad={(reference, settings) => void loadModel(reference, settings)}
-          onUnload={() => void unloadModel()} onSaveSettings={(reference, settings) => void saveModelSettings(reference, settings)}
-          recommended={recommended} onReload={(reference, settings) => void reloadWithSettings(reference, settings)}
-          bundled={bundled}
-          onClose={() => setModal(null)} />
+        <SettingsDialog snapshot={snapshot} category={settingsCategory} onCategory={(next) => {
+          // Switching categories keeps the library selection and its drafts.
+          if (next === "models") prepareModels(false);
+          setSettingsCategory(next);
+        }}
+          onSavePreferences={(preferences) => setSnapshot({ ...snapshot, preferences })}
+          onClose={() => setModal(null)} modelAction={modelAction}
+          models={{
+            snapshot, selectedId: selectedModelId, action: modelAction,
+            onSelect: (id) => { setSelectedModelId(id); setModelNotice(null); setModelError(null); },
+            operationLocked: chatBusy || agentBusy, error: modelError, notice: modelNotice,
+            onImport: () => void importModel(), onLoad: (reference, settings) => void loadModel(reference, settings),
+            onUnload: () => void unloadModel(), onSaveSettings: (reference, settings) => void saveModelSettings(reference, settings),
+            recommended, onReload: (reference, settings) => void reloadWithSettings(reference, settings), bundled,
+            onResetSettings: (reference, reload) => void resetModelSettings(reference, reload),
+          }}
+          knowledge={knowledge} knowledgeLock={lockReason} memoryEnabled={memoryEnabled} onMemoryEnabledChange={changeMemoryEnabled}
+          onOpenKnowledge={() => { setModal(null); openDestination("knowledge"); }}
+          onOpenMemory={() => { setModal(null); openDestination("memory"); }}
+          onManageAccess={() => openModal("access")} />
       )}
       {modal === "access" && (
         <AccessDialog scopes={agent.scopes} remaining={agent.scopeRemaining} action={agent.scopeAction}

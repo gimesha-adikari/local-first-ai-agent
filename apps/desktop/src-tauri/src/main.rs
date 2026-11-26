@@ -2,9 +2,12 @@
 
 mod agent;
 mod bundled_model;
+mod chat_context;
 mod commands;
 #[cfg(all(test, target_os = "linux"))]
 mod desktop_acceptance;
+mod knowledge;
+mod semantic;
 
 use std::{
     path::Path,
@@ -61,6 +64,7 @@ fn run_desktop(
     spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
 ) {
     builder
+        .manage(knowledge::KnowledgeJobs::default())
         .setup(move |app| {
             let path = app
                 .path()
@@ -69,16 +73,21 @@ fn run_desktop(
             prepare_database(&path)?;
             let database = SqliteStore::open(&path)?;
             let worker = Arc::new(spawn_worker()?);
+            let semantic = semantic::SemanticState::new()?;
+            let database = Arc::new(Mutex::new(database));
+            semantic.restore_remembered(Arc::clone(&database));
+            app.manage(semantic);
             let agent = Arc::new(
                 AgentSession::new().map_err(|error| std::io::Error::other(error.message))?,
             );
             app.manage(Desktop {
                 worker,
                 agent,
-                database: Arc::new(Mutex::new(database)),
+                database,
                 database_path: path,
                 operations: Arc::new(AtomicBool::new(false)),
                 active_model: AtomicI64::new(0),
+                chat_cancellation: Mutex::new(None),
             });
             Ok(())
         })
@@ -97,8 +106,10 @@ fn run_desktop(
             recommended_chat_settings,
             stop_generation,
             choose_model,
+            list_models,
             load_model,
             save_model_settings,
+            reset_model_settings,
             unload_model,
             save_preferences,
             inference_status,
@@ -114,7 +125,36 @@ fn run_desktop(
             choose_agent_file,
             choose_agent_directory,
             list_agent_scopes,
-            revoke_agent_scope
+            revoke_agent_scope,
+            knowledge::knowledge_start_import,
+            knowledge::knowledge_reimport,
+            knowledge::knowledge_import_status,
+            knowledge::knowledge_cancel_import,
+            knowledge::knowledge_list_documents,
+            chat_context::chat_supplied_evidence,
+            chat_context::chat_resolve_evidence,
+            chat_context::memory_page,
+            knowledge::knowledge_library,
+            knowledge::knowledge_get_document,
+            knowledge::knowledge_delete_document,
+            knowledge::knowledge_search,
+            semantic::knowledge_embedding_status,
+            semantic::knowledge_choose_embedding_model,
+            semantic::knowledge_unload_embedding_model,
+            semantic::knowledge_embedding_coverage,
+            semantic::knowledge_reindex,
+            semantic::knowledge_index_progress,
+            semantic::knowledge_cancel_index,
+            semantic::knowledge_retrieve,
+            chat_context::chat_source_references,
+            chat_context::chat_resolve_source,
+            chat_context::memory_retrieval_enabled,
+            chat_context::memory_set_retrieval_enabled,
+            chat_context::memory_create,
+            chat_context::memory_list,
+            chat_context::memory_edit,
+            chat_context::memory_delete,
+            chat_context::memory_clear,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");

@@ -1,7 +1,8 @@
-import { Children, isValidElement, useEffect, useRef, useState, type ReactNode } from "react";
+import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
-import type { Components } from "react-markdown";
+import type { Components, Options } from "react-markdown";
 import { CheckIcon, CopyIcon } from "./icons";
+import { remarkCitations } from "./knowledge";
 import { offlineMarkdown } from "./markdown";
 
 function textContent(content: ReactNode): string {
@@ -88,6 +89,39 @@ const components: Components = {
   },
 };
 
-export default function MarkdownMessage({ text }: { text: string }) {
-  return <div className="markdown"><Markdown {...offlineMarkdown} components={components}>{text}</Markdown></div>;
+export type Citations = { ids: ReadonlySet<string>; onSelect: (id: string) => void };
+
+/**
+ * Safe offline Markdown. With citations, only markers whose IDs were returned
+ * by the host become buttons; every other marker stays plain text.
+ */
+export default function MarkdownMessage({ text, citations }: { text: string; citations?: Citations }) {
+  const ids = citations?.ids;
+  const onSelect = citations?.onSelect;
+  const key = ids ? [...ids].sort().join(",") : "";
+  const { plugins, rendered } = useMemo(() => {
+    if (!ids?.size || !onSelect) return { plugins: offlineMarkdown.remarkPlugins, rendered: components };
+    const valid = new Set(ids);
+    return {
+      plugins: [...(offlineMarkdown.remarkPlugins ?? []), [remarkCitations, { ids: valid }]] as Options["remarkPlugins"],
+      rendered: {
+        ...components,
+        span: ({ node: _node, children, ...props }) => {
+          const marker = (props as Record<string, unknown>)["data-citation"];
+          if (typeof marker !== "string") return <span {...props}>{children}</span>;
+          const list = marker.split(",").filter((id) => valid.has(id));
+          return (
+            <span className="citation-group">
+              {list.map((id) => (
+                <button key={id} type="button" className="citation-chip" onClick={() => onSelect(id)}
+                  aria-label={`Show source ${id}`} title={`Show source ${id}`}>{id}</button>
+              ))}
+            </span>
+          );
+        },
+      } satisfies Components,
+    };
+    // `key` captures the ID set; the handler is stable per message.
+  }, [key, onSelect]);
+  return <div className="markdown"><Markdown {...offlineMarkdown} remarkPlugins={plugins} components={rendered}>{text}</Markdown></div>;
 }

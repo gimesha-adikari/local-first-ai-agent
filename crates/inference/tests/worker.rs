@@ -84,6 +84,7 @@ impl InferenceProvider for Mock {
             tokens_per_second: 1000.0,
             excluded_turns: 0,
             output_budget: None,
+            context_usage: None,
             assistant_replay: None,
         })
     }

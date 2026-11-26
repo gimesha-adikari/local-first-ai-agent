@@ -30,6 +30,18 @@ export function modelProfile(fileName: string): ModelProfile | null {
 }
 
 /**
+ * Profile of a listed model. Only the row registered from the verified app
+ * resource is built in; an imported copy of the same file is labeled imported.
+ */
+export function referenceProfile(reference: { fileName: string; bundled: boolean }): ModelProfile | null {
+  const profile = modelProfile(reference.fileName);
+  if (!profile || profile.builtIn === reference.bundled) return profile;
+  return profile.builtIn
+    ? { ...profile, builtIn: false, role: "Imported lightweight assistant" }
+    : { ...profile, builtIn: true };
+}
+
+/**
  * Friendly display name. GGUF `general.name` can be an internal identifier
  * (the bundled LFM2.5 file stores a commit hash), so the file name is used.
  */

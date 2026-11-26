@@ -69,17 +69,7 @@ impl FilesystemScopes {
         kind: ScopeKind,
         lifetime: Duration,
     ) -> AgentResult<ScopeSummary> {
-        if !path.is_absolute() || path == Path::new("/") {
-            return Err(denied());
-        }
-        let handle = open_at(
-            libc::AT_FDCWD,
-            path.as_os_str().as_bytes(),
-            libc::O_PATH | libc::O_CLOEXEC,
-            NO_LINKS,
-        )
-        .map_err(open_error)?;
-        check_filesystem(&handle)?;
+        let handle = pin_selected(path)?;
         let metadata = handle.metadata().map_err(|_| unavailable())?;
         match kind {
             ScopeKind::File if metadata.is_file() && metadata.nlink() == 1 => {}
@@ -87,20 +77,7 @@ impl FilesystemScopes {
             _ => return Err(denied()),
         }
         let mut resources = self.resources.lock().map_err(|_| unavailable())?;
-        let display_name = path
-            .file_name()
-            .map(|name| {
-                name.to_string_lossy()
-                    .chars()
-                    .filter(|ch| {
-                        !ch.is_control()
-                            && !matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-                    })
-                    .take(80)
-                    .collect::<String>()
-            })
-            .filter(|name| !name.trim().is_empty());
-        let summary = policy.grant_named_scope(kind, lifetime, display_name)?;
+        let summary = policy.grant_named_scope(kind, lifetime, selected_display_name(path))?;
         if resources.contains_key(&summary.id) {
             policy.revoke_scope(&summary.id);
             return Err(denied());
@@ -200,14 +177,54 @@ impl FilesystemScopes {
             }
             _ => return Err(denied()),
         };
-        let file = reopen_regular(pinned, context)?;
+        let check = || context.check();
+        let file = reopen_regular(pinned, &check)?;
         if is_pdf || args.pdf_pages.is_some() {
-            let input = read_bytes(&file, MAX_PDF_BYTES as usize, pdf::limit, context)?;
-            pdf::read(&input, args.pdf_pages, context)
+            let input = read_bytes(&file, MAX_PDF_BYTES as usize, pdf::limit, &check)?;
+            pdf::read(&input, args.pdf_pages, &check)
         } else {
             read_text(&file, context)
         }
     }
+}
+
+pub(crate) fn pin_selected(path: &Path) -> AgentResult<File> {
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(denied());
+    }
+    let handle = open_at(
+        libc::AT_FDCWD,
+        path.as_os_str().as_bytes(),
+        libc::O_PATH | libc::O_CLOEXEC,
+        NO_LINKS,
+    )
+    .map_err(open_error)?;
+    check_filesystem(&handle)?;
+    Ok(handle)
+}
+
+pub(crate) fn pin_selected_regular(path: &Path) -> AgentResult<File> {
+    let handle = pin_selected(path)?;
+    let metadata = handle.metadata().map_err(|_| unavailable())?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(denied());
+    }
+    Ok(handle)
+}
+
+pub(crate) fn selected_display_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|name| {
+            name.to_string_lossy()
+                .chars()
+                .filter(|ch| {
+                    !ch.is_control()
+                        && !matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                })
+                .take(80)
+                .collect::<String>()
+        })
+        .filter(|name| !name.trim().is_empty())
 }
 
 fn has_pdf_extension(path: &Path) -> bool {
@@ -284,8 +301,11 @@ fn valid_relative(path: &str) -> bool {
 /// First pin without opening a device/FIFO, then verify type and link count,
 /// then reopen that exact descriptor through trusted Linux procfs, not the
 /// original filename. The process must have a genuine /proc/self/fd mount.
-fn reopen_regular(pinned: &File, context: &ToolContext<'_>) -> AgentResult<File> {
-    context.check()?;
+pub(crate) fn reopen_regular(
+    pinned: &File,
+    check: &dyn Fn() -> AgentResult<()>,
+) -> AgentResult<File> {
+    check()?;
     let before = pinned.metadata().map_err(|_| unavailable())?;
     if !before.is_file() || before.nlink() != 1 {
         return Err(denied());
@@ -303,7 +323,7 @@ fn reopen_regular(pinned: &File, context: &ToolContext<'_>) -> AgentResult<File>
     // Open the trusted procfs magic link using its pinned directory fd;
     // this is the only intentional magic-link resolution.
     let name = CString::new(pinned.as_raw_fd().to_string()).map_err(|_| unavailable())?;
-    context.check()?;
+    check()?;
     // SAFETY: dirfd and CString are live. No creation flags are supplied.
     let fd = unsafe {
         libc::openat(
@@ -325,15 +345,15 @@ fn reopen_regular(pinned: &File, context: &ToolContext<'_>) -> AgentResult<File>
     {
         return Err(denied());
     }
-    context.check()?;
+    check()?;
     Ok(file)
 }
 
-fn read_bytes(
+pub(crate) fn read_bytes(
     file: &File,
     maximum: usize,
     oversized: fn() -> AgentError,
-    context: &ToolContext<'_>,
+    check: &dyn Fn() -> AgentResult<()>,
 ) -> AgentResult<Vec<u8>> {
     let before = file.metadata().map_err(|_| unavailable())?;
     if !before.is_file() || before.nlink() != 1 {
@@ -345,7 +365,7 @@ fn read_bytes(
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
-        context.check()?;
+        check()?;
         let limit = buffer.len().min(maximum + 1 - bytes.len());
         match file.read_at(&mut buffer[..limit], bytes.len() as u64) {
             Ok(0) => break,
@@ -377,14 +397,8 @@ fn read_bytes(
 }
 
 fn read_text(file: &File, context: &ToolContext<'_>) -> AgentResult<ToolOutput> {
-    let bytes = read_bytes(file, MAX_FILE_BYTES, denied, context)?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| unsupported_text())?;
-    if text
-        .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\r' | '\n'))
-    {
-        return Err(unsupported_text());
-    }
+    let bytes = read_bytes(file, MAX_FILE_BYTES, denied, &|| context.check())?;
+    let text = utf8_text(&bytes)?;
     let mut end = 0;
     let mut wire = 0;
     for ch in text.chars() {
@@ -401,6 +415,17 @@ fn read_text(file: &File, context: &ToolContext<'_>) -> AgentResult<ToolOutput> 
         file_bytes: bytes.len() as u64,
         truncated: end < bytes.len(),
     })
+}
+
+pub(crate) fn utf8_text(bytes: &[u8]) -> AgentResult<&str> {
+    let text = std::str::from_utf8(bytes).map_err(|_| unsupported_text())?;
+    if text
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\r' | '\n'))
+    {
+        return Err(unsupported_text());
+    }
+    Ok(text)
 }
 
 pub(crate) fn escaped_len(ch: char) -> usize {
