@@ -87,7 +87,7 @@ void (async () => {
     const { models: [model] } = await invoke("bootstrap");
     result.chatModelLoadMs = (await clock(() => invoke("load_model", { modelId: model.id, settings: model.settings }), 1))[0];
     const { id } = await invoke("create_conversation");
-    const options = { knowledge: { mode: "keyword", documentIds: [1] } };
+    const options = { knowledge: { mode: "keyword", documentIds: [1], grounding: "documents" } };
     let started;
     const launch = performance.now();
     const answer = await invoke("send_message", {
@@ -106,7 +106,7 @@ void (async () => {
 
     const uncitedChat = await invoke("create_conversation");
     const uncited = await invoke("send_message", {
-      id: uncitedChat.id, content: "What is the code? Reply with the exact code only, on its own.",
+      id: uncitedChat.id, content: "What is the orchard gate code? Code only.",
       options: { ...options, maxTokens: 5 }, events: channel(() => {}),
     });
     result.shortAnswer = uncited.content;
@@ -115,7 +115,8 @@ void (async () => {
 
     const maximum = await invoke("create_conversation");
     const checked = await invoke("send_message", {
-      id: maximum.id, content: "What is a quasar?", options: { maxTokens: 4, knowledge: { mode: "keyword", documentIds: ids } },
+      id: maximum.id, content: "What is a quasar?",
+      options: { maxTokens: 4, knowledge: { mode: "keyword", documentIds: ids, grounding: "documents" } },
       events: channel(() => {}),
     });
     check(checked.context.coverage.retrieved === 0 && checked.context.fitted.sources === 0, "Zero results or maximum selection failed");

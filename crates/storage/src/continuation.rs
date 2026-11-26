@@ -5,7 +5,7 @@ use agent_core::{
         PendingTurn, prepare_history,
     },
     inference::{
-        AssistantReplay, ErrorCode, FinishReason, GenerationStats, InferenceError,
+        AssistantReplay, Cancellation, ErrorCode, FinishReason, GenerationStats, InferenceError,
         MAX_CHAT_ATTEMPT_TOKENS, Result,
     },
 };
@@ -137,6 +137,7 @@ impl SqliteStore {
         id: ConversationId,
         message: MessageId,
         model: ModelId,
+        cancellation: &Cancellation,
     ) -> Result<ContinuationPlan> {
         let tx = self.connection.transaction().map_err(sql_error)?;
         let active: bool = tx
@@ -157,6 +158,12 @@ impl SqliteStore {
         )
         .map_err(sql_error)?;
         tx.execute("UPDATE chat_attempt_replay SET continuation_count=continuation_count+1 WHERE message_id=?1", [message]).map_err(sql_error)?;
+        if cancellation.is_explicitly_cancelled() {
+            return Err(InferenceError::new(
+                ErrorCode::Cancelled,
+                "Chat preparation was cancelled.",
+            ));
+        }
         tx.commit().map_err(sql_error)?;
         Ok(plan)
     }

@@ -298,11 +298,11 @@ fn semantic_ipc_desktop_fixture() {
             for (i, (name, body)) in [
                 (
                     "Rail",
-                    "The railway station dispatches regional passenger trains every morning.",
+                    "Regional trains depart from platform four every thirty minutes on weekdays.",
                 ),
                 (
                     "Tart",
-                    "A lemon tart is a dessert served cold. Chill it before slicing.",
+                    "Preheat the oven to 180 degrees and chill the lemon tart for two hours before serving.",
                 ),
                 ("Cancellation fixture", long.as_str()),
             ]
@@ -358,12 +358,15 @@ fn contextual_chat_ipc_desktop_fixture() {
                 max_tokens: 96,
                 ..Default::default()
             };
-            db.remember_model(
-                &model,
-                model.file_name().unwrap().to_str().unwrap(),
-                settings,
-            )
-            .unwrap();
+            let saved = db
+                .remember_model(
+                    &model,
+                    model.file_name().unwrap().to_str().unwrap(),
+                    settings,
+                )
+                .unwrap();
+            // Budget assertions require the fixture's fixed 1,024-token context.
+            db.set_model_settings(saved.id, settings, false).unwrap();
 
             let large = "large ".to_owned() + &"abcd ".repeat(375);
             for (i, (name, body)) in [
@@ -439,20 +442,23 @@ fn task05_integration_desktop_fixture() {
                 .unwrap();
             let desktop = webview.state::<crate::commands::Desktop>();
             let mut db = desktop.engine.store().lock().unwrap();
-            db.remember_model(
-                &model,
-                model.file_name().unwrap().to_str().unwrap(),
-                ModelSettings {
-                    model: ModelConfig {
-                        context_length: 1024,
-                        threads: 4,
-                    },
-                    temperature: 0.0,
-                    max_tokens: 96,
-                    ..ModelSettings::default()
+            let settings = ModelSettings {
+                model: ModelConfig {
+                    context_length: 1024,
+                    threads: 4,
                 },
-            )
-            .unwrap();
+                temperature: 0.0,
+                max_tokens: 96,
+                ..ModelSettings::default()
+            };
+            let saved = db
+                .remember_model(
+                    &model,
+                    model.file_name().unwrap().to_str().unwrap(),
+                    settings,
+                )
+                .unwrap();
+            db.set_model_settings(saved.id, settings, false).unwrap();
             for i in 1..=128_u8 {
                 let (name, body) = match i {
                     1 => ("Orchard guide.pdf".into(),

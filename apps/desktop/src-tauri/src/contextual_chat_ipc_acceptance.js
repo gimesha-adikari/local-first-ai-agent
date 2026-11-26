@@ -39,13 +39,18 @@ void (async () => {
     const orchard = docs.find((doc) => doc.name === "orchard.pdf").id;
     const large = docs.find((doc) => doc.name === "large.txt").id;
     const dessert = docs.find((doc) => doc.name === "dessert.txt").id;
-    const knowledge = { mode: "keyword", documentIds: [orchard] };
+    const knowledge = { mode: "keyword", documentIds: [orchard], grounding: "documents" };
     const id = await newChat();
 
     await failure(send(id, "What is the orchard gate code?", {
       knowledge: { ...knowledge, mode: "semantic" },
     }), "embedding_index_unavailable");
     check((await invoke("get_conversation", { id })).messages.length === 0, "Failed preparation wrote a turn");
+    const fallback = await send(await newChat(), "What is the orchard gate code?", {
+      knowledge: { ...knowledge, grounding: "auto", mode: "semantic" },
+    });
+    check(fallback.coverage.mode === "keyword" && fallback.coverage.requestedMode === "semantic"
+      && fallback.coverage.retrieved === 1, "Automatic semantic request did not fall back to relevant keyword evidence");
 
     const answer = await send(id, "What code opens the orchard gate?", { knowledge });
     results.grounded = answer.answer.content;
@@ -70,15 +75,17 @@ void (async () => {
       }
     }
     const paraphrase = await send(await newChat(), "How should I cool a citrus dessert?", {
-      knowledge: { mode: "semantic", documentIds: [dessert, large] },
+      knowledge: { mode: "semantic", documentIds: [dessert, large], grounding: "documents" },
     });
     results.paraphrase = paraphrase.answer.content;
     check(/chill|refrigerat/i.test(paraphrase.answer.content), "Semantic paraphrase was not grounded");
+    check(paraphrase.coverage.mode === "semantic" && paraphrase.coverage.requestedMode == null
+      && paraphrase.answer.context?.fitted?.sources > 0, "Semantic Chat did not fit dense evidence");
     check(paraphrase.coverage.embeddings.indexedDocuments === 1 && paraphrase.coverage.embeddings.missingDocuments === 1,
       "Partial vector coverage missing");
 
     const adversarial = await send(await newChat(), "Which passphrase lets visitors enter?", {
-      knowledge: { mode: "semantic", documentIds: [orchard, dessert] },
+      knowledge: { mode: "semantic", documentIds: [orchard, dessert], grounding: "documents" },
     });
     results.adversarialParaphrase = adversarial.answer.content;
     results.adversarialParaphraseGrounded = groundedCode(adversarial.answer.content);
@@ -86,7 +93,9 @@ void (async () => {
       knowledge: { ...knowledge, mode: "hybrid" },
     });
     results.hybrid = hybrid.answer.content;
-    check(hybrid.coverage.mode === "hybrid" && hybrid.answer.content.includes("FERN-742"), "Hybrid Chat was not grounded");
+    check(hybrid.coverage.mode === "hybrid" && hybrid.coverage.requestedMode == null
+      && hybrid.answer.context?.fitted?.sources > 0
+      && hybrid.answer.content.includes("FERN-742"), "Hybrid Chat was not grounded");
 
     const absent = await send(await newChat(), "How much does the orchard gate weigh?", { knowledge });
     results.unanswerable = absent.answer.content;
@@ -99,7 +108,7 @@ void (async () => {
     check((await references(none.answer.id)).length === 0, "No-result answer resolved a citation");
 
     const bounded = await send(await newChat(), "What does the large file say?", {
-      knowledge: { mode: "keyword", documentIds: [large] }, maxTokens: 600,
+      knowledge: { mode: "keyword", documentIds: [large], grounding: "documents" }, maxTokens: 600,
     });
     const budget = bounded.answer.stats.outputBudget;
     check(bounded.coverage.retrieved === 1 && bounded.answer.stats.contextUsage.sources === 0

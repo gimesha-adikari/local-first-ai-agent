@@ -3,6 +3,7 @@
 
 use std::{
     future::Future,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -46,13 +47,20 @@ pub enum ChatEvent {
     },
 }
 
-/// Receives Chat events. Delivery is best effort: a closed surface never
-/// stops generation or persistence.
+/// Receives best-effort Chat events. Delivery failures and unwind panics do
+/// not stop generation or persistence. A sink may read the conversation
+/// synchronously but must return before waiting for more events from the turn.
 pub trait ChatEventSink: Send + Sync + 'static {
     fn send(&self, event: ChatEvent);
 }
 
 pub type ChatEvents = Arc<dyn ChatEventSink>;
+
+fn deliver(events: &ChatEvents, event: ChatEvent) {
+    // A surface callback must not unwind through the transcript guard or
+    // the dedicated inference worker.
+    let _ = catch_unwind(AssertUnwindSafe(|| events.send(event)));
+}
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -315,7 +323,6 @@ pub(crate) fn prepare_knowledge(
     })
 }
 
-#[derive(Default)]
 struct StreamContext {
     previous: Option<GenerationStats>,
     cancellation: Cancellation,
@@ -368,7 +375,7 @@ impl Engine {
         let active = ActiveChat::register(&self.chat_cancellation, cancellation.clone())?;
         let model_id = self.active_model();
         let runtime = self.chat_runtime();
-        self.detach(operation, Some(active), async move {
+        self.detach(operation, active, async move {
             runtime
                 .run_turn(id, action, options, events, cancellation, model_id)
                 .await
@@ -393,7 +400,7 @@ impl Engine {
     async fn detach(
         &self,
         operation: OperationGuard,
-        active: Option<ActiveChat>,
+        active: ActiveChat,
         turn: impl Future<Output = Result<Message>> + Send + 'static,
     ) -> Result<Message> {
         let (reply, result) = futures_channel::oneshot::channel();
@@ -428,11 +435,13 @@ impl Engine {
         events: ChatEvents,
     ) -> Result<Message> {
         let operation = self.reserve()?;
+        let cancellation = Cancellation::default();
+        let active = ActiveChat::register(&self.chat_cancellation, cancellation.clone())?;
         let model = self.active_model();
         let runtime = self.chat_runtime();
-        self.detach(operation, None, async move {
+        self.detach(operation, active, async move {
             runtime
-                .continue_turn(id, message_id, max_tokens, model, events)
+                .continue_turn(id, message_id, max_tokens, model, events, cancellation)
                 .await
         })
         .await
@@ -689,16 +698,22 @@ impl ChatRuntime {
         }
         // Event sinks run without the store lock; they may read the turn.
         if let Some(coverage) = coverage {
-            events.send(ChatEvent::Knowledge { coverage });
+            deliver(events, ChatEvent::Knowledge { coverage });
         }
-        events.send(ChatEvent::Started {
-            user: turn.user,
-            assistant: Box::new(assistant.clone()),
-        });
-        events.send(ChatEvent::Delta {
-            id,
-            text: text.clone(),
-        });
+        deliver(
+            events,
+            ChatEvent::Started {
+                user: turn.user,
+                assistant: Box::new(assistant.clone()),
+            },
+        );
+        deliver(
+            events,
+            ChatEvent::Delta {
+                id,
+                text: text.clone(),
+            },
+        );
         let mut db = database(&self.database)?;
         db.finish(id, &text, GenerationState::Complete, None)?;
         assistant.content = text;
@@ -746,20 +761,26 @@ impl ChatRuntime {
                 self.worker
                     .generate_with_cancellation(request, cancellation, move |delta| {
                         transcript_lock(&buffer)?.push(&delta.text, &db, message_id)?;
-                        deltas.send(ChatEvent::Delta {
-                            id: message_id,
-                            text: delta.text,
-                        });
+                        deliver(
+                            &deltas,
+                            ChatEvent::Delta {
+                                id: message_id,
+                                text: delta.text,
+                            },
+                        );
                         Ok(())
                     });
             if pending.is_ok() {
                 if let Some(coverage) = coverage {
-                    events.send(ChatEvent::Knowledge { coverage });
+                    deliver(&events, ChatEvent::Knowledge { coverage });
                 }
-                events.send(ChatEvent::Started {
-                    user: turn.user,
-                    assistant: Box::new(assistant.clone()),
-                });
+                deliver(
+                    &events,
+                    ChatEvent::Started {
+                        user: turn.user,
+                        assistant: Box::new(assistant.clone()),
+                    },
+                );
             }
             pending
         };
@@ -810,7 +831,9 @@ impl ChatRuntime {
         max_tokens: Option<u32>,
         model: Option<ModelId>,
         events: ChatEvents,
+        cancellation: Cancellation,
     ) -> Result<Message> {
+        check_chat_cancellation(&cancellation)?;
         if max_tokens.is_some_and(|value| !(1..=4096).contains(&value)) {
             return Err(InferenceError::new(
                 ErrorCode::InvalidConfig,
@@ -833,7 +856,10 @@ impl ChatRuntime {
         let (mut plan, saved_limit) = {
             let mut db = database(&self.database)?;
             let saved_limit = db.model(model)?.reference.settings.max_tokens;
-            (db.begin_continuation(id, message_id, model)?, saved_limit)
+            (
+                db.begin_continuation(id, message_id, model, &cancellation)?,
+                saved_limit,
+            )
         };
         let mut request = plan.settings.request(
             std::mem::take(&mut plan.turn.prompt),
@@ -851,7 +877,9 @@ impl ChatRuntime {
             events,
             StreamContext {
                 previous: Some(plan.previous_stats),
-                ..StreamContext::default()
+                cancellation,
+                sources: Vec::new(),
+                coverage: None,
             },
         )
         .await

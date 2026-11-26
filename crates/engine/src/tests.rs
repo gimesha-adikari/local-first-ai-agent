@@ -12,8 +12,8 @@ use agent_core::{
     agent::{AgentErrorCode, AgentResult},
     chat::{ChatStore, ConversationId, GenerationState, ModelId, ModelSettings},
     inference::{
-        Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats, InferenceError,
-        InferenceProvider, ModelConfig, ModelInfo, Result, TextDelta,
+        AssistantReplay, Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats,
+        InferenceError, InferenceProvider, ModelConfig, ModelInfo, Result, TextDelta,
     },
     knowledge::{DocumentChunk, DocumentFormat, append_chunks},
 };
@@ -43,6 +43,36 @@ impl Platform for Threads {
 
     fn available_memory(&self) -> Option<u64> {
         Some(16 << 30)
+    }
+}
+
+/// Hold an admitted Chat task before its first poll.
+#[derive(Default)]
+struct QueuedChat(Mutex<Option<BackgroundTask>>);
+
+impl QueuedChat {
+    fn run(&self) {
+        let task = self
+            .0
+            .lock()
+            .unwrap()
+            .take()
+            .expect("an admitted Chat task");
+        futures_executor::block_on(task);
+    }
+}
+
+impl Platform for QueuedChat {
+    fn spawn_blocking(&self, task: BlockingTask) {
+        Threads.spawn_blocking(task);
+    }
+
+    fn spawn(&self, task: BackgroundTask) {
+        assert!(self.0.lock().unwrap().replace(task).is_none());
+    }
+
+    fn available_memory(&self) -> Option<u64> {
+        Threads.available_memory()
     }
 }
 
@@ -119,6 +149,11 @@ impl InferenceProvider for Scripted {
                 ErrorCode::GenerationFailed,
                 "Scripted failure.",
             ));
+        } else if request.prompt == "Truncate this answer" {
+            emit(TextDelta {
+                text: "Prefix".into(),
+            })?;
+            FinishReason::TokenLimit
         } else {
             for piece in ["Hello", " there."] {
                 emit(TextDelta { text: piece.into() })?;
@@ -135,7 +170,12 @@ impl InferenceProvider for Scripted {
             tokens_per_second: 1.0,
             excluded_turns: 0,
             output_budget: None,
-            assistant_replay: None,
+            assistant_replay: (reason == FinishReason::TokenLimit).then_some(AssistantReplay {
+                prompt_fingerprint: 42,
+                generated: vec![17, 18],
+                utf8_tail: Vec::new(),
+                excluded_turns: 0,
+            }),
             context_usage: request.context.as_ref().map(|c| c.usage()),
         })
     }
@@ -171,11 +211,15 @@ pub(crate) struct Harness {
 }
 
 pub(crate) fn harness() -> Harness {
+    harness_with_platform(Arc::new(Threads))
+}
+
+fn harness_with_platform(platform: Arc<dyn Platform>) -> Harness {
     let script = Script::default();
     let provider = script.clone();
     let worker = InferenceWorker::spawn(move || Scripted(provider)).unwrap();
     let engine = Engine::new(
-        Arc::new(Threads),
+        platform,
         Arc::new(worker),
         SqliteStore::open(Path::new(":memory:")).unwrap(),
         ":memory:".into(),
@@ -731,7 +775,8 @@ fn a_dropped_chat_future_can_be_stopped_and_still_persists_its_terminal_state() 
 
 #[test]
 fn a_chat_future_dropped_right_after_acceptance_completes_in_the_background() {
-    let h = harness();
+    let platform = Arc::new(QueuedChat::default());
+    let h = harness_with_platform(platform.clone());
     h.load();
     let id = h.conversation();
     let turn = h.engine.send_message(
@@ -741,22 +786,19 @@ fn a_chat_future_dropped_right_after_acceptance_completes_in_the_background() {
         Arc::new(Recorder::default()),
     );
     drop_turn_when(turn, || true);
-    // The gate stays held until the turn is persisted, so a waiting caller
-    // never observes a released gate with a streaming row.
-    eventually(
-        || h.engine.reserve().is_ok(),
-        "the operation gate is released",
-    );
+    assert_eq!(h.engine.reserve().err().unwrap().code, ErrorCode::Busy);
+    platform.run();
+    assert!(h.engine.reserve().is_ok());
     let saved = h.engine.get_conversation(id).unwrap().messages;
     assert_eq!(saved.len(), 2);
     assert_eq!(saved[1].state, GenerationState::Complete);
     assert_eq!(saved[1].content, "Hello there.");
-    h.send(id, "Again", json!({})).0.unwrap();
 }
 
 #[test]
 fn a_dropped_failing_chat_future_records_the_failure() {
-    let h = harness();
+    let platform = Arc::new(QueuedChat::default());
+    let h = harness_with_platform(platform.clone());
     h.load();
     let id = h.conversation();
     let turn = h.engine.send_message(
@@ -766,14 +808,143 @@ fn a_dropped_failing_chat_future_records_the_failure() {
         Arc::new(Recorder::default()),
     );
     drop_turn_when(turn, || true);
-    eventually(
-        || h.engine.reserve().is_ok(),
-        "the operation gate is released",
-    );
+    assert_eq!(h.engine.reserve().err().unwrap().code, ErrorCode::Busy);
+    platform.run();
+    assert!(h.engine.reserve().is_ok());
     let saved = h.engine.get_conversation(id).unwrap().messages;
     assert_eq!(saved[1].state, GenerationState::Failed);
     assert_eq!(saved[1].content, "Half");
-    h.send(id, "Hello", json!({})).0.unwrap();
+}
+
+#[test]
+fn queued_stop_preserves_the_truncated_attempt_and_allowance() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+
+    let platform = Arc::new(QueuedChat::default());
+    let h = harness_with_platform(platform.clone());
+    h.load();
+    let id = h.conversation();
+    let mut context = Context::from_waker(Waker::noop());
+    let mut initial = Box::pin(h.engine.send_message(
+        id,
+        "Truncate this answer".into(),
+        ChatOptions::default(),
+        Arc::new(Recorder::default()),
+    ));
+    assert!(matches!(initial.as_mut().poll(&mut context), Poll::Pending));
+    platform.run();
+    let truncated = futures_executor::block_on(initial).unwrap();
+    assert_eq!(truncated.state, GenerationState::Truncated);
+    assert_eq!(
+        h.engine.continuation_remaining(id, truncated.id).unwrap(),
+        3
+    );
+
+    let events = Arc::new(Recorder::default());
+    let mut continued = Box::pin(
+        h.engine
+            .continue_chat(id, truncated.id, Some(8), events.clone()),
+    );
+    assert!(matches!(
+        continued.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert_eq!(h.engine.reserve().err().unwrap().code, ErrorCode::Busy);
+    assert!(
+        h.engine.stop_chat().unwrap(),
+        "Stop must reach an accepted queued continuation"
+    );
+    platform.run();
+    assert_eq!(
+        futures_executor::block_on(continued).unwrap_err().code,
+        ErrorCode::Cancelled
+    );
+    assert!(events.kinds().is_empty());
+    let messages = h.engine.get_conversation(id).unwrap().messages;
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].id, truncated.id);
+    assert_eq!(messages[1].state, GenerationState::Truncated);
+    assert_eq!(messages[1].content, "Prefix");
+    assert_eq!(
+        h.engine.continuation_remaining(id, truncated.id).unwrap(),
+        3
+    );
+    assert!(h.engine.reserve().is_ok());
+    assert!(!h.engine.stop_chat().unwrap());
+}
+
+struct PanickingSink {
+    kind: &'static str,
+    invoked: std::sync::atomic::AtomicBool,
+}
+
+impl ChatEventSink for PanickingSink {
+    fn send(&self, event: ChatEvent) {
+        let kind = match event {
+            ChatEvent::Started { .. } => "started",
+            ChatEvent::Delta { .. } => "delta",
+            ChatEvent::Knowledge { .. } => "knowledge",
+        };
+        if kind == self.kind {
+            self.invoked
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            panic!("intentional {kind} sink panic");
+        }
+    }
+}
+
+fn assert_chat_survives_sink_panic(kind: &'static str, deterministic: bool) {
+    let h = harness();
+    h.load();
+    let id = h.conversation();
+    let (prompt, options, answer) = if deterministic {
+        let document = h.document("backend.md", "The backend listens on port 8080.");
+        (
+            "search for walrus",
+            serde_json::from_value(knowledge(document, "documents")).unwrap(),
+            "The text \u{201c}walrus\u{201d} wasn't found in the selected documents.",
+        )
+    } else {
+        ("Say hello", ChatOptions::default(), "Hello there.")
+    };
+    let sink = Arc::new(PanickingSink {
+        kind,
+        invoked: false.into(),
+    });
+    let result =
+        futures_executor::block_on(
+            h.engine
+                .send_message(id, prompt.into(), options, sink.clone()),
+        );
+    assert!(sink.invoked.load(std::sync::atomic::Ordering::Relaxed));
+    let message = result.unwrap();
+    assert_eq!(message.state, GenerationState::Complete);
+    assert_eq!(message.content, answer);
+    let saved = h.engine.get_conversation(id).unwrap().messages;
+    assert_eq!(saved[1].state, GenerationState::Complete);
+    assert_eq!(saved[1].content, answer);
+    assert_eq!(
+        h.send(id, "Continue normally", json!({})).0.unwrap().state,
+        GenerationState::Complete
+    );
+}
+
+#[test]
+fn sink_panic_on_started_does_not_interrupt_chat() {
+    assert_chat_survives_sink_panic("started", false);
+}
+
+#[test]
+fn sink_panic_on_delta_does_not_stop_inference() {
+    assert_chat_survives_sink_panic("delta", false);
+}
+
+#[test]
+fn sink_panic_on_no_evidence_does_not_abandon_the_reply() {
+    assert_chat_survives_sink_panic("knowledge", true);
 }
 
 /// A sink that reads the conversation synchronously for every event.

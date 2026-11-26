@@ -3,7 +3,10 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use agent_core::{chat::Appearance, inference::FinishReason};
+use agent_core::{
+    chat::Appearance,
+    inference::{Cancellation, FinishReason},
+};
 
 use super::*;
 
@@ -474,18 +477,35 @@ fn continuation_reopens_same_attempt_and_retains_checkpoint_on_restart() {
     );
     drop(store);
     let mut store = database.open();
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    let result = store.begin_continuation(id, assistant, model.id, &cancelled);
+    assert_eq!(result.err().unwrap().code, ErrorCode::Cancelled);
+    assert_eq!(
+        store
+            .continuation_remaining(id, assistant, model.id)
+            .unwrap(),
+        3
+    );
+    let cancellation = Cancellation::default();
     assert!(
         store
-            .begin_continuation(id, assistant, model.id + 1)
+            .begin_continuation(id, assistant, model.id + 1, &cancellation)
             .is_err()
     );
-    let plan = store.begin_continuation(id, assistant, model.id).unwrap();
+    let plan = store
+        .begin_continuation(id, assistant, model.id, &cancellation)
+        .unwrap();
     assert_eq!(plan.turn.assistant.id, assistant);
     assert!(plan.turn.user.is_none());
     assert!(plan.settings.enable_thinking);
     assert!(plan.turn.assistant.content.ends_with("```rust\n"));
     assert_eq!(plan.replay.utf8_tail, vec![0xe2, 0x82]);
-    assert!(store.begin_continuation(id, assistant, model.id).is_err());
+    assert!(
+        store
+            .begin_continuation(id, assistant, model.id, &cancellation)
+            .is_err()
+    );
     let append = plan.turn.assistant.content + "fn main() {}";
     store.checkpoint(assistant, &append).unwrap();
     drop(store);
@@ -544,7 +564,9 @@ fn continuation_is_bounded_and_preserves_latest_attempt_ownership() {
                 .unwrap(),
             3 - index
         );
-        let plan = store.begin_continuation(id, assistant, model.id).unwrap();
+        let plan = store
+            .begin_continuation(id, assistant, model.id, &Cancellation::default())
+            .unwrap();
         let content = plan.turn.assistant.content + " next";
         store
             .finish(
@@ -555,7 +577,11 @@ fn continuation_is_bounded_and_preserves_latest_attempt_ownership() {
             )
             .unwrap();
     }
-    assert!(store.begin_continuation(id, assistant, model.id).is_err());
+    assert!(
+        store
+            .begin_continuation(id, assistant, model.id, &Cancellation::default())
+            .is_err()
+    );
     let saved = store.get(id).unwrap();
     assert_eq!(saved.messages.len(), 2);
     assert_eq!(saved.messages[1].content, "Initial next next next");
