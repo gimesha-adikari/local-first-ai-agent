@@ -1,8 +1,7 @@
-//! Discovery and integrity verification of the application-bundled model.
+//! Discovery and integrity verification of the legacy application model.
 //!
-//! The GGUF ships as a separate Tauri resource. It is verified against a
-//! pinned size and SHA-256 before it is registered, and a missing or
-//! corrupted resource never prevents the application from starting.
+//! A Debian upgrade may retain the previously bundled GGUF in system state.
+//! It is verified against a pinned size and SHA-256 before it is registered.
 
 use std::{
     fs,
@@ -49,6 +48,15 @@ pub const LFM25: BundledSpec = BundledSpec {
 
 const VERIFIED_STAMP: &str = "bundled-model.verified";
 const LFM25_TRAINED_CONTEXT: u32 = 128_000;
+
+fn retained_resource_dir() -> Option<&'static Path> {
+    // This is the destination of the Debian pre-install script.
+    cfg!(target_os = "linux").then(|| Path::new("/var/lib/local-first-ai-agent"))
+}
+
+fn retained_model_dir(path: &Path) -> Option<&'static Path> {
+    retained_resource_dir().filter(|dir| path == dir.join(LFM25.resource))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -196,6 +204,47 @@ pub fn verify(spec: &BundledSpec, resource_dir: &Path, stamp_dir: &Path) -> Veri
     }
 }
 
+fn verify_installed(
+    spec: &BundledSpec,
+    resource_dir: &Path,
+    retained_dir: Option<&Path>,
+    stamp_dir: &Path,
+) -> Verification {
+    let verification = verify(spec, resource_dir, stamp_dir);
+    match (verification, retained_dir) {
+        (Verification::Missing, Some(dir)) => verify(spec, dir, stamp_dir),
+        (verification, _) => verification,
+    }
+}
+
+/// A previously verified row can outlive its file. Recheck the retained
+/// package artifact before loading it, using the same stamp as startup.
+pub async fn check_retained_model(state: &Desktop, id: ModelId) -> Result<()> {
+    let path = database(state.engine.store())?.model(id)?.path;
+    let Some(dir) = retained_model_dir(&path) else {
+        return Ok(());
+    };
+    let invalid = || {
+        InferenceError::new(
+            ErrorCode::InvalidModel,
+            "The retained LFM2.5 model is missing or failed verification.",
+        )
+    };
+    let stamp_dir = state
+        .engine
+        .database_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(invalid)?;
+    match tauri::async_runtime::spawn_blocking(move || verify(&LFM25, dir, &stamp_dir))
+        .await
+        .map_err(|_| invalid())?
+    {
+        Verification::Verified(_) => Ok(()),
+        Verification::Missing | Verification::Corrupted => Err(invalid()),
+    }
+}
+
 pub fn register(
     db: &mut storage::SqliteStore,
     spec: &BundledSpec,
@@ -253,10 +302,15 @@ pub async fn prepare_bundled_model(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(unavailable)?;
-    let verification =
-        tauri::async_runtime::spawn_blocking(move || verify(&LFM25, &resource_dir, &stamp_dir))
-            .await
-            .map_err(|_| unavailable())?;
+    let verification = tauri::async_runtime::spawn_blocking(move || {
+        verify_installed(&LFM25, &resource_dir, retained_resource_dir(), &stamp_dir)
+    })
+    .await
+    .map_err(|_| unavailable())?;
+    let verified_path = match &verification {
+        Verification::Verified(path) => Some(path.clone()),
+        Verification::Missing | Verification::Corrupted => None,
+    };
     let mut bundled = register(&mut *database(state.engine.store())?, &LFM25, verification)?;
     let store = Arc::clone(state.engine.store());
     let verified = bundled.model.as_ref().map(|model| model.id);
@@ -273,7 +327,9 @@ pub async fn prepare_bundled_model(
     // Restore the last Chat model that loaded successfully, unless the user
     // explicitly unloaded it. A missing file is reported and not loaded.
     bundled.restore = db.chat_model_to_restore()?.map(|saved| ModelRestore {
-        available: saved.path.is_file(),
+        available: saved.path.is_file()
+            && (retained_model_dir(&saved.path).is_none()
+                || verified_path.as_ref() == Some(&saved.path)),
         model: saved.reference,
     });
     // Without a model to restore, load the bundled model automatically only
@@ -406,6 +462,52 @@ mod tests {
         );
         assert_eq!(model.settings.model.threads, 4);
         assert!(!model.settings.enable_thinking);
+    }
+
+    #[test]
+    fn retained_upgrade_model_keeps_its_id_settings_and_restore_choice() {
+        let spec = fixture_spec();
+        let old = Scratch::new();
+        let retained = Scratch::new();
+        let old_path = old.0.join(spec.resource);
+        let retained_path = retained.0.join(spec.resource);
+        fs::write(&old_path, b"synthetic gguf").unwrap();
+        let mut db = storage::SqliteStore::open(&old.0.join("profile.sqlite3")).unwrap();
+        let legacy = register(&mut db, &spec, verify(&spec, &old.0, &old.0))
+            .unwrap()
+            .model
+            .unwrap();
+        let mut custom = legacy.settings;
+        custom.max_tokens = 99;
+        db.save_model_settings(legacy.id, custom).unwrap();
+        let imported_path = old.0.join("imported.gguf");
+        fs::write(&imported_path, b"user import").unwrap();
+        let imported = db
+            .remember_model(&imported_path, "imported.gguf", custom)
+            .unwrap();
+        db.set_last_chat_model(legacy.id).unwrap();
+        drop(db);
+
+        // Mirror the package upgrade: the original package path disappears.
+        fs::rename(&old_path, &retained_path).unwrap();
+        let mut db = storage::SqliteStore::open(&old.0.join("profile.sqlite3")).unwrap();
+        let verified = verify_installed(&spec, &old.0, Some(&retained.0), &old.0);
+        let upgraded = register(&mut db, &spec, verified).unwrap().model.unwrap();
+        assert_eq!(upgraded.id, legacy.id);
+        assert_eq!(upgraded.settings, custom);
+        let restored = db.chat_model_to_restore().unwrap().unwrap();
+        assert_eq!(restored.reference.id, legacy.id);
+        assert_eq!(restored.path, retained_path);
+        let saved_import = db.model(imported.id).unwrap();
+        assert_eq!(saved_import.path, imported_path);
+        assert_eq!(saved_import.reference.settings, imported.settings);
+        assert_eq!(fs::read(imported_path).unwrap(), b"user import");
+
+        fs::write(retained_path, b"corrupt").unwrap();
+        assert_eq!(
+            verify_installed(&spec, &old.0, Some(&retained.0), &old.0),
+            Verification::Corrupted
+        );
     }
 
     #[test]

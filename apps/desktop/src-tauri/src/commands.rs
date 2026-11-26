@@ -138,6 +138,7 @@ pub async fn load_model(
     model_id: ModelId,
     settings: ModelSettings,
 ) -> Result<ModelInfo> {
+    crate::bundled_model::check_retained_model(&state, model_id).await?;
     state.engine.load_model(model_id, settings).await
 }
 

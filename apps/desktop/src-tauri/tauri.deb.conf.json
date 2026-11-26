@@ -8,6 +8,7 @@
       "deb": {
         "depends": ["bubblewrap", "poppler-utils", "util-linux"],
         "recommends": ["gnome-keyring | kwalletmanager"],
+        "preInstallScript": "deb-preinst",
         "files": {
           "/usr/share/doc/local-first-ai-agent/LICENSE": "../../../LICENSE",
           "/usr/share/doc/local-first-ai-agent/NOTICE": "../../../third_party/software-notices/NOTICE",

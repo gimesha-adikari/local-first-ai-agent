@@ -35,7 +35,7 @@ to the boundary.
 | Explicit self-hosted endpoints | Loopback by name or address, or a pinned local-network IP. A key is never configured for unencrypted HTTP beyond loopback. | `endpoint::tests::scope_rules_bind_locality_scheme_and_address`, `remote_tests::keys_are_never_configured_for_unencrypted_network_servers` |
 | No proxies, redirects, retries or SDK traffic | Direct connection to the validated address; proxy variables are never read; 3xx is returned as data; one attempt; no SDK. | `transport_tests::redirects_are_returned_as_data_and_never_followed`, `transport_tests::failures_are_not_retried_and_proxy_settings_are_ignored` |
 | Policy before connection and before headers | `admit` before queueing, resolution, connection and TLS; `commit` consumes the sharing grant under the revocation lock immediately before the first request byte; liveness before every write slice and response piece. | `transport_tests::revocation_ordered_after_commit_but_before_the_first_write_sends_nothing` |
-| Cancellation, expiry, revocation while queued and in flight | Queued work waits on a bounded slot pool while rechecking admission; in-flight work rechecks every 10 ms. Local-only mode and provider removal also invalidate. | `transport_tests::revocation_while_queued_drops_the_request_without_a_connection`, `cancellation_during_streaming_stops_delivery`, `expiry_cancellation_and_missing_credentials_stop_before_connecting` |
+| Cancellation, expiry, revocation while queued and in flight | Queued work waits on a bounded slot pool while rechecking admission. Uploads check before each write slice and recheck on 10 ms ticks while a write is pending. Local-only mode and provider removal also invalidate. | `transport_tests::revocation_while_queued_drops_the_request_without_a_connection`, `cancellation_expiry_and_revocation_interrupt_a_stalled_request_body`, `cancellation_during_streaming_stops_delivery`, `expiry_cancellation_and_missing_credentials_stop_before_connecting` |
 | Bounded sizes and time | Request body 6 MiB; head 64 KiB and 64 headers; body 16 MiB; SSE line 1 MiB; 16 KiB pieces with an 8-piece queue; timeouts for resolution, connection, TLS, credential, head, idle and total. | `transport_tests::response_and_header_sizes_and_idle_time_are_bounded`, `http::tests`, `openai::tests::rejects_malformed_and_oversized_streams` |
 | Late responses discarded | A response arriving after revocation or expiry is dropped. | `transport_tests::revocation_or_expiry_after_sending_discards_the_late_response` |
 | Truthful transmission records | Bytes are counted at the TCP layer after the handshake: `unsent` (none), `sent` (the whole request was written and flushed), `unknown` (partial or failed write). Each attempt has one record with origin, method, route, body digest, credential flag, labels and grants. | All transport tests assert the record |
@@ -115,6 +115,21 @@ size matches an entry; a match is shown as Verified, anything else as
 Unverified. Without an embedding model, existing keyword retrieval applies
 and the coverage records the requested mode.
 
+For an in-place Debian upgrade, the pre-install hook verifies the legacy
+LFM2.5 file and retains it under `/var/lib/local-first-ai-agent/models/`
+before dpkg removes the old package resource. It hard-links the existing
+file on the same filesystem and copies it with its existing permissions when
+the filesystems differ. If preservation or verification fails, unpacking
+stops before dpkg removes the old file. Install the new package over the old
+one in the same transaction so the hook can access the artifact. A fresh
+installation on a system without retained state has no models.
+
+The application verifies the retained file and updates the existing model
+row by its bundled identity. The model ID, settings and last-loaded choice
+carry forward. The hook operates on the single known package path. To
+exercise the upgrade in disposable dpkg roots, run
+`sh scripts/check-deb-model-upgrade.sh OLD_BUNDLED.deb NEW_BASE.deb`.
+
 ## Interface
 
 Settings gains a Providers category: local-only mode, the Chat target,
@@ -154,10 +169,77 @@ All results are from this machine (i5-8500, Linux, GNOME keyring 50).
 **Simulated versus actual.** Every remote exchange used synthetic data
 against loopback HTTP or TLS fixtures with fixture certificates. No paid
 or third-party provider was contacted and no public-internet TLS or DNS
-path was exercised. A live check against a real provider is a manual
-acceptance step for the owner: configure a provider, enter a key in the
-native dialog, send one synthetic message, and compare the receipt, usage
-and the provider's dashboard.
+path was exercised.
+
+### Final acceptance preparation
+
+- The Linux release build, scoped release Clippy, and formatting checks
+  passed. The packaged executable opened in an isolated X11 session.
+  The frontend build reported its existing bundle-size warning.
+- The Debian fixture upgraded the bundled 0.1.0 package to the model-free
+  0.2.0 package with the same GGUF inode, digest and mode. It also passed the
+  fresh-install, corrupt-file refusal, and repeat-unpack cases.
+- Five bundled-model tests passed. The upgrade test uses a temporary
+  database to check the model ID, custom settings, restore choice and an
+  unrelated import. Fourteen loopback transport tests passed. The new upload
+  regression stalls after the first body byte and checks that cancellation,
+  grant expiry and revocation each leave the body incomplete and record the
+  transmission as `unknown`.
+- The four new opt-in tests passed in separate isolated runs.
+  `providers_ipc_desktop_fixture` used the loopback provider.
+  `credential_entry_desktop_fixture` used X11, a synthetic key and a temporary
+  keyring. `secret_service_round_trip_in_isolated_session` used its own
+  unlocked keyring. `missing_secret_service_fails_closed` used a separate
+  D-Bus session with no Secret Service.
+
+## Manual cloud acceptance
+
+1. From the repository root, launch `./target/release/local-first-ai-agent`
+   in the regular Linux desktop session, or open the installed application.
+2. Open **Settings → Providers → Cloud provider**. Enter the provider's
+   documented HTTPS API base URL and exact Chat Completions model ID.
+   Set the model's context window and a small **Output limit**. Declare
+   the provider's actual retention policy and enter its input and output
+   prices per million tokens to see estimated cost. Keep **Conversation
+   history**, **Saved memories** and **Document excerpts** off for this check.
+   Save the provider.
+3. On the provider card, click **Enter API key…**. Type the credential into
+   the native GTK dialog and click **Save in keyring**.
+4. Turn **Local-only mode** off. Under **Chat answers with**, select the
+   provider. Open a new Chat with no attachments. Confirm the provider and
+   sharing disclosure above the composer, then send
+   `Reply with exactly: Stage 03-C check.`
+5. Return to the provider card and inspect **Usage**. Compare the reported
+   or estimated tokens and estimated cost with the provider's dashboard.
+   The **Details** drawer shows response stats. The full receipt is stored
+   in the local SQLite database. Inspect the latest cloud receipt with this
+   read-only command, then check its provider, retention, usage basis,
+   egress labels and `transmission: "sent"`.
+
+   ```sh
+   python3 - <<'PY'
+   import json
+   import os
+   from pathlib import Path
+   import sqlite3
+
+   data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+   db = data / "io.github.gimesha-adikari.localfirstaiagent/chat/conversations.sqlite3"
+   with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+       row = connection.execute("""
+           SELECT message_id, receipt FROM intelligence_receipts
+           WHERE json_extract(receipt, '$.provider.locality') = 'cloud'
+           ORDER BY id DESC LIMIT 1
+       """).fetchone()
+   if row is None:
+       raise SystemExit("No cloud Chat receipt found.")
+   print(json.dumps({"messageId": row[0], "receipt": json.loads(row[1])}, indent=2))
+   PY
+   ```
+
+6. Turn **Local-only mode** back on in **Settings → Providers**. Confirm
+   **Chat answers with** shows **Local model** and the provider card shows
+   **Off · local-only mode**.
 
 ## Limitations
 
@@ -170,7 +252,7 @@ and the provider's dashboard.
 - A malicious provider that already holds a key could echo it in streamed
   content; only error messages are redacted.
 - Reasoning fields from some servers are ignored.
-- Upgrading from a package that bundled LFM2.5 removes that file; the
-  profile row and settings remain, and importing the same file restores it
-  as Verified.
+- The upgrade hook needs the previous on-disk package resource. If it was
+  already removed, recovery requires the original Debian package or a
+  verified local copy.
 - KDE, X11-only desktops and a locked keyring prompt were not tested.

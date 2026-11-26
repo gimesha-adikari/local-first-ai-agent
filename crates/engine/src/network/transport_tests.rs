@@ -3,9 +3,9 @@
 
 use std::{
     collections::HashMap,
-    io::Write,
-    net::IpAddr,
-    sync::{Arc, Mutex},
+    io::{BufRead, BufReader, Read, Write},
+    net::{IpAddr, TcpListener},
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -588,6 +588,86 @@ fn revocation_ordered_after_commit_but_before_the_first_write_sends_nothing() {
         requests.iter().all(Vec::is_empty),
         "the connection carried no request bytes"
     );
+}
+
+#[test]
+fn cancellation_expiry_and_revocation_interrupt_a_stalled_request_body() {
+    for expected in [
+        Failure::Cancelled,
+        Failure::Denied(Denial::Expired),
+        Failure::Denied(Denial::Revoked),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination = loopback(listener.local_addr().unwrap().port());
+        let h = harness(
+            vec![destination.clone()],
+            none(),
+            resolver(&[]),
+            TrustAnchors::from_der([]),
+            fast_limits(),
+        );
+        let payload = vec![b'x'; MAX_REQUEST_BODY];
+        let request = h.request(destination, &payload);
+        let share_until = if expected == Failure::Denied(Denial::Expired) {
+            Instant::now() + Duration::from_secs(1)
+        } else {
+            future()
+        };
+        let process = h
+            .policy
+            .grant(Permission::Process, request.operation(), future())
+            .unwrap();
+        let share = h
+            .policy
+            .grant(Permission::Share, request.operation(), share_until)
+            .unwrap();
+        let cancel = h.session.cancellation().clone();
+        let policy = Arc::clone(&h.policy);
+        let (finished, wait) = mpsc::channel();
+        let peer = std::thread::spawn({
+            let expected = expected.clone();
+            move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut first = [0];
+                reader.read_exact(&mut first).unwrap();
+                assert_eq!(first, [b'x']);
+                assert!(Instant::now() < share_until);
+                // Leave the rest of the upload unread until the sender stops.
+                // Let the socket fill before changing liveness.
+                std::thread::sleep(Duration::from_millis(50));
+                match expected {
+                    Failure::Cancelled => cancel.cancel(),
+                    Failure::Denied(Denial::Revoked) => assert!(policy.revoke(share).unwrap()),
+                    _ => {}
+                }
+                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                let mut remaining = Vec::new();
+                reader.read_to_end(&mut remaining).unwrap();
+                remaining.len() + first.len()
+            }
+        });
+
+        let failed = block_on(h.boundary.send(request, process, share))
+            .err()
+            .unwrap();
+        finished.send(()).unwrap();
+        let received = peer.join().unwrap();
+        assert_eq!(failed.failure, expected);
+        assert_eq!(failed.record.transmission, Transmission::Unknown);
+        assert!(received < payload.len(), "the peer received the full body");
+    }
 }
 
 #[test]
