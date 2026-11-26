@@ -11,6 +11,9 @@ use std::{
 
 use agent_core::{
     agent::{AgentError, AgentErrorCode, AgentResult},
+    capability::{IMPORT, Retention},
+    classification::{LIBRARY, Labels, PDF_EXCERPT, TEXT_EXCERPT},
+    inference::Cancellation,
     knowledge::{DocumentChunk, DocumentFormat, PdfCoverage},
     semantic::BGE_KEY,
 };
@@ -24,7 +27,10 @@ use storage::{
     },
 };
 
-use crate::Engine;
+use crate::{
+    Engine,
+    policy::{Operation, Permission, Policy, Session},
+};
 
 const IMPORT_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -190,6 +196,7 @@ pub fn worker_error() -> AgentError {
 
 fn import_selected(
     database: &Mutex<SqliteStore>,
+    policy: &Policy,
     job: &ImportJob,
     selected: impl DocumentSource,
     replace: Option<i64>,
@@ -211,7 +218,51 @@ fn import_selected(
         check_time()
     };
 
+    let session = Session::new(Cancellation::default());
+    let until = started + IMPORT_DEADLINE;
+    let denied = |_| {
+        AgentError::new(
+            AgentErrorCode::ToolFailed,
+            "The intelligence policy denied this import.",
+        )
+    };
+    // The trusted host supplies the pinned native selection after confirmation.
+    let observation = Operation::local(
+        &session,
+        IMPORT,
+        "selected-document",
+        Labels::from_source(LIBRARY),
+        Retention::Session,
+    );
+    let observe = policy
+        .grant(Permission::Observe, &observation, until)
+        .map_err(denied)?;
+    policy
+        .authorize(Permission::Observe, &observation, observe)
+        .map_err(denied)?;
     let contents = selected.read(&check)?;
+    check()?;
+    let class = match contents.format() {
+        DocumentFormat::Pdf => PDF_EXCERPT,
+        DocumentFormat::Txt | DocumentFormat::Markdown => TEXT_EXCERPT,
+    };
+    let labels = Labels::derived([Labels::from_source(LIBRARY)], class);
+    let import = Operation::local(
+        &session,
+        IMPORT,
+        "selected-document",
+        labels,
+        Retention::SavedLocally,
+    );
+    let process = policy
+        .grant(Permission::Process, &import, until)
+        .map_err(denied)?;
+    let retain = policy
+        .grant(Permission::Retain, &import, until)
+        .map_err(denied)?;
+    policy
+        .authorize(Permission::Process, &import, process)
+        .map_err(denied)?;
     job.set_phase(ImportState::Extracting)?;
     let fingerprint: [u8; 32] = Sha256::digest(contents.bytes()).into();
     let extracted = contents.extract(&check)?;
@@ -231,6 +282,9 @@ fn import_selected(
             WriteStage::Indexing => check(),
             WriteStage::Committing => {
                 check_time()?;
+                policy
+                    .authorize(Permission::Retain, &import, retain)
+                    .map_err(denied)?;
                 job.set_phase(ImportState::Committing)
             }
         },
@@ -273,7 +327,8 @@ impl Engine {
         job.set_phase(ImportState::Reading)?;
         let database = Arc::clone(&self.database);
         let job = Arc::clone(job);
-        self.blocking(move || import_selected(&database, &job, selected, replace))
+        let policy = Arc::clone(&self.policy);
+        self.blocking(move || import_selected(&database, &policy, &job, selected, replace))
             .await
             .ok_or_else(worker_error)?
     }
@@ -305,6 +360,7 @@ impl Engine {
         &self,
         request: KnowledgeSearch,
     ) -> AgentResult<Vec<KnowledgeHit>> {
+        crate::semantic::authorize_retrieval(&self.policy)?;
         self.with_store(move |db| db.search_knowledge(&request))
             .await
     }

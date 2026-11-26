@@ -21,6 +21,12 @@ pub struct PersonalMemory {
     pub updated_at: i64,
 }
 
+impl PersonalMemory {
+    pub fn labels(&self) -> agent_core::classification::Labels {
+        agent_core::classification::Labels::from_source(agent_core::classification::MEMORY)
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryPage {
@@ -168,6 +174,14 @@ impl SqliteStore {
     }
 
     pub fn relevant_memories(&self, question: &str) -> Result<Vec<String>> {
+        Ok(self
+            .relevant_memory_records(question)?
+            .into_iter()
+            .map(|memory| memory.content)
+            .collect())
+    }
+
+    pub fn relevant_memory_records(&self, question: &str) -> Result<Vec<PersonalMemory>> {
         if !self.memory_enabled()? {
             return Ok(Vec::new());
         }
@@ -190,7 +204,7 @@ impl SqliteStore {
         Ok(ranked
             .into_iter()
             .take(MAX_CHAT_MEMORIES)
-            .map(|(_, memory)| memory.content)
+            .map(|(_, memory)| memory)
             .collect())
     }
 

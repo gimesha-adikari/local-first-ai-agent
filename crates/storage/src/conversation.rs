@@ -254,7 +254,9 @@ impl SqliteStore {
             .connection
             .prepare(
                 "SELECT u.id,u.content,
-                    CASE WHEN x.message_id IS NULL THEN substr(a.content,1,8192) END,a.state
+                    CASE WHEN x.message_id IS NULL THEN substr(a.content,1,8192) END,a.state,
+                    u.classification,a.classification,a.id,
+                    EXISTS(SELECT 1 FROM conversation_agent_turns y WHERE y.assistant_message_id=a.id)
              FROM messages u LEFT JOIN messages a ON a.id=(
                 SELECT older.id FROM messages older WHERE older.conversation_id=u.conversation_id
                   AND older.position>u.position AND older.position<coalesce((
@@ -269,15 +271,36 @@ impl SqliteStore {
         let mut turns: Vec<_> = statement
             .query_map(params![id, CONTEXT_TURNS], |r| {
                 let state: Option<String> = r.get(3)?;
+                let assistant = if state.as_deref() == Some("complete") {
+                    r.get::<_, Option<String>>(2)?.unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let mut labels = super::intelligence::classify_message(
+                    r.get::<_, Option<String>>(4)?.as_deref(),
+                    MessageRole::User,
+                    false,
+                    false,
+                )?;
+                if !assistant.is_empty() {
+                    labels.inherit(&super::intelligence::classify_message(
+                        r.get::<_, Option<String>>(5)?.as_deref(),
+                        MessageRole::Assistant,
+                        false,
+                        r.get(7)?,
+                    )?);
+                }
+                labels.insert(agent_core::classification::HISTORY);
                 Ok((
                     r.get(0)?,
                     CompletedTurn {
+                        provenance: Some(agent_core::intelligence::ContextSource {
+                            kind: agent_core::intelligence::SourceKind::History,
+                            record: r.get(6)?,
+                            labels,
+                        }),
                         user: r.get(1)?,
-                        assistant: if state.as_deref() == Some("complete") {
-                            r.get::<_, Option<String>>(2)?.unwrap_or_default()
-                        } else {
-                            String::new()
-                        },
+                        assistant,
                     },
                 ))
             })

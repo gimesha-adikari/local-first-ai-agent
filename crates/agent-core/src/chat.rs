@@ -95,6 +95,8 @@ pub struct Message {
     pub role: MessageRole,
     pub state: GenerationState,
     pub content: String,
+    #[serde(skip)]
+    pub labels: crate::classification::Labels,
     pub created_at: i64,
     pub stats: Option<GenerationStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +117,7 @@ pub struct PendingTurn {
     pub assistant: Message,
     pub history: ChatHistory,
     pub prompt: String,
+    pub prompt_source: crate::intelligence::ContextSource,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -127,6 +130,7 @@ pub struct ChatHistory {
 pub struct CompletedTurn {
     pub user: String,
     pub assistant: String,
+    pub provenance: Option<crate::intelligence::ContextSource>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -182,6 +186,14 @@ fn remember_turn(
         turns.push(CompletedTurn {
             user: user.content.clone(),
             assistant: assistant.content.clone(),
+            provenance: Some(crate::intelligence::ContextSource {
+                kind: crate::intelligence::SourceKind::History,
+                record: Some(assistant.id),
+                labels: crate::classification::Labels::derived(
+                    [user.labels.clone(), assistant.labels.clone()],
+                    crate::classification::HISTORY,
+                ),
+            }),
         });
     }
 }

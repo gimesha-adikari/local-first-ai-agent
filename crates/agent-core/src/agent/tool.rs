@@ -433,6 +433,21 @@ impl ToolObservation {
             }
     }
 
+    pub fn labels(&self) -> crate::classification::Labels {
+        use crate::classification::{AGENT_CONTEXT, Labels, PDF_EXCERPT, TEXT_EXCERPT};
+        let mut labels = Labels::from_source(AGENT_CONTEXT);
+        match &self.outcome {
+            ToolOutcome::Success {
+                result: ToolOutput::PdfRead { .. },
+            } => labels.insert(PDF_EXCERPT),
+            ToolOutcome::Success {
+                result: ToolOutput::FileRead { .. },
+            } => labels.insert(TEXT_EXCERPT),
+            _ => {}
+        }
+        labels
+    }
+
     pub fn outcome(&self) -> &ToolOutcome {
         &self.outcome
     }

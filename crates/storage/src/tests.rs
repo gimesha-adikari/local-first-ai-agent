@@ -424,12 +424,9 @@ fn synthetic_replay_stats() -> GenerationStats {
         excluded_turns: 0,
         output_budget: None,
         context_usage: None,
-        assistant_replay: Some(agent_core::inference::AssistantReplay {
-            prompt_fingerprint: 42,
-            generated: vec![13, 17],
-            utf8_tail: vec![0xe2, 0x82],
-            excluded_turns: 0,
-        }),
+        assistant_replay: Some(agent_core::inference::ResumeState::encode(&serde_json::json!({
+            "prompt_fingerprint": 42, "generated": [13, 17], "utf8_tail": [226, 130], "excluded_turns": 0,
+        })).unwrap()),
     }
 }
 
@@ -500,7 +497,10 @@ fn continuation_reopens_same_attempt_and_retains_checkpoint_on_restart() {
     assert!(plan.turn.user.is_none());
     assert!(plan.settings.enable_thinking);
     assert!(plan.turn.assistant.content.ends_with("```rust\n"));
-    assert_eq!(plan.replay.utf8_tail, vec![0xe2, 0x82]);
+    assert_eq!(
+        plan.replay.decode::<serde_json::Value>().unwrap()["utf8_tail"],
+        serde_json::json!([226, 130])
+    );
     assert!(
         store
             .begin_continuation(id, assistant, model.id, &cancellation)
@@ -776,3 +776,77 @@ mod relevance_tests;
 
 #[path = "model_tests.rs"]
 mod model_tests;
+
+#[test]
+fn schema_eleven_context_and_memory_reload_with_conservative_labels() {
+    use agent_core::classification::{
+        DataClasses, HISTORY, LIBRARY, MEMORY, MODEL_OUTPUT, Sensitivity, USER_INPUT,
+    };
+
+    let database = TestDatabase::new();
+    let mut store = database.open();
+    let conversation = store.create().unwrap().id;
+    let turn = store
+        .begin_chat_with_context(
+            conversation,
+            TurnAction::Send("legacy question".into()),
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    store
+        .finish(
+            turn.assistant.id,
+            "legacy answer",
+            GenerationState::Complete,
+            None,
+        )
+        .unwrap();
+    let memory = store.create_memory("legacy personal note").unwrap();
+    // Recreate the immediately preceding schema with genuine pre-03-B records.
+    store
+        .connection
+        .execute_batch(
+            "DROP TABLE intelligence_receipts;
+         ALTER TABLE messages DROP COLUMN classification;
+         PRAGMA user_version=11;",
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = database.open();
+    let saved = store.get(conversation).unwrap();
+    assert_eq!(saved.messages[0].content, "legacy question");
+    assert_eq!(saved.messages[1].content, "legacy answer");
+    for class in [HISTORY, USER_INPUT] {
+        assert!(saved.messages[0].labels.contains(class));
+    }
+    for class in [HISTORY, LIBRARY, MEMORY, MODEL_OUTPUT] {
+        assert!(saved.messages[1].labels.contains(class));
+        assert_eq!(
+            DataClasses::default().sensitivity(class.id),
+            Some(Sensitivity::Personal)
+        );
+    }
+    assert_eq!(store.list_memories("", None, 20).unwrap()[0].id, memory.id);
+    assert!(
+        store.list_memories("", None, 20).unwrap()[0]
+            .labels()
+            .contains(MEMORY)
+    );
+    assert!(
+        store
+            .intelligence_receipts(turn.assistant.id)
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE messages SET classification=?1 WHERE id=?2",
+            params!["[\"unknown.class/1\"]", turn.assistant.id],
+        )
+        .unwrap();
+    assert!(store.get(conversation).is_err());
+    store.delete(conversation).unwrap();
+}

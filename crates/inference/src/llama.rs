@@ -7,9 +7,9 @@ use std::{
 use agent_core::agent::{DecisionRequest, ScopeKind, ToolId};
 use agent_core::chat::{MessageRole, PromptMessage, fit_context};
 use agent_core::inference::{
-    AssistantReplay, Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats,
-    InferenceError, InferenceProvider, MAX_CHAT_ATTEMPT_TOKENS, ModelConfig, ModelInfo,
-    OutputBudget, Result, TextDelta,
+    Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats, InferenceError,
+    InferenceProvider, MAX_CHAT_ATTEMPT_TOKENS, ModelConfig, ModelInfo, OutputBudget, Result,
+    ResumeState, TextDelta,
 };
 use llama_cpp_2::{
     context::params::LlamaContextParams,
@@ -166,6 +166,14 @@ impl LlamaProvider {
             ..Self::default()
         }
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NativeReplay {
+    prompt_fingerprint: u64,
+    generated: Vec<i32>,
+    utf8_tail: Vec<u8>,
+    excluded_turns: usize,
 }
 
 struct LoadedModel {
@@ -482,7 +490,12 @@ impl LoadedModel {
         }
         let vocab = self.model.vocab();
         let chat = request.chat.as_ref();
-        let replay = chat.and_then(|chat| chat.replay.as_ref());
+        let replay = chat
+            .and_then(|chat| chat.replay.as_ref())
+            .map(ResumeState::decode::<NativeReplay>)
+            .transpose()
+            .map_err(|_| replay_mismatch())?;
+        let replay = replay.as_ref();
         let measure = |messages: &[PromptMessage<'_>]| {
             let prompt = self.render_messages(messages, request.enable_thinking)?;
             let prefilled_thinking =
@@ -630,8 +643,8 @@ impl LoadedModel {
             stats.elapsed_ms = millis(started.elapsed());
             return Ok(stats);
         }
-        if let (Some(observer), Some(usage)) = (&request.context_observer, usage) {
-            observer.decoded(usage)?;
+        if let Some(observer) = &request.context_observer {
+            observer.decoded(usage.unwrap_or_default(), excluded_turns)?;
         }
         stats.prompt_tokens_per_second =
             Some(tokens.len() as f64 / prefill.elapsed().as_secs_f64().max(f64::EPSILON));
@@ -694,12 +707,15 @@ impl LoadedModel {
             && !generated.is_empty()
             && generated.len() < MAX_CHAT_ATTEMPT_TOKENS
         {
-            stats.assistant_replay = Some(AssistantReplay {
-                prompt_fingerprint: fingerprint,
-                generated,
-                utf8_tail: pending,
-                excluded_turns: stats.excluded_turns,
-            });
+            stats.assistant_replay = Some(
+                ResumeState::encode(&NativeReplay {
+                    prompt_fingerprint: fingerprint,
+                    generated,
+                    utf8_tail: pending,
+                    excluded_turns: stats.excluded_turns,
+                })
+                .map_err(|_| generation_failed())?,
+            );
         } else {
             send_text(&mut pending, true, emit)?;
         }
@@ -859,8 +875,11 @@ mod tests {
                 .unwrap();
             assert_eq!(stats.reason, FinishReason::TokenLimit);
             let restored = stats.assistant_replay.unwrap();
-            assert!(restored.generated.starts_with(&prefix.generated));
-            assert_eq!(restored.generated.len(), expected);
+            let restored_tokens = restored.decode::<NativeReplay>().unwrap().generated;
+            assert!(
+                restored_tokens.starts_with(&prefix.decode::<NativeReplay>().unwrap().generated)
+            );
+            assert_eq!(restored_tokens.len(), expected);
             assert!(reply.starts_with(&original));
             assert!(!reply[start..].starts_with(&original[..original.floor_char_boundary(64)]));
             println!(
@@ -954,6 +973,7 @@ mod tests {
         });
         long.history.turns = (0..12)
             .map(|index| CompletedTurn {
+                provenance: None,
                 user: format!("Question {index}: {}", "orchard ".repeat(200)),
                 assistant: "rainwater ".repeat(200),
             })
@@ -1238,6 +1258,7 @@ mod tests {
         // The host clears earlier turns for evidence answers. Keep the ordinary
         // poem out exactly as the host does.
         let ordinary = CompletedTurn {
+            provenance: None,
             user: "Write a four-line poem about rain".into(),
             assistant: "Soft rain falls on the quiet ground.".into(),
         };
@@ -1538,6 +1559,7 @@ mod tests {
             &mut provider,
             "What is my name and favourite colour?",
             vec![CompletedTurn {
+                provenance: None,
                 user: "My name is Ravi and my favourite colour is teal. Reply with one short sentence."
                     .into(),
                 assistant: first,

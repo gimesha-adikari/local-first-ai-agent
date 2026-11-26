@@ -120,18 +120,33 @@ pub struct GenerationRequest {
 
 pub const MAX_CHAT_ATTEMPT_TOKENS: usize = 8192;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AssistantReplay {
-    pub prompt_fingerprint: u64,
-    pub generated: Vec<i32>,
-    pub utf8_tail: Vec<u8>,
-    pub excluded_turns: usize,
+/// Opaque adapter-owned resume data. JSON is kept byte-for-byte compatible
+/// with the existing local checkpoint format. Only the originating adapter
+/// may interpret it, and it is never exposed through IPC.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct ResumeState(Box<serde_json::value::RawValue>);
+
+impl std::fmt::Debug for ResumeState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResumeState")
+    }
+}
+
+impl ResumeState {
+    pub fn encode(value: &impl Serialize) -> serde_json::Result<Self> {
+        serde_json::value::to_raw_value(value).map(Self)
+    }
+
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> serde_json::Result<T> {
+        serde_json::from_str(self.0.get())
+    }
 }
 
 #[derive(Debug)]
 pub struct ChatGeneration {
     pub adaptive: bool,
-    pub replay: Option<AssistantReplay>,
+    pub replay: Option<ResumeState>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -222,7 +237,7 @@ pub struct GenerationStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_budget: Option<OutputBudget>,
     #[serde(skip)]
-    pub assistant_replay: Option<AssistantReplay>,
+    pub assistant_replay: Option<ResumeState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<crate::chat_context::ContextUsage>,
 }

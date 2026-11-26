@@ -9,8 +9,8 @@ use agent_core::{
     agent::{DecisionRequest, DecisionResponse},
     chat::{ChatStore, ModelSettings},
     inference::{
-        AssistantReplay, Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats,
-        InferenceError, InferenceProvider, ModelConfig, ModelInfo, OutputBudget, Result, TextDelta,
+        Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats, InferenceError,
+        InferenceProvider, ModelConfig, ModelInfo, OutputBudget, Result, ResumeState, TextDelta,
     },
 };
 use serde_json::{Value, json};
@@ -57,12 +57,16 @@ impl InferenceProvider for Fixture {
             ));
         }
         let earlier = request.chat.as_ref().and_then(|chat| chat.replay.as_ref());
-        let mut generated = earlier.map_or_else(Vec::new, |replay| replay.generated.clone());
+        let mut generated: Vec<i32> =
+            earlier.map_or_else(Vec::new, |replay| replay.decode().unwrap());
         let piece = match generated.len() {
             0 => "First ",
             1 => "second ",
             _ => "stopped.",
         };
+        if let Some(observer) = &request.context_observer {
+            observer.decoded(Default::default(), 0)?;
+        }
         emit(TextDelta { text: piece.into() })?;
         generated.push(17);
         let reason = if request.max_tokens == 3 {
@@ -93,12 +97,8 @@ impl InferenceProvider for Fixture {
                 context_length: 2048,
             }),
             context_usage: None,
-            assistant_replay: (reason == FinishReason::TokenLimit).then_some(AssistantReplay {
-                prompt_fingerprint: 42,
-                generated,
-                utf8_tail: Vec::new(),
-                excluded_turns: 0,
-            }),
+            assistant_replay: (reason == FinishReason::TokenLimit)
+                .then(|| ResumeState::encode(&generated).unwrap()),
         })
     }
 

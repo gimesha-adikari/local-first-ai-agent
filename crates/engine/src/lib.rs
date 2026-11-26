@@ -25,11 +25,12 @@ use agent_core::{
     },
     inference::{Cancellation, ErrorCode, InferenceError, Result},
 };
-use inference::{InferenceWorker, Status};
+use inference::{InferenceWorker, LocalInference, Status};
 use serde::Serialize;
 use storage::SqliteStore;
 
 pub mod chat;
+mod chat_session;
 pub mod knowledge;
 pub mod models;
 pub mod network;
@@ -94,6 +95,8 @@ impl Drop for OperationGuard {
 pub struct Engine {
     platform: Arc<dyn Platform>,
     worker: Arc<InferenceWorker>,
+    adapter: LocalInference,
+    policy: Arc<policy::Policy>,
     database: Arc<Mutex<SqliteStore>>,
     database_path: PathBuf,
     operations: Arc<AtomicBool>,
@@ -123,11 +126,14 @@ impl Engine {
         database: SqliteStore,
         database_path: PathBuf,
     ) -> AgentResult<Self> {
-        let semantic = Arc::new(SemanticState::new()?);
+        let policy = Arc::new(policy::Policy::default());
+        let semantic = Arc::new(SemanticState::new(Arc::clone(&policy))?);
         let database = Arc::new(Mutex::new(database));
         semantic.restore_remembered(Arc::clone(&database));
         Ok(Self {
             platform,
+            adapter: LocalInference::new(Arc::clone(&worker)),
+            policy,
             worker,
             database,
             database_path,
@@ -168,6 +174,14 @@ impl Engine {
     /// The native inference worker, shared with the Agent runtime host.
     pub fn worker(&self) -> &Arc<InferenceWorker> {
         &self.worker
+    }
+
+    pub fn inference_adapter(&self) -> &LocalInference {
+        &self.adapter
+    }
+
+    pub fn intelligence_policy(&self) -> &Arc<policy::Policy> {
+        &self.policy
     }
 
     pub fn active_model(&self) -> Option<ModelId> {

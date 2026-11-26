@@ -362,27 +362,57 @@ impl SqliteStore {
         conversation: agent_core::chat::ConversationId,
         regenerating: bool,
     ) -> Result<Option<String>> {
+        self.previous_document_question_with_source(conversation, regenerating)
+            .map(|previous| previous.map(|(content, _)| content))
+    }
+
+    pub fn previous_document_question_with_source(
+        &self,
+        conversation: agent_core::chat::ConversationId,
+        regenerating: bool,
+    ) -> Result<Option<(String, agent_core::intelligence::ContextSource)>> {
         // Walk back over consecutive document turns, skipping revision
         // requests ("make it shorter") to reach the question they revise.
         for offset in i64::from(regenerating)..i64::from(regenerating) + 8 {
-            let previous: Option<(i64, String)> = self
+            let previous = self
                 .connection
                 .query_row(
-                    "SELECT position, content FROM messages WHERE conversation_id=?1 AND role='user'
+                    "SELECT position, content, id, classification FROM messages WHERE conversation_id=?1 AND role='user'
                      ORDER BY position DESC LIMIT 1 OFFSET ?2",
                     params![conversation, offset],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get::<_, Option<String>>(3)?)),
                 )
                 .optional()
                 .map_err(sql_error)?;
-            let Some((position, content)) = previous else {
+            let Some((position, content, id, classification)) = previous else {
                 return Ok(None);
             };
             if !self.answered_from_documents(conversation, position)? {
                 return Ok(None);
             }
             if !agent_core::chat_route::is_refinement(&content) {
-                return Ok(Some(content));
+                use agent_core::{
+                    chat::MessageRole,
+                    classification::{HISTORY, QUERY},
+                    intelligence::{ContextSource, SourceKind},
+                };
+                let mut labels = super::intelligence::classify_message(
+                    classification.as_deref(),
+                    MessageRole::User,
+                    false,
+                    false,
+                )
+                .map_err(sql_error)?;
+                labels.insert(HISTORY);
+                labels.insert(QUERY);
+                return Ok(Some((
+                    content,
+                    ContextSource {
+                        kind: SourceKind::History,
+                        record: Some(id),
+                        labels,
+                    },
+                )));
             }
         }
         Ok(None)
@@ -440,6 +470,25 @@ impl SqliteStore {
                     .map_err(|_| storage_error())
             })
             .transpose()
+    }
+
+    pub fn checkpoint_intelligence_context(
+        &mut self,
+        message: MessageId,
+        labels: &agent_core::classification::Labels,
+        context: Option<&AttemptContext>,
+        usage: ContextUsage,
+        candidates: &[KnowledgeHit],
+    ) -> Result<()> {
+        let tx = self.connection.transaction().map_err(sql_error)?;
+        super::intelligence::save_classification(&tx, message, labels)?;
+        if let Some(context) = context {
+            let mut context = context.clone();
+            context.fitted = Some(usage);
+            save_context(&tx, message, &context)?;
+            record_evidence(&tx, message, candidates, usage.sources)?;
+        }
+        tx.commit().map_err(sql_error)
     }
 
     pub fn checkpoint_chat_evidence(

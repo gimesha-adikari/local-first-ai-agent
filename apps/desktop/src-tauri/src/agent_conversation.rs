@@ -125,15 +125,22 @@ impl SessionResults {
         id: ConversationId,
         turn: MessageId,
         scopes: &[ScopeSummary],
-    ) -> Vec<Value> {
-        self.0
+    ) -> (Vec<Value>, agent_core::classification::Labels) {
+        let mut labels = agent_core::classification::Labels::default();
+        let values = self
+            .0
             .iter()
             .find(|entry| entry.link.conversation_id == id && entry.link.turn_id == turn)
             .into_iter()
             .flat_map(|entry| &entry.results)
             .filter(|result| usable(result, scopes))
-            .filter_map(model_result)
-            .collect()
+            .filter_map(|result| {
+                let value = model_result(result)?;
+                labels.inherit(&result.native.observation.labels());
+                Some(value)
+            })
+            .collect();
+        (values, labels)
     }
 }
 
@@ -209,10 +216,12 @@ pub(super) fn apply_context(
 ) {
     request.update_scopes(scopes);
     request.set_conversation_context(history.iter().map(|(id, previous)| {
-        (
-            previous.clone(),
-            cache.for_model(turn.conversation_id, *id, scopes),
-        )
+        let (values, labels) = cache.for_model(turn.conversation_id, *id, scopes);
+        let mut previous = previous.clone();
+        if let Some(source) = &mut previous.provenance {
+            source.labels.inherit(&labels);
+        }
+        (previous, values)
     }));
 }
 

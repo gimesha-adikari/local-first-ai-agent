@@ -12,8 +12,8 @@ use agent_core::{
     agent::{AgentErrorCode, AgentResult},
     chat::{ChatStore, ConversationId, GenerationState, ModelId, ModelSettings},
     inference::{
-        AssistantReplay, Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats,
-        InferenceError, InferenceProvider, ModelConfig, ModelInfo, Result, TextDelta,
+        Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats, InferenceError,
+        InferenceProvider, ModelConfig, ModelInfo, Result, ResumeState, TextDelta,
     },
     knowledge::{DocumentChunk, DocumentFormat, append_chunks},
 };
@@ -129,8 +129,14 @@ impl InferenceProvider for Scripted {
                 .as_ref()
                 .map_or_else(Vec::new, |c| c.memories.clone()),
         });
-        if let (Some(context), Some(observer)) = (&request.context, &request.context_observer) {
-            observer.decoded(context.usage())?;
+        if let Some(observer) = &request.context_observer {
+            observer.decoded(
+                request
+                    .context
+                    .as_ref()
+                    .map_or_default(|context| context.usage()),
+                0,
+            )?;
         }
         let reason = if request.prompt.contains("wait") {
             emit(TextDelta {
@@ -170,12 +176,8 @@ impl InferenceProvider for Scripted {
             tokens_per_second: 1.0,
             excluded_turns: 0,
             output_budget: None,
-            assistant_replay: (reason == FinishReason::TokenLimit).then_some(AssistantReplay {
-                prompt_fingerprint: 42,
-                generated: vec![17, 18],
-                utf8_tail: Vec::new(),
-                excluded_turns: 0,
-            }),
+            assistant_replay: (reason == FinishReason::TokenLimit)
+                .then(|| ResumeState::encode(&json!({"generated": [17, 18]})).unwrap()),
             context_usage: request.context.as_ref().map(|c| c.usage()),
         })
     }
@@ -511,6 +513,17 @@ fn stop_cancels_streaming_and_keeps_the_partial_response() {
     let saved = h.engine.get_conversation(id).unwrap().messages;
     assert_eq!(saved[1].state, GenerationState::Cancelled);
     assert_eq!(saved[1].content, "Partial");
+    let receipts = h
+        .engine
+        .store()
+        .lock()
+        .unwrap()
+        .intelligence_receipts(message.id)
+        .unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["state"], "cancelled");
+    assert_eq!(receipts[0]["external"], json!([]));
+    assert_eq!(receipts[0]["used"][0]["kind"], "prompt");
     // The gate and cancellation slot are released for the next turn.
     assert!(!h.engine.stop_chat().unwrap());
     h.send(id, "Hello", json!({})).0.unwrap();
@@ -1062,4 +1075,91 @@ fn leases_from_another_engine_are_rejected_before_any_work() {
         // The foreign lease was consumed and released; both gates are free.
         assert!(a.engine.reserve().is_ok() && b.engine.reserve().is_ok());
     }
+}
+
+#[test]
+fn adapter_discovery_and_receipt_follow_fitted_knowledge_and_memory() {
+    use agent_core::{
+        capability::{GENERATE, Locality},
+        classification::{LIBRARY, MEMORY, MODEL_OUTPUT, SYSTEM_TEXT, TEXT_EXCERPT, USER_INPUT},
+    };
+
+    let h = harness();
+    assert!(h.engine.inference_adapter().discover().unwrap().is_empty());
+    h.load();
+    let offers = h.engine.inference_adapter().discover().unwrap();
+    assert!(offers.iter().any(|offer| offer.capability == GENERATE
+        && offer.streaming
+        && offer.locality == Locality::OnDevice));
+
+    let document = h.document(
+        "networking.txt",
+        "The backend port is 8080 for the synthetic server.",
+    );
+    let memory = {
+        let mut store = h.engine.store().lock().unwrap();
+        store.set_memory_enabled(true).unwrap();
+        store
+            .create_memory("The backend port preference is synthetic-private-memory.")
+            .unwrap()
+    };
+    let conversation = h.conversation();
+    let earlier = h
+        .send(conversation, "Write a poem about rain", json!({}))
+        .0
+        .unwrap();
+    let message = h
+        .send(
+            conversation,
+            "Which backend port is documented?",
+            knowledge(document, "auto"),
+        )
+        .0
+        .unwrap();
+
+    let seen = h.script.seen().pop().unwrap();
+    assert_eq!(seen.history_turns, 0);
+    assert_eq!(seen.memories.len(), 1);
+    assert_eq!(seen.evidence.unwrap().len(), 1);
+    let db = h.engine.store().lock().unwrap();
+    let saved = db.get(conversation).unwrap();
+    assert_eq!(saved.messages.last().unwrap().labels, message.labels);
+    for class in [
+        LIBRARY,
+        MEMORY,
+        TEXT_EXCERPT,
+        USER_INPUT,
+        MODEL_OUTPUT,
+        SYSTEM_TEXT,
+    ] {
+        assert!(message.labels.contains(class), "missing {}", class.id);
+    }
+    let records = db.intelligence_receipts(message.id).unwrap();
+    let [receipt] = records.as_slice() else {
+        panic!("expected one terminal receipt")
+    };
+    assert_eq!(receipt["provider"]["id"], "local.llama-cpp/1");
+    assert_eq!(receipt["provider"]["locality"], "on_device");
+    assert_eq!(receipt["local_authorization"], "builtin.chat/1");
+    assert_eq!(receipt["application_retention"], "saved_locally");
+    assert_eq!(receipt["external"], json!([]));
+    let used = receipt["used"].as_array().unwrap();
+    assert!(
+        used.iter()
+            .any(|source| source["kind"] == "knowledge" && source["record"] == document)
+    );
+    assert!(
+        used.iter()
+            .any(|source| source["kind"] == "memory" && source["record"] == memory.id)
+    );
+    assert!(
+        receipt["withheld"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["kind"] == "history" && source["record"] == earlier.id)
+    );
+    let metadata = serde_json::to_string(receipt).unwrap();
+    assert!(!metadata.contains("synthetic-private-memory"));
+    assert!(!metadata.contains("Which backend port"));
 }

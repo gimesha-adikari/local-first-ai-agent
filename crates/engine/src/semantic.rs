@@ -11,6 +11,8 @@ use std::{
 
 use agent_core::{
     agent::{AgentError, AgentErrorCode, AgentResult},
+    capability::{EMBED, RETRIEVE, Retention},
+    classification::{Classified, EMBEDDING, LIBRARY, Labels, QUERY, USER_INPUT},
     inference::Cancellation,
     knowledge::knowledge_limit,
     semantic::{BGE_KEY, BGE_SHA256, CONTEXT_TOKENS, DIMENSIONS, MAX_DOCUMENT_WINDOWS, UnitVector},
@@ -23,12 +25,16 @@ use storage::{
     semantic::{IndexCoverage, RetrievalMode, RetrievalResults},
 };
 
-use crate::{Engine, OperationGuard};
+use crate::{
+    Engine, OperationGuard,
+    policy::{Denial, Operation, Permission, Policy, Session},
+};
 
 const INDEX_DEADLINE: Duration = Duration::from_secs(300);
 const QUERY_DEADLINE: Duration = Duration::from_secs(15);
 
 pub(crate) struct SemanticState {
+    policy: Arc<Policy>,
     worker: EmbeddingWorker,
     loaded: Arc<AtomicBool>,
     latest: Mutex<Option<Arc<IndexJob>>>,
@@ -58,8 +64,9 @@ pub enum RestoreState {
 }
 
 impl SemanticState {
-    pub(crate) fn new() -> AgentResult<Self> {
+    pub(crate) fn new(policy: Arc<Policy>) -> AgentResult<Self> {
         Ok(Self {
+            policy,
             worker: EmbeddingWorker::spawn()?,
             loaded: Arc::new(AtomicBool::new(false)),
             latest: Mutex::new(None),
@@ -120,15 +127,21 @@ impl SemanticState {
     // subsequent native generation.
     pub(crate) async fn embed_chat_query(
         &self,
-        query: String,
+        query: Classified<String>,
         cancellation: Cancellation,
-    ) -> AgentResult<UnitVector> {
+    ) -> AgentResult<Classified<UnitVector>> {
         if !self.loaded.load(Ordering::Acquire) {
             return Err(unavailable());
         }
+        let policy = Arc::clone(&self.policy);
         self.worker
             .submit(move |provider| {
-                embed_query(provider, &query, &cancellation.with_timeout(QUERY_DEADLINE))
+                embed_query(
+                    provider,
+                    &policy,
+                    query,
+                    &cancellation.with_timeout(QUERY_DEADLINE),
+                )
             })?
             .await
             .map_err(|_| unavailable())?
@@ -245,7 +258,7 @@ fn model_status(state: &SemanticState) -> EmbeddingModelStatus {
             .lock()
             .map_or(RestoreState::Failed, |restore| *restore),
         // The pinned local embedding runtime is built and verified on Linux.
-        supported: cfg!(target_os = "linux"),
+        supported: inference::embedding::supported(),
         available: state.loaded.load(Ordering::Acquire),
         name: "bge-small-en-v1.5-f16",
         sha256: BGE_SHA256,
@@ -264,7 +277,7 @@ impl Engine {
     /// Reserve the operation gate for choosing an embedding model. The host
     /// holds the lease while its native picker is open.
     pub fn begin_embedding_selection(&self) -> AgentResult<OperationGuard> {
-        if !cfg!(target_os = "linux") {
+        if !inference::embedding::supported() {
             return Err(AgentError::new(
                 AgentErrorCode::UnsupportedPlatform,
                 "Embedding model loading is supported on Linux.",
@@ -373,8 +386,9 @@ impl Engine {
         let database = Arc::clone(&self.database);
         let background_job = Arc::clone(&job);
         let worker_job = Arc::clone(&job);
+        let policy = Arc::clone(&self.policy);
         let pending = state.worker.submit(move |provider| {
-            let result = run_index(provider, &database, document_id, &worker_job);
+            let result = run_index(provider, &policy, &database, document_id, &worker_job);
             worker_job.finish(result, Some(lease));
             Ok(())
         })?;
@@ -415,6 +429,7 @@ impl Engine {
         mode: RetrievalMode,
     ) -> AgentResult<RetrievalResults> {
         request.validate()?;
+        authorize_retrieval(&self.policy)?;
         if mode == RetrievalMode::Keyword {
             return self
                 .with_store(move |db| db.retrieve_knowledge(&request, mode, BGE_KEY, None))
@@ -425,11 +440,12 @@ impl Engine {
         if !self.semantic.loaded.load(Ordering::Acquire) {
             return Err(unavailable());
         }
+        let policy = Arc::clone(&self.policy);
         self.semantic
             .worker
             .submit(move |provider| {
                 let _lease = lease;
-                run_retrieval(provider, &database, &request, mode)
+                run_retrieval(provider, &policy, &database, &request, mode)
             })?
             .await
             .map_err(|_| unavailable())?
@@ -447,30 +463,96 @@ impl Engine {
 
 fn run_retrieval(
     provider: &BgeProvider,
+    policy: &Policy,
     database: &Mutex<SqliteStore>,
     request: &KnowledgeSearch,
     mode: RetrievalMode,
 ) -> AgentResult<RetrievalResults> {
     let deadline = Cancellation::default().with_timeout(QUERY_DEADLINE);
-    let vector = embed_query(provider, &request.query, &deadline)?;
+    let query =
+        Classified::from_source(request.query.as_str(), USER_INPUT).map(QUERY, str::to_owned);
+    let vector = embed_query(provider, policy, query, &deadline)?;
     let db = database.lock().map_err(|_| storage_error())?;
     check(&deadline)?;
-    let result = db.retrieve_knowledge(request, mode, BGE_KEY, Some(&vector))?;
+    let result = db.retrieve_knowledge(request, mode, BGE_KEY, Some(vector.value()))?;
     check(&deadline)?;
     Ok(result)
 }
 
+pub(crate) fn authorize_retrieval(policy: &Policy) -> AgentResult<()> {
+    let labels = Labels::derived(
+        [
+            Labels::from_source(USER_INPUT),
+            Labels::from_source(LIBRARY),
+        ],
+        QUERY,
+    );
+    let operation = Operation::local(
+        &Session::new(Cancellation::default()),
+        RETRIEVE,
+        "retrieval",
+        labels,
+        Retention::Session,
+    );
+    policy
+        .authorize_local(Permission::Process, &operation)
+        .map_err(semantic_policy_error)?;
+    Ok(())
+}
+
+fn embedding_operation(
+    cancellation: &Cancellation,
+    purpose: &'static str,
+    labels: Labels,
+    retention: Retention,
+) -> Operation {
+    Operation::local(
+        &Session::new(cancellation.clone()),
+        EMBED,
+        purpose,
+        labels,
+        retention,
+    )
+}
+
+fn semantic_policy_error(denial: Denial) -> AgentError {
+    if denial == Denial::Cancelled {
+        return AgentError::new(
+            AgentErrorCode::Cancelled,
+            "The knowledge operation was cancelled.",
+        );
+    }
+    AgentError::new(
+        AgentErrorCode::ToolFailed,
+        "The intelligence policy denied this knowledge operation.",
+    )
+}
+
 fn embed_query(
     provider: &BgeProvider,
-    query: &str,
+    policy: &Policy,
+    query: Classified<String>,
     cancellation: &Cancellation,
-) -> AgentResult<UnitVector> {
+) -> AgentResult<Classified<UnitVector>> {
     check(cancellation)?;
-    provider.session()?.query(query, || check(cancellation))
+    let operation = embedding_operation(
+        cancellation,
+        "query",
+        query.labels().clone(),
+        Retention::Session,
+    );
+    policy
+        .authorize_local(Permission::Process, &operation)
+        .map_err(semantic_policy_error)?;
+    let vector = provider
+        .session()?
+        .query(query.value(), || check(cancellation))?;
+    Ok(query.map(EMBEDDING, |_| vector))
 }
 
 fn run_index(
     provider: &BgeProvider,
+    policy: &Policy,
     database: &Mutex<SqliteStore>,
     document_id: i64,
     job: &IndexJob,
@@ -482,6 +564,14 @@ fn run_index(
         .lock()
         .map_err(|_| storage_error())?
         .embedding_snapshot(document_id)?;
+    let labels = Labels::derived(
+        snapshot.chunks.iter().map(|chunk| chunk.labels()),
+        EMBEDDING,
+    );
+    let index = embedding_operation(&deadline, "index", labels, Retention::SavedLocally);
+    policy
+        .authorize_local(Permission::Process, &index)
+        .map_err(semantic_policy_error)?;
     job.progress()?.total_chunks = snapshot.chunks.len();
     let mut session = provider.session()?;
     let mut embeddings = Vec::with_capacity(snapshot.chunks.len());
@@ -499,6 +589,10 @@ fn run_index(
         .lock()
         .map_err(|_| storage_error())?
         .install_embeddings(&snapshot, BGE_KEY, &embeddings, checkpoint, || {
+            check(&deadline)?;
+            policy
+                .authorize_local(Permission::Retain, &index)
+                .map_err(semantic_policy_error)?;
             job.begin_commit(&deadline)
         })
 }

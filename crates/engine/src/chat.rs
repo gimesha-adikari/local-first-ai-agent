@@ -10,25 +10,39 @@ use std::{
 
 use agent_core::{
     agent::{AgentError, AgentErrorCode},
-    chat::{ChatStore, ConversationId, GenerationState, Message, MessageId, ModelId, TurnAction},
+    capability::{Generate, Invocation, Invoke},
+    chat::{
+        ChatHistory, ChatStore, ConversationId, GenerationState, Message, MessageId, ModelId,
+        PendingTurn, TurnAction,
+    },
     chat_context::{
         AttemptContext, ChatContext, ChatIntent, ContextObserver, EvidenceTask, Grounding,
         no_evidence_answer,
     },
     chat_route::{RoutePlan, route, routed_question},
+    classification::{
+        Classified, HISTORY, Labels, MEMORY, MODEL_OUTPUT, QUERY, SYSTEM_TEXT, USER_INPUT,
+    },
     inference::{
         Cancellation, ErrorCode, GenerationRequest, GenerationStats, InferenceError, Result,
     },
+    intelligence::{ContextSource, SessionState, SourceKind},
     knowledge::{MAX_DOCUMENT_ID, MAX_DOCUMENTS},
     semantic::{BGE_KEY, UnitVector},
 };
-use inference::{InferenceWorker, Pending, Phase};
+use inference::{LocalInference, Pending, Phase};
 use serde::{Deserialize, Serialize};
 use storage::{
     SqliteStore, chat_context::KnowledgeCoverage, knowledge::KnowledgeHit, semantic::RetrievalMode,
 };
 
-use crate::{Engine, OperationGuard, Platform, database, semantic::SemanticState};
+use crate::{
+    Engine, OperationGuard, Platform,
+    chat_session::{Candidates, ChatSession},
+    database,
+    policy::Policy,
+    semantic::SemanticState,
+};
 
 /// Events streamed to the surface that started a Chat turn.
 #[derive(Serialize)]
@@ -328,13 +342,15 @@ struct StreamContext {
     cancellation: Cancellation,
     sources: Vec<KnowledgeHit>,
     coverage: Option<KnowledgeCoverage>,
+    candidates: Candidates,
 }
 
 /// Everything a detached Chat turn needs, shared with the engine.
 #[derive(Clone)]
 struct ChatRuntime {
     platform: Arc<dyn Platform>,
-    worker: Arc<InferenceWorker>,
+    adapter: LocalInference,
+    policy: Arc<Policy>,
     database: Arc<Mutex<SqliteStore>>,
     semantic: Arc<SemanticState>,
 }
@@ -386,7 +402,8 @@ impl Engine {
     fn chat_runtime(&self) -> ChatRuntime {
         ChatRuntime {
             platform: Arc::clone(&self.platform),
-            worker: Arc::clone(&self.worker),
+            adapter: self.adapter.clone(),
+            policy: Arc::clone(&self.policy),
             database: Arc::clone(&self.database),
             semantic: Arc::clone(&self.semantic),
         }
@@ -477,7 +494,7 @@ impl ChatRuntime {
     ) -> Result<Message> {
         let model_id = model_id
             .ok_or_else(|| InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first."))?;
-        let status = self.worker.status()?;
+        let status = self.adapter.status()?;
         if status.phase != Phase::Ready {
             return Err(InferenceError::new(
                 ErrorCode::Busy,
@@ -518,9 +535,15 @@ impl ChatRuntime {
         let plan = match &knowledge {
             Some(selection) => {
                 selection.validate()?;
-                previous = database(&self.database)?
-                    .previous_document_question(id, matches!(action, TurnAction::Regenerate))?;
-                Some(route(&question, previous.as_deref(), selection.grounding))
+                previous = database(&self.database)?.previous_document_question_with_source(
+                    id,
+                    matches!(action, TurnAction::Regenerate),
+                )?;
+                Some(route(
+                    &question,
+                    previous.as_ref().map(|(question, _)| question.as_str()),
+                    selection.grounding,
+                ))
             }
             None => None,
         };
@@ -529,19 +552,36 @@ impl ChatRuntime {
         let prompt = plan
             .as_ref()
             .filter(|plan| plan.refinement.is_some())
-            .map(|plan| routed_question(plan, &question, previous.as_deref()));
+            .map(|plan| {
+                routed_question(
+                    plan,
+                    &question,
+                    previous.as_ref().map(|(question, _)| question.as_str()),
+                )
+            });
         // Only questions are ranked against the request. Searches and overviews
         // read the selected documents directly and never need the dense model.
         let query = plan
             .as_ref()
             .filter(|plan| plan.intent == ChatIntent::Question)
             .and_then(|plan| retrieval_query(&plan.query));
+        if query.is_some()
+            || plan
+                .as_ref()
+                .is_some_and(|plan| plan.intent != ChatIntent::General)
+        {
+            crate::semantic::authorize_retrieval(&self.policy).map_err(retrieval_error)?;
+        }
         let mut requested_mode = None;
         let vector = match (&knowledge, &query) {
             (Some(selection), Some(query)) if selection.mode != RetrievalMode::Keyword => {
                 match self
                     .semantic
-                    .embed_chat_query(query.clone(), cancellation.clone())
+                    .embed_chat_query(
+                        Classified::from_source(query.clone(), USER_INPUT)
+                            .map(QUERY, |value| value),
+                        cancellation.clone(),
+                    )
                     .await
                 {
                     Ok(vector) => Some(vector),
@@ -560,7 +600,7 @@ impl ChatRuntime {
         let model_name = status.model.map(|model| model.file_name);
         let store = Arc::clone(&self.database);
         let preparation = cancellation.clone();
-        let (mut turn, context, sources, coverage, deterministic) = self
+        let (mut turn, context, sources, memories, coverage, deterministic) = self
             .blocking(move || {
                 let mut db = database(&store)?;
                 check_chat_cancellation(&preparation)?;
@@ -571,7 +611,7 @@ impl ChatRuntime {
                             &selection,
                             &plan,
                             query.as_deref(),
-                            vector.as_ref(),
+                            vector.as_ref().map(Classified::value),
                             requested_mode,
                         )
                         .map_err(retrieval_error)?,
@@ -596,12 +636,20 @@ impl ChatRuntime {
                 let memories = if strict || deterministic.is_some() {
                     Vec::new()
                 } else {
-                    db.relevant_memories(&question)?
+                    db.relevant_memory_records(&question)?
                 };
+                let memory_sources = memories
+                    .iter()
+                    .map(|memory| ContextSource {
+                        kind: SourceKind::Memory,
+                        record: Some(memory.id),
+                        labels: memory.labels(),
+                    })
+                    .collect();
                 let context = (grounded || !memories.is_empty()).then(|| ChatContext {
                     evidence: grounded
                         .then(|| sources.iter().map(|hit| hit.text.clone()).collect()),
-                    memories,
+                    memories: memories.into_iter().map(|memory| memory.content).collect(),
                     task,
                 });
                 check_chat_cancellation(&preparation)?;
@@ -635,18 +683,58 @@ impl ChatRuntime {
                         settings,
                     )?,
                 };
-                Ok((turn, context, sources, coverage, deterministic))
+                Ok((
+                    turn,
+                    context,
+                    sources,
+                    memory_sources,
+                    coverage,
+                    deterministic,
+                ))
             })
             .await
             .ok_or_else(|| {
                 InferenceError::new(ErrorCode::WorkerStopped, "Chat preparation stopped.")
             })??;
         if let Some(text) = deterministic {
-            return self.finish_without_generation(turn, &events, coverage, text);
+            return self.finish_without_generation(turn, &events, coverage, text, cancellation);
         }
+        let mut candidates = context_candidates(&turn, false);
         if let Some(prompt) = prompt {
             turn.prompt = prompt;
+            if let Some((_, source)) = previous {
+                candidates.required.push(source);
+            }
         }
+        if strict
+            && turn
+                .assistant
+                .context
+                .as_ref()
+                .is_some_and(|context| context.memory_enabled == Some(true))
+        {
+            candidates.withheld.push(ContextSource {
+                kind: SourceKind::Memory,
+                record: None,
+                labels: Labels::from_source(MEMORY),
+            });
+        }
+        if context.is_some() {
+            candidates.required.push(ContextSource {
+                kind: SourceKind::SystemPrompt,
+                record: None,
+                labels: Labels::from_source(SYSTEM_TEXT),
+            });
+        }
+        candidates.knowledge = sources
+            .iter()
+            .map(|hit| ContextSource {
+                kind: SourceKind::Knowledge,
+                record: Some(hit.document_id),
+                labels: hit.source.labels(),
+            })
+            .collect();
+        candidates.memories = memories;
         // Evidence answers see no earlier turns: ordinary answers in history must
         // never stand in for documents, and contextual answers are already omitted.
         if context
@@ -654,6 +742,7 @@ impl ChatRuntime {
             .is_some_and(|context| context.evidence.is_some())
         {
             turn.history.turns.clear();
+            candidates.withheld.append(&mut candidates.history);
         }
         let mut request = settings.request(
             std::mem::take(&mut turn.prompt),
@@ -673,6 +762,7 @@ impl ChatRuntime {
                 cancellation,
                 sources,
                 coverage,
+                candidates,
             },
         )
         .await
@@ -685,9 +775,32 @@ impl ChatRuntime {
         events: &ChatEvents,
         coverage: Option<KnowledgeCoverage>,
         text: String,
+        cancellation: Cancellation,
     ) -> Result<Message> {
+        let mut candidates = context_candidates(&turn, false);
+        candidates.required.truncate(1);
+        candidates.withheld.append(&mut candidates.history);
+        let mut session = ChatSession::new(candidates, cancellation, SYSTEM_TEXT);
         let mut assistant = turn.assistant;
         let id = assistant.id;
+        if let Err(error) = session.authorize(&self.policy, None) {
+            let state = if error.code == ErrorCode::Cancelled {
+                GenerationState::Cancelled
+            } else {
+                GenerationState::Failed
+            };
+            let receipt = session.receipt(
+                if state == GenerationState::Cancelled {
+                    SessionState::Cancelled
+                } else {
+                    SessionState::Failed
+                },
+                None,
+            );
+            database(&self.database)?.finish_intelligence_chat(id, "", state, None, &receipt)?;
+            return Err(error);
+        }
+        session.fitted(Default::default(), 0)?;
         if let Some(context) = assistant.context.clone() {
             database(&self.database)?.checkpoint_chat_evidence(
                 id,
@@ -715,7 +828,9 @@ impl ChatRuntime {
             },
         );
         let mut db = database(&self.database)?;
-        db.finish(id, &text, GenerationState::Complete, None)?;
+        let receipt = session.receipt(SessionState::Completed, None);
+        db.finish_intelligence_chat(id, &text, GenerationState::Complete, None, &receipt)?;
+        assistant.labels = receipt.output_labels;
         assistant.content = text;
         assistant.state = GenerationState::Complete;
         if assistant.context.is_some() {
@@ -736,15 +851,32 @@ impl ChatRuntime {
             cancellation,
             sources,
             coverage,
+            candidates,
         } = context;
         let mut assistant = turn.assistant;
         let message_id = assistant.id;
-        if let Some(context) = assistant.context.clone() {
-            let store = Arc::clone(&self.database);
-            request.context_observer = Some(ContextObserver::new(move |usage| {
-                database(&store)?.checkpoint_chat_evidence(message_id, &context, usage, &sources)
-            }));
-        }
+        let session = Arc::new(Mutex::new(Some(ChatSession::new(
+            candidates,
+            cancellation.clone(),
+            MODEL_OUTPUT,
+        ))));
+        let store = Arc::clone(&self.database);
+        let context = assistant.context.clone();
+        let fitted = Arc::clone(&session);
+        request.context_observer = Some(ContextObserver::new(move |usage, excluded_history| {
+            let mut session = session_lock(&fitted)?;
+            let labels = session
+                .as_mut()
+                .ok_or_else(session_error)?
+                .fitted(usage, excluded_history)?;
+            database(&store)?.checkpoint_intelligence_context(
+                message_id,
+                labels,
+                context.as_deref(),
+                usage,
+                &sources,
+            )
+        }));
         let transcript = Arc::new(Mutex::new(Transcript {
             text: assistant.content.clone(),
             checkpoint_at: Instant::now(),
@@ -757,9 +889,24 @@ impl ChatRuntime {
             // hold back deltas until the initial message has been sent.
             let _first_event = transcript_lock(&transcript)?;
             let deltas = Arc::clone(&events);
-            let pending =
-                self.worker
-                    .generate_with_cancellation(request, cancellation, move |delta| {
+            let stream_session = Arc::clone(&session);
+            let pending = self.adapter.offer::<Generate>().and_then(|offer| {
+                let offer = offer.ok_or_else(|| {
+                    InferenceError::new(ErrorCode::NoModel, "Load a GGUF model first.")
+                })?;
+                session_lock(&session)?
+                    .as_mut()
+                    .ok_or_else(session_error)?
+                    .authorize(&self.policy, Some(offer))?;
+                let pending = self.adapter.invoke(
+                    Invocation::<Generate>::new(request, cancellation),
+                    move |delta| {
+                        if !session_lock(&stream_session)?
+                            .as_ref()
+                            .is_some_and(ChatSession::is_decoded)
+                        {
+                            return Err(session_error());
+                        }
                         transcript_lock(&buffer)?.push(&delta.text, &db, message_id)?;
                         deliver(
                             &deltas,
@@ -769,7 +916,14 @@ impl ChatRuntime {
                             },
                         );
                         Ok(())
-                    });
+                    },
+                )?;
+                session_lock(&session)?
+                    .as_mut()
+                    .ok_or_else(session_error)?
+                    .submitted(offer);
+                Ok(pending)
+            });
             if pending.is_ok() {
                 if let Some(coverage) = coverage {
                     deliver(&events, ChatEvent::Knowledge { coverage });
@@ -789,6 +943,8 @@ impl ChatRuntime {
             Err(error) => Err(error),
         };
         let content = std::mem::take(&mut transcript_lock(&transcript)?.text);
+        let session = session_lock(&session)?.take().ok_or_else(session_error)?;
+        let invocation_stats = generated.as_ref().ok().cloned();
         let generated = match generated {
             Ok(mut stats) => {
                 if let Some(prior) = &previous {
@@ -804,19 +960,41 @@ impl ChatRuntime {
                 } else {
                     (GenerationState::Failed, None)
                 };
-                database(&self.database)?.finish(message_id, &content, state_after, stats)?;
+                let persisted = if error.code == ErrorCode::Cancelled && previous.is_none() {
+                    GenerationState::Cancelled
+                } else {
+                    state_after
+                };
+                let receipt = session.receipt(
+                    if error.code == ErrorCode::Cancelled {
+                        SessionState::Cancelled
+                    } else {
+                        SessionState::Failed
+                    },
+                    None,
+                );
+                database(&self.database)?
+                    .finish_intelligence_chat(message_id, &content, persisted, stats, &receipt)?;
                 return Err(error);
             }
         };
         assistant.content = content;
         assistant.state = GenerationState::from_output(generated.reason, &assistant.content);
         let mut db = database(&self.database)?;
-        db.finish(
+        let terminal = if generated.reason == agent_core::inference::FinishReason::Cancelled {
+            SessionState::Cancelled
+        } else {
+            SessionState::Completed
+        };
+        let receipt = session.receipt(terminal, invocation_stats.as_ref());
+        db.finish_intelligence_chat(
             message_id,
             &assistant.content,
             assistant.state,
             Some(&generated),
+            &receipt,
         )?;
+        assistant.labels = receipt.output_labels;
         if assistant.context.is_some() {
             assistant.context = db.chat_attempt_context(message_id)?.map(Box::new);
         }
@@ -846,7 +1024,7 @@ impl ChatRuntime {
                 "Load the original model to continue this response.",
             )
         })?;
-        let status = self.worker.status()?;
+        let status = self.adapter.status()?;
         if status.phase != Phase::Ready {
             return Err(InferenceError::new(
                 ErrorCode::Busy,
@@ -861,6 +1039,7 @@ impl ChatRuntime {
                 saved_limit,
             )
         };
+        let candidates = context_candidates(&plan.turn, true);
         let mut request = plan.settings.request(
             std::mem::take(&mut plan.turn.prompt),
             std::mem::take(&mut plan.turn.history),
@@ -880,9 +1059,62 @@ impl ChatRuntime {
                 cancellation,
                 sources: Vec::new(),
                 coverage: None,
+                candidates,
             },
         )
         .await
+    }
+}
+
+fn session_error() -> InferenceError {
+    InferenceError::new(
+        ErrorCode::GenerationFailed,
+        "The fitted Chat session is unavailable.",
+    )
+}
+
+fn session_lock(
+    session: &Mutex<Option<ChatSession>>,
+) -> Result<MutexGuard<'_, Option<ChatSession>>> {
+    session.lock().map_err(|_| session_error())
+}
+
+fn history_sources(history: &ChatHistory) -> Vec<ContextSource> {
+    history
+        .turns
+        .iter()
+        .map(|turn| {
+            turn.provenance.clone().unwrap_or_else(|| ContextSource {
+                kind: SourceKind::History,
+                record: None,
+                labels: Labels::from_source(HISTORY),
+            })
+        })
+        .collect()
+}
+
+fn context_candidates(turn: &PendingTurn, continuing: bool) -> Candidates {
+    let mut required = vec![turn.prompt_source.clone()];
+    if !turn.history.system.is_empty() {
+        required.push(ContextSource {
+            kind: SourceKind::SystemPrompt,
+            record: None,
+            labels: Labels::from_source(USER_INPUT),
+        });
+    }
+    if continuing {
+        required.push(ContextSource {
+            kind: SourceKind::AssistantPrefix,
+            record: Some(turn.assistant.id),
+            labels: turn.assistant.labels.clone(),
+        });
+    }
+    Candidates {
+        required,
+        history: history_sources(&turn.history),
+        knowledge: Vec::new(),
+        memories: Vec::new(),
+        withheld: Vec::new(),
     }
 }
 

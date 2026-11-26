@@ -813,6 +813,7 @@ fn real_qwen_trims_agent_context_and_rejects_an_oversized_turn() {
     request.set_conversation_context((0..12).map(|index| {
         (
             CompletedTurn {
+                provenance: None,
                 user: format!("Earlier question {index}: {}", "marigold ".repeat(300)),
                 assistant: format!("Earlier answer {index}: {}", "orchard ".repeat(300)),
             },

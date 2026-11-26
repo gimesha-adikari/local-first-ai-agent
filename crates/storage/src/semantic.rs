@@ -3,7 +3,8 @@
 pub use agent_core::chat_context::{IndexCoverage, RetrievalMode};
 use agent_core::{
     agent::{AgentError, AgentErrorCode, AgentResult},
-    knowledge::knowledge_limit,
+    classification::{EMBEDDING, Labels, QUERY, USER_INPUT},
+    knowledge::{SourceReference, knowledge_limit},
     semantic::{
         ChunkKey, EmbeddingKey, EmbeddingWindow, MAX_CHUNK_WINDOWS, MAX_DOCUMENT_WINDOWS,
         MAX_LIBRARY_WINDOWS, RETRIEVAL_CANDIDATES, UnitVector, WINDOW_OVERLAP, WINDOW_TOKENS,
@@ -54,6 +55,16 @@ pub struct RetrievalResults {
     pub hits: Vec<KnowledgeHit>,
 }
 
+impl RetrievalResults {
+    pub fn labels(&self) -> Labels {
+        Labels::derived(
+            std::iter::once(Labels::from_source(USER_INPUT))
+                .chain(self.hits.iter().map(KnowledgeHit::labels)),
+            QUERY,
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct IndexSnapshot {
     document_id: i64,
@@ -65,6 +76,13 @@ pub struct IndexSnapshot {
 pub struct IndexChunk {
     row_id: i64,
     pub text: String,
+    source: SourceReference,
+}
+
+impl IndexChunk {
+    pub fn labels(&self) -> Labels {
+        Labels::derived([self.source.labels()], EMBEDDING)
+    }
 }
 
 impl SqliteStore {
@@ -79,7 +97,7 @@ impl SqliteStore {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT c.id, k.text FROM knowledge_chunks c
+                "SELECT c.id, k.text, c.page, c.start_line, c.end_line FROM knowledge_chunks c
              JOIN knowledge_fts k ON k.rowid=c.id WHERE c.document_id=?1 ORDER BY c.ordinal",
             )
             .map_err(sql_error)?;
@@ -88,6 +106,13 @@ impl SqliteStore {
                 Ok(IndexChunk {
                     row_id: row.get(0)?,
                     text: row.get(1)?,
+                    source: match row.get(2)? {
+                        Some(page) => SourceReference::Page { page },
+                        None => SourceReference::Lines {
+                            start_line: row.get(3)?,
+                            end_line: row.get(4)?,
+                        },
+                    },
                 })
             })
             .map_err(sql_error)?

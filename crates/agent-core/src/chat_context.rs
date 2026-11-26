@@ -94,17 +94,21 @@ pub struct AttemptContext {
     pub fitted: Option<ContextUsage>,
 }
 
-pub struct ContextObserver(Box<dyn Fn(ContextUsage) -> crate::inference::Result<()> + Send>);
+pub struct ContextObserver(Box<dyn Fn(ContextUsage, usize) -> crate::inference::Result<()> + Send>);
 
 impl ContextObserver {
     pub fn new(
-        callback: impl Fn(ContextUsage) -> crate::inference::Result<()> + Send + 'static,
+        callback: impl Fn(ContextUsage, usize) -> crate::inference::Result<()> + Send + 'static,
     ) -> Self {
         Self(Box::new(callback))
     }
 
-    pub fn decoded(&self, usage: ContextUsage) -> crate::inference::Result<()> {
-        (self.0)(usage)
+    pub fn decoded(
+        &self,
+        usage: ContextUsage,
+        excluded_history: usize,
+    ) -> crate::inference::Result<()> {
+        (self.0)(usage, excluded_history)
     }
 }
 

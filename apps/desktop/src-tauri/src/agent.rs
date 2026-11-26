@@ -24,11 +24,14 @@ use agent_core::{
         StoredAudit, StoredExecution, StoredTask, StoredTaskDetail, StoredTaskEvent, TaskId,
         TaskRequest, TaskState, ToolArguments, ToolId, ToolObservation, ToolRegistry, run_task,
     },
+    capability::{AGENT_DECISION, Decide, Invocation, Invoke, Retention},
     chat::ConversationId,
+    classification::{Labels, MODEL_OUTPUT},
     inference::{Cancellation, ErrorCode, InferenceError},
 };
 use agent_tools::{NativeTools, supported_registry};
-use inference::{InferenceWorker, Pending};
+use engine::policy::{Operation, Permission, Policy, Session};
+use inference::{InferenceWorker, LocalInference, Pending};
 use serde::Serialize;
 use serde_json::Value;
 use storage::SqliteStore;
@@ -678,7 +681,9 @@ fn wait_for<T>(pending: Pending<T>) -> std::result::Result<T, InferenceError> {
 
 struct DesktopAgentHost {
     app: AppHandle,
-    worker: Arc<InferenceWorker>,
+    adapter: LocalInference,
+    policy: Arc<Policy>,
+    result_labels: Labels,
     database: Arc<Mutex<SqliteStore>>,
     session: Arc<AgentSession>,
     task_timeout_ms: u64,
@@ -717,8 +722,35 @@ impl RuntimeHost for DesktopAgentHost {
                 .map_err(|_| context_unavailable())?;
             apply_context(&mut request, turn, &self.history, &scopes, &cache);
         }
-        let pending = self.worker.decide(request, cancellation)?;
+        let operation = Operation::local(
+            &Session::new(cancellation.clone()),
+            AGENT_DECISION,
+            "agent",
+            request.input_labels(0),
+            Retention::Session,
+        );
+        self.policy
+            .authorize_local(Permission::Process, &operation)
+            .map_err(|denial| {
+                let code = if denial == engine::policy::Denial::Cancelled {
+                    if cancellation.is_deadline_elapsed() {
+                        ErrorCode::TimedOut
+                    } else {
+                        ErrorCode::Cancelled
+                    }
+                } else {
+                    ErrorCode::GenerationFailed
+                };
+                InferenceError::new(code, "The intelligence policy denied this Agent decision.")
+            })?;
+        let pending = self.adapter.invoke(
+            Invocation::<Decide>::new(request.clone(), cancellation),
+            |_| Ok(()),
+        )?;
         let response = wait_for(pending)?;
+        self.result_labels
+            .inherit(&request.input_labels(response.stats.excluded_turns));
+        self.result_labels.insert(MODEL_OUTPUT);
         let excluded = self
             .omitted_by_storage
             .saturating_add(response.stats.excluded_turns);
@@ -897,10 +929,24 @@ impl RuntimeHost for DesktopAgentHost {
         answer: Option<&str>,
     ) -> AgentResult<()> {
         let answer = answer.map(|answer| redact_scope_ids(answer.to_owned(), &self.session));
+        if answer.is_some() && self.turn.is_some() {
+            let operation = Operation::local(
+                // Completing a local store transaction must still work if
+                // Stop arrives after the bounded task produced its answer.
+                &Session::new(Cancellation::default()),
+                AGENT_DECISION,
+                "agent-answer",
+                self.result_labels.clone(),
+                Retention::SavedLocally,
+            );
+            self.policy
+                .authorize_local(Permission::Retain, &operation)
+                .map_err(|_| storage_error())?;
+        }
         self.database
             .lock()
             .map_err(|_| storage_error())?
-            .record_agent_event_with_answer(id, event, answer.as_deref())
+            .record_classified_agent_event(id, event, answer.as_deref(), Some(&self.result_labels))
     }
 
     fn proposed(&mut self, id: TaskId, call: &agent_core::agent::ValidatedCall) {
@@ -1041,7 +1087,8 @@ fn start_task(
     }
 
     let session = Arc::clone(&state.agent);
-    let worker = Arc::clone(state.engine.worker());
+    let adapter = state.engine.inference_adapter().clone();
+    let policy = Arc::clone(state.engine.intelligence_policy());
     let database = Arc::clone(state.engine.store());
     let task_prompt = prompt;
     let operation_guard = operation;
@@ -1064,7 +1111,9 @@ fn start_task(
             };
             let mut host = DesktopAgentHost {
                 app: app_handle.clone(),
-                worker,
+                adapter,
+                policy,
+                result_labels: Labels::default(),
                 database,
                 session: Arc::clone(&session),
                 task_timeout_ms: limits.task_timeout_ms,

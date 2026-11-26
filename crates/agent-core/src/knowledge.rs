@@ -40,6 +40,17 @@ pub enum SourceReference {
     Page { page: u32 },
 }
 
+impl SourceReference {
+    pub fn labels(self) -> crate::classification::Labels {
+        use crate::classification::{LIBRARY, Labels, PDF_EXCERPT, TEXT_EXCERPT};
+        let class = match self {
+            Self::Lines { .. } => TEXT_EXCERPT,
+            Self::Page { .. } => PDF_EXCERPT,
+        };
+        Labels::derived([Labels::from_source(LIBRARY)], class)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PdfCoverage {
