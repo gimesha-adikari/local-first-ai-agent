@@ -423,6 +423,7 @@ impl ChatRuntime {
                         images: Vec::new(),
                         external,
                         web: true,
+                        attachments: false,
                     },
                     target,
                     events,

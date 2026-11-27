@@ -84,6 +84,8 @@ pub(crate) struct Seen {
     pub(crate) history_turns: usize,
     pub(crate) evidence: Option<Vec<String>>,
     pub(crate) memories: Vec<String>,
+    /// Evidence instructions the adapter appends to the system prompt.
+    pub(crate) instructions: String,
 }
 
 #[derive(Clone, Default)]
@@ -130,6 +132,11 @@ impl InferenceProvider for Scripted {
                 .context
                 .as_ref()
                 .map_or_else(Vec::new, |c| c.memories.clone()),
+            instructions: request.context.as_ref().map_or_else(String::new, |c| {
+                let mut text = String::new();
+                c.append_system_instructions(&mut text);
+                text
+            }),
         });
         if let Some(observer) = &request.context_observer {
             observer.decoded(
@@ -1551,3 +1558,6 @@ fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work()
     assert_eq!(remote.code, ErrorCode::PolicyDenied);
     assert!(remote.message.contains("Local-only mode is on"));
 }
+
+#[path = "attachment_tests.rs"]
+pub(crate) mod attachment_tests;

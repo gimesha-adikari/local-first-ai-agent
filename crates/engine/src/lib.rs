@@ -29,6 +29,7 @@ use inference::{InferenceWorker, LocalInference, Status};
 use serde::Serialize;
 use storage::SqliteStore;
 
+pub mod attachments;
 pub mod chat;
 mod chat_session;
 pub mod credentials;
@@ -124,6 +125,7 @@ pub struct Engine {
     credentials: Arc<dyn CredentialSource>,
     downloads: downloads::Downloads,
     research_results: research::TransientResults,
+    attachments: Arc<attachments::AttachmentStore>,
 }
 
 #[derive(Serialize)]
@@ -193,6 +195,7 @@ impl Engine {
             credentials,
             downloads: downloads::Downloads::default(),
             research_results: research::TransientResults::default(),
+            attachments: Arc::default(),
         };
         if let Ok(settings) =
             crate::database(&engine.database).and_then(|db| db.web_research_settings())
@@ -299,6 +302,9 @@ impl Engine {
         let _operation = self.reserve()?;
         database(&self.database)?.delete(id)?;
         self.research_results.clear();
+        // Kept attachments were deleted with the conversation; temporary
+        // ones leave memory now.
+        self.attachments.purge_conversation(id);
         Ok(())
     }
 

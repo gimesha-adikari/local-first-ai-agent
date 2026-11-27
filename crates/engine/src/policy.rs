@@ -16,9 +16,10 @@ use agent_core::{
         GENERATE, IMPORT, Locality, RETRIEVE, Retention, WEB_PAGE, WEB_SEARCH,
     },
     classification::{
-        AGENT_CONTEXT, CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY,
-        MODEL_ARTIFACT, MODEL_OUTPUT, PDF_EXCERPT, PUBLIC_WEB, QUERY, SCREEN_IMAGE, SCREEN_TEXT,
-        SYSTEM_TEXT, Sensitivity, TEXT_EXCERPT, USER_INPUT,
+        AGENT_CONTEXT, ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, CLIPBOARD_TEXT, DataClasses,
+        EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY, MODEL_ARTIFACT, MODEL_OUTPUT, PDF_EXCERPT,
+        PUBLIC_WEB, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT, Sensitivity, TEXT_EXCERPT,
+        USER_INPUT,
     },
     inference::Cancellation,
 };
@@ -485,6 +486,10 @@ impl Policy {
             SYSTEM_TEXT,
             // Admitted for Chat research answers (Stage 04-C).
             PUBLIC_WEB,
+            // Admitted for Chat answers with attached files (Stage 04-D).
+            ATTACHMENT,
+            ATTACHMENT_TEXT,
+            ATTACHMENT_IMAGE,
         ];
         if labels.ids().all(|id| {
             allowed.iter().any(|class| {

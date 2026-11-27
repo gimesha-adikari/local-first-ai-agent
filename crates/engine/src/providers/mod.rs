@@ -143,6 +143,11 @@ pub(crate) fn consent(
     if operation.purpose() == "web-research" {
         allowed.push(agent_core::classification::PUBLIC_WEB);
     }
+    // Attached content is admitted only for a Chat answer whose sharing the
+    // user authorized for the message's exact attachments (Stage 04-D).
+    if operation.purpose() == "chat-attachments" {
+        allowed.extend(crate::chat::ATTACHMENT_CLASSES);
+    }
     let registry = DataClasses::new(allowed.iter().copied());
     if operation
         .labels()

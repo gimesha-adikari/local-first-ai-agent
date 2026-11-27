@@ -52,7 +52,18 @@ pub(super) struct RemoteTurn {
     /// The user separately authorized sending web evidence to this provider
     /// for this request.
     pub web: bool,
+    /// The user authorized sending this message's attachment content to
+    /// this provider for this request (Stage 04-D).
+    pub attachments: bool,
 }
+
+/// Classes of attached content, admitted only for a request whose sharing
+/// the user authorized for those exact attachments.
+pub(crate) const ATTACHMENT_CLASSES: [agent_core::classification::DataClass; 3] = [
+    agent_core::classification::ATTACHMENT,
+    agent_core::classification::ATTACHMENT_TEXT,
+    agent_core::classification::ATTACHMENT_IMAGE,
+];
 
 fn denied(message: impl Into<String>) -> InferenceError {
     InferenceError::new(ErrorCode::PolicyDenied, message)
@@ -158,6 +169,7 @@ impl ChatRuntime {
             images: attached,
             external,
             web,
+            attachments,
         } = remote;
         let (saved, destination) = target;
         let settings = saved.settings.clone();
@@ -171,6 +183,9 @@ impl ChatRuntime {
         }
         if web {
             allowed.push(agent_core::classification::PUBLIC_WEB);
+        }
+        if attachments {
+            allowed.extend(ATTACHMENT_CLASSES);
         }
         let allowed = DataClasses::new(allowed);
 
@@ -289,6 +304,8 @@ impl ChatRuntime {
                 "glance"
             } else if web {
                 "web-research"
+            } else if attachments {
+                "chat-attachments"
             } else {
                 "chat"
             },

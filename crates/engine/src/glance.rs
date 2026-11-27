@@ -576,6 +576,7 @@ impl ChatRuntime {
                             .unwrap_or_default(),
                         external: Vec::new(),
                         web: false,
+                        attachments: false,
                     },
                     target,
                     events,

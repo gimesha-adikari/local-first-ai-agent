@@ -35,7 +35,9 @@ dependencies = [
  "agent-core",
  "gio",
  "libc",
+ "png",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -1018,6 +1020,7 @@ dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
+ "getrandom 0.4.3",
  "html5ever 0.40.1",
  "httparse",
  "inference",

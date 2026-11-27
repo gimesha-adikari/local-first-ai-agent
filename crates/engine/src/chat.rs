@@ -46,6 +46,8 @@ use crate::{
     semantic::SemanticState,
 };
 
+#[path = "attachment_turn.rs"]
+mod attachment_turn;
 #[path = "glance.rs"]
 pub mod glance;
 #[path = "remote_chat.rs"]
@@ -84,6 +86,9 @@ pub trait ChatEventSink: Send + Sync + 'static {
 
 pub type ChatEvents = Arc<dyn ChatEventSink>;
 
+pub use attachment_turn::{AttachmentRequest, AttachmentSharing};
+pub(crate) use remote::ATTACHMENT_CLASSES;
+
 fn deliver(events: &ChatEvents, event: ChatEvent) {
     // A surface callback must not unwind through the transcript guard or
     // the dedicated inference worker.
@@ -100,6 +105,9 @@ pub struct ChatOptions {
     /// An explicitly authorized web research request for this message.
     #[serde(default)]
     research: Option<crate::research::ResearchOptions>,
+    /// Files attached to this message (Stage 04-D).
+    #[serde(default)]
+    attachments: Option<AttachmentRequest>,
 }
 
 #[cfg(test)]
@@ -474,6 +482,7 @@ struct ChatRuntime {
     boundary: Arc<NetworkBoundary>,
     glance_receipt: Option<glance::ReceiptSlot>,
     research_results: crate::research::TransientResults,
+    attachments: Arc<crate::attachments::AttachmentStore>,
 }
 
 impl Engine {
@@ -530,6 +539,7 @@ impl Engine {
             boundary: Arc::clone(&self.boundary),
             glance_receipt: None,
             research_results: self.research_results.clone(),
+            attachments: Arc::clone(&self.attachments),
         }
     }
 
@@ -636,6 +646,32 @@ impl ChatRuntime {
             TurnAction::Regenerate => database(&self.database)?.chat_regeneration_prompt(id)?,
         };
         GenerationRequest::new(&question).validate()?;
+        if let Some(attachments) = options.attachments.take() {
+            return self
+                .run_attachments(
+                    id,
+                    action,
+                    question,
+                    attachments,
+                    options,
+                    events,
+                    cancellation,
+                    model_id,
+                )
+                .await;
+        }
+        // An answer that used attachments is never silently regenerated
+        // without them.
+        if matches!(action, TurnAction::Regenerate)
+            && database(&self.database)?
+                .latest_attachment_turn(id, 0)?
+                .is_some()
+        {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "This answer used attachments that aren't attached now. Reattach them to regenerate it, or ask a new question.",
+            ));
+        }
         if let Some(research) = options.research.take() {
             return self
                 .run_research(
@@ -895,6 +931,7 @@ impl ChatRuntime {
                             memory_enabled: Some(memory_enabled),
                             fitted: None,
                             research: None,
+                            attachments: None,
                         },
                     )?,
                     // Ordinary Chat with documents selected keeps its routing
@@ -1018,6 +1055,7 @@ impl ChatRuntime {
                         images: Vec::new(),
                         external: Vec::new(),
                         web: false,
+                        attachments: false,
                     },
                     target,
                     events,

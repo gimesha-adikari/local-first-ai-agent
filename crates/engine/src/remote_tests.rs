@@ -1129,3 +1129,6 @@ fn local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_ac
     assert_eq!(state["localOnly"], true);
     assert_eq!(state["providers"], json!([]));
 }
+
+#[path = "attachment_remote_tests.rs"]
+mod attachment_remote_tests;
