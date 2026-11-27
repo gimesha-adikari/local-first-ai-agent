@@ -104,6 +104,7 @@ fn run_desktop_instance(
             );
             app.manage(Desktop { engine, agent });
             app.manage(panel::Panel::default());
+            panel::prewarm(app.handle());
             summon::install(app.handle(), instance);
             Ok(())
         })

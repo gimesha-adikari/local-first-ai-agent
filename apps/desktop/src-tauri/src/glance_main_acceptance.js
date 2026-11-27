@@ -58,10 +58,11 @@ void (async () => {
     const report = await panelDone;
     result.panel = report.panel;
     assert(report.panel.pass === true, `Panel fixture failed: ${report.panel.error}`);
-    assert(report.closed === true, "Escape left a panel window or session behind");
+    assert(report.closed === true, "Escape left a visible panel, a session or page content behind");
+    assert(report.reopened_fresh === true, "A new summon did not start with an empty page and a new session");
     assert(report.clipboard === "Remote fixture answer", `External clipboard owner saw ${JSON.stringify(report.clipboard)}`);
     result.steps.push(...report.panel.steps.map((step) => `panel: ${step}`));
-    result.steps.push("Escape destroyed the panel and its in-memory session; Copy reached the external clipboard");
+    result.steps.push("Escape ended the session, hid the warm panel and reloaded it empty; a new summon started fresh; Copy reached the external clipboard");
 
     const memories = await call("memory_list", { query: null, beforeId: null, limit: 10 });
     assert(memories.length === 2, `Expected one remembered result, found ${memories.length - 1}`);

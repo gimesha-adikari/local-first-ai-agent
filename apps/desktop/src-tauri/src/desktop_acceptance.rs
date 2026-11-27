@@ -830,26 +830,47 @@ fn watch_panel(panel: tauri::WebviewWindow, main: tauri::WebviewWindow) {
             break result;
         }
     };
-    // Escape dismisses the panel; its native session must be gone afterwards.
+    // Escape dismisses the panel: its session ends, the window hides and its
+    // page reloads empty. A new summon then starts a fresh session.
     let _ = panel.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))");
     let app = main.app_handle().clone();
-    let closed_by = Instant::now() + Duration::from_secs(5);
-    let closed = loop {
-        let state_cleared = app.state::<crate::panel::Panel>().is_closed();
-        if app.get_webview_window("panel").is_none() && state_cleared {
-            break true;
+    let empty_page = "JSON.stringify(!document.documentElement.dataset.glanceResult && document.getElementById('glance-source')?.value === '' && !document.querySelector('.glance-output'))";
+    let settled = |deadline: Duration, probe: &dyn Fn() -> bool| {
+        let end = Instant::now() + deadline;
+        while Instant::now() < end {
+            if probe() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
         }
-        if Instant::now() > closed_by {
-            break false;
-        }
-        thread::sleep(Duration::from_millis(50));
+        false
     };
+    let closed = settled(Duration::from_secs(5), &|| {
+        app.state::<crate::panel::Panel>().is_closed()
+            && !panel.is_visible().unwrap_or(true)
+            && eval_json(&panel, empty_page) == Some(json!(true))
+    });
+    let reopen = app.clone();
+    app.run_on_main_thread(move || {
+        crate::panel::present(&reopen, None).unwrap();
+    })
+    .unwrap();
+    let reopened_fresh = settled(Duration::from_secs(5), &|| {
+        panel.is_visible().unwrap_or(false)
+            && !app.state::<crate::panel::Panel>().is_closed()
+            && eval_json(&panel, empty_page) == Some(json!(true))
+    });
+    let _ = panel.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))");
+    let closed_again = settled(Duration::from_secs(5), &|| {
+        app.state::<crate::panel::Panel>().is_closed() && !panel.is_visible().unwrap_or(true)
+    });
     let clipboard = std::process::Command::new("xclip")
         .args(["-o", "-selection", "clipboard"])
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default();
-    let report = json!({"panel": outcome, "closed": closed, "clipboard": clipboard});
+    let report = json!({"panel": outcome, "closed": closed && closed_again,
+        "reopened_fresh": reopened_fresh, "clipboard": clipboard});
     main.eval(format!("window.__glancePanelDone({report})"))
         .unwrap();
 }

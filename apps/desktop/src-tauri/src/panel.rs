@@ -19,14 +19,34 @@ use crate::commands::Desktop;
 
 const LABEL: &str = "panel";
 
+/// The panel host. Each summon starts a session; text, answers and work
+/// belong to that session only. A window may outlive sessions only when it
+/// is kept warm, and then only hidden with a freshly reloaded page.
 #[derive(Default)]
-pub struct Panel(Mutex<Option<Arc<Glance>>>);
+pub struct Panel {
+    active: Mutex<Option<Arc<Glance>>>,
+    page: Mutex<Page>,
+}
 
-#[cfg(test)]
+/// Whether the WebView's page is known to hold no earlier session.
+#[derive(Default)]
+struct Page {
+    stale: bool,
+    pending: Option<Option<String>>,
+}
+
 impl Panel {
+    fn active(&self) -> Option<Arc<Glance>> {
+        self.active.lock().ok()?.clone()
+    }
+
+    #[cfg(test)]
     /// Whether no panel session (and so no source text or answer) remains.
     pub fn is_closed(&self) -> bool {
-        self.0.lock().map(|item| item.is_none()).unwrap_or(false)
+        self.active
+            .lock()
+            .map(|item| item.is_none())
+            .unwrap_or(false)
     }
 }
 
@@ -76,10 +96,7 @@ fn current(window: &WebviewWindow, panel: &Panel) -> Result<Arc<Glance>> {
         return Err(closed());
     }
     panel
-        .0
-        .lock()
-        .map_err(|_| closed())?
-        .clone()
+        .active()
         .filter(|glance| !glance.closed.is_cancelled())
         .ok_or_else(closed)
 }
@@ -94,14 +111,18 @@ fn raise(gtk: &gtk::ApplicationWindow, token: Option<&str>) {
     gtk.present();
 }
 
-/// Must run on the desktop main thread. An open panel keeps its current
-/// session and is raised with the new activation token. The compositor
-/// decides whether a window may take focus.
-pub fn present(app: &AppHandle, token: Option<&str>) -> tauri::Result<()> {
-    if let Some(window) = app.get_webview_window(LABEL) {
-        raise(&window.gtk_window()?, token);
-        return Ok(());
-    }
+/// Keep an empty, hidden panel loaded between uses. It has no session, so
+/// every panel command fails until a summon starts one. Measured on Xvfb
+/// (docs/stage-03-e-screen-intelligence.md): content in about 30 ms instead
+/// of about 470 ms, for about 35–80 MB of additional PSS that does not grow
+/// with use.
+const WARM: bool = true;
+
+fn warm() -> bool {
+    WARM
+}
+
+fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window =
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html?glance=1".into()))
             .title("Contextual intelligence")
@@ -125,43 +146,155 @@ pub fn present(app: &AppHandle, token: Option<&str>) -> tauri::Result<()> {
                     && url.query() == Some("glance=1")
             })
             .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+            .on_page_load(|window, payload| {
+                if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                    loaded(window.app_handle());
+                }
+            })
             .build()?;
+    let handle = app.clone();
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::CloseRequested { api, .. } if warm() => {
+            api.prevent_close();
+            end(&handle);
+        }
+        tauri::WindowEvent::Destroyed => {
+            let panel = handle.state::<Panel>();
+            if let Some(glance) = panel
+                .active
+                .lock()
+                .ok()
+                .and_then(|mut active| active.take())
+            {
+                glance.cancel();
+            }
+            if let Ok(mut page) = panel.page.lock() {
+                *page = Page::default();
+            }
+        }
+        _ => {}
+    });
+    Ok(window)
+}
+
+/// A reloaded page finished loading: it holds no earlier session, so a
+/// summon that arrived during the reload may now show it.
+fn loaded(app: &AppHandle) {
+    let pending = {
+        let panel = app.state::<Panel>();
+        let Ok(mut page) = panel.page.lock() else {
+            return;
+        };
+        page.stale = false;
+        page.pending.take()
+    };
+    if let Some(token) = pending
+        && let Some(window) = app.get_webview_window(LABEL)
+        && let Ok(gtk) = window.gtk_window()
+    {
+        raise(&gtk, token.as_deref());
+    }
+}
+
+/// Start a session unless one is open, with its 10-minute limit.
+fn begin(app: &AppHandle) {
+    let panel = app.state::<Panel>();
+    let Ok(mut active) = panel.active.lock() else {
+        return;
+    };
+    if active
+        .as_ref()
+        .is_some_and(|glance| !glance.closed.is_cancelled())
+    {
+        return;
+    }
     let glance = Arc::new(Glance {
         closed: Cancellation::default(),
         data: Mutex::default(),
     });
-    let panel = app.state::<Panel>();
-    *panel.0.lock().expect("panel lifecycle") = Some(Arc::clone(&glance));
-    let closing = Arc::clone(&glance);
-    let handle = app.clone();
-    window.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            closing.cancel();
-            if let Ok(mut active) = handle.state::<Panel>().0.lock()
-                && active
-                    .as_ref()
-                    .is_some_and(|item| Arc::ptr_eq(item, &closing))
-            {
-                active.take();
-            }
-        }
-    });
-    raise(&window.gtk_window()?, token);
+    *active = Some(Arc::clone(&glance));
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(600)).await;
-        if !glance.closed.is_cancelled() {
-            let main = handle.clone();
-            let _ = handle.run_on_main_thread(move || {
-                if !glance.closed.is_cancelled()
-                    && let Some(window) = main.get_webview_window(LABEL)
-                {
-                    glance.cancel();
-                    let _ = window.destroy();
-                }
-            });
+        if glance.closed.is_cancelled() {
+            return;
+        }
+        let main = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let current = main
+                .state::<Panel>()
+                .active()
+                .is_some_and(|item| Arc::ptr_eq(&item, &glance));
+            if current {
+                end(&main);
+            }
+        });
+    });
+}
+
+/// End the session: cancel work and clear host state. A warm panel hides
+/// and reloads, so no text survives in the WebView; otherwise the window
+/// is destroyed. Must run on the desktop main thread.
+fn end(app: &AppHandle) {
+    let panel = app.state::<Panel>();
+    if let Some(glance) = panel
+        .active
+        .lock()
+        .ok()
+        .and_then(|mut active| active.take())
+    {
+        glance.cancel();
+    }
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    if warm() {
+        if let Ok(mut page) = panel.page.lock() {
+            page.stale = true;
+            page.pending = None;
+        }
+        let _ = window.hide();
+        if window.reload().is_err() {
+            let _ = window.destroy();
+        }
+    } else {
+        let _ = window.destroy();
+    }
+}
+
+/// Load an empty, hidden panel shortly after startup (warm mode only).
+pub fn prewarm(app: &AppHandle) {
+    if !warm() {
+        return;
+    }
+    let app = app.clone();
+    gtk::glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+        if app.get_webview_window(LABEL).is_none() {
+            let _ = build(&app);
         }
     });
+}
+
+/// Must run on the desktop main thread. An open panel keeps its session and
+/// is raised with the new activation token. A warm panel whose page is still
+/// reloading is shown once the fresh page has loaded. The compositor decides
+/// whether a window may take focus.
+pub fn present(app: &AppHandle, token: Option<&str>) -> tauri::Result<()> {
+    let window = match app.get_webview_window(LABEL) {
+        Some(window) => window,
+        None => build(app)?,
+    };
+    begin(app);
+    let token = token
+        .filter(|token| token.len() <= 4096 && !token.contains('\0'))
+        .map(str::to_owned);
+    if let Ok(mut page) = app.state::<Panel>().page.lock()
+        && page.stale
+    {
+        page.pending = Some(token);
+        return Ok(());
+    }
+    raise(&window.gtk_window()?, token.as_deref());
     Ok(())
 }
 
@@ -363,8 +496,9 @@ pub fn glance_remember(
 
 #[tauri::command]
 pub fn glance_dismiss(window: WebviewWindow, pane: State<'_, Panel>) -> Result<()> {
-    current(&window, &pane)?.cancel();
-    window.destroy().map_err(|_| closed())
+    current(&window, &pane)?;
+    end(window.app_handle());
+    Ok(())
 }
 
 #[tauri::command]

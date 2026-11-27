@@ -64,11 +64,19 @@ export default function Glance() {
 
   useEffect(() => {
     let mounted = true;
-    invoke<GlanceState>("glance_state").then(value => {
-      if (mounted) setState(value);
-    }).catch(e => { if (mounted) setError(errorMessage(e)); });
-    editor.current?.focus();
-    return () => { mounted = false; activeRun.current++; };
+    // A warm panel loads hidden and has no session until it is summoned, so
+    // nothing is requested before the window is shown.
+    const start = () => {
+      if (document.visibilityState !== "visible") return;
+      document.removeEventListener("visibilitychange", start);
+      invoke<GlanceState>("glance_state").then(value => {
+        if (mounted) setState(value);
+      }).catch(e => { if (mounted) setError(errorMessage(e)); });
+      editor.current?.focus();
+    };
+    document.addEventListener("visibilitychange", start);
+    start();
+    return () => { mounted = false; activeRun.current++; document.removeEventListener("visibilitychange", start); };
   }, []);
 
   const dismiss = useCallback(async () => {
