@@ -1205,6 +1205,153 @@ fn prepare_glance_profile(app: &tauri::AppHandle) {
     tauri::async_runtime::block_on(desktop.engine.load_model(model.id, settings)).unwrap();
 }
 
+/// Files under `root` that look like saved images (by name or signature).
+fn image_files(root: &Path) -> Vec<PathBuf> {
+    let screenshots = std::env::var_os("AGENT_GLANCE_SCREENSHOTS").map(PathBuf::from);
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        // The fixture's own screenshots are not application output.
+        if screenshots.as_deref() == Some(directory.as_path()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let named = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"));
+            let mut head = [0u8; 8];
+            let signed = std::fs::File::open(&path)
+                .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head))
+                .is_ok()
+                && (head.starts_with(b"\x89PNG") || head.starts_with(&[0xff, 0xd8, 0xff]));
+            if named || signed {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[test]
+#[ignore = "launches the packaged WebView and contextual panel with synthetic camera frames in a disposable encrypted profile without network access"]
+fn visual_desktop_fixture() {
+    let profile = isolated_profile();
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let panel_opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let builder = tauri::Builder::default()
+        .any_thread()
+        .on_page_load(move |webview, page| {
+            if page.event() != tauri::webview::PageLoadEvent::Finished {
+                return;
+            }
+            let app = webview.app_handle().clone();
+            match webview.label() {
+                "main" if !opened.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                    prepare_glance_profile(&app);
+                    {
+                        let mut frames = crate::camera::FIXTURE.lock().unwrap();
+                        frames.push_back(synthetic_screen().0);
+                        frames.push_back(synthetic_screen().0);
+                    }
+                    webview.eval(include_str!("visual_main_acceptance.js")).unwrap();
+                    let main = app.get_webview_window("main").unwrap();
+                    let result_path = profile.join("ipc-result.json");
+                    let home = profile.clone();
+                    thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(240);
+                        let mut taken = String::new();
+                        while Instant::now() < deadline {
+                            thread::sleep(Duration::from_millis(150));
+                            let Some(state) = eval_json(
+                                &main,
+                                "JSON.stringify({shot: document.documentElement.dataset.visualShot || '', result: document.documentElement.dataset.visualResult || ''})",
+                            ) else {
+                                continue;
+                            };
+                            let shot = state["shot"].as_str().unwrap_or_default().to_owned();
+                            if !shot.is_empty() && shot != taken {
+                                glance_screenshot(main.app_handle(), &format!("visual-{shot}"));
+                                let _ = main.eval(format!(
+                                    "document.documentElement.dataset.visualShotDone = {shot:?}"
+                                ));
+                                taken = shot;
+                            }
+                            let Some(mut result) = state["result"]
+                                .as_str()
+                                .filter(|raw| !raw.is_empty())
+                                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                            else {
+                                continue;
+                            };
+                            // Nothing image-like was written anywhere in the
+                            // disposable profile, and no Pictures folder exists.
+                            let images = image_files(&home);
+                            let pictures = home.join("home/Pictures").exists()
+                                || std::env::var_os("HOME")
+                                    .is_some_and(|home| Path::new(&home).join("Pictures").exists());
+                            result["storage"] = json!({"imageFiles": images, "pictures": pictures});
+                            if !images.is_empty() || pictures {
+                                result["pass"] = json!(false);
+                            }
+                            std::fs::write(&result_path, result.to_string()).unwrap();
+                            main.app_handle().exit(i32::from(result["pass"] != true));
+                            return;
+                        }
+                        std::fs::write(&result_path, r#"{"pass":false,"error":"fixture timed out"}"#)
+                            .unwrap();
+                        main.app_handle().exit(1);
+                    });
+                }
+                "panel" if !panel_opened.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                    webview.eval(include_str!("visual_panel_acceptance.js")).unwrap();
+                    let panel = app.get_webview_window("panel").unwrap();
+                    let main = app.get_webview_window("main").unwrap();
+                    thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(180);
+                        let mut taken = String::new();
+                        while Instant::now() < deadline {
+                            thread::sleep(Duration::from_millis(120));
+                            let Some(state) = eval_json(
+                                &panel,
+                                "JSON.stringify({stage: document.documentElement.dataset.visualStage || '', result: document.documentElement.dataset.visualResult || ''})",
+                            ) else {
+                                continue;
+                            };
+                            let stage = state["stage"].as_str().unwrap_or_default().to_owned();
+                            if !stage.is_empty() && stage != taken {
+                                glance_screenshot(panel.app_handle(), &format!("visual-{stage}"));
+                                let _ = panel.eval(format!(
+                                    "document.documentElement.dataset.visualShotDone = {stage:?}"
+                                ));
+                                taken = stage;
+                            }
+                            if let Some(result) = state["result"].as_str().filter(|raw| !raw.is_empty()) {
+                                let _ = panel.eval(
+                                    "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))",
+                                );
+                                main.eval(format!("window.__visualPanelDone({result})")).unwrap();
+                                return;
+                            }
+                        }
+                        main.eval("window.__visualPanelDone({pass: false, error: 'panel timed out', steps: []})")
+                            .unwrap();
+                    });
+                }
+                _ => {}
+            }
+        });
+    run_desktop(builder, || InferenceWorker::spawn(|| Fixture));
+}
+
 #[test]
 #[ignore = "launches the packaged model manager with a disposable encrypted profile under X11"]
 fn model_manager_desktop_fixture() {

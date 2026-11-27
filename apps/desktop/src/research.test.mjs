@@ -82,6 +82,12 @@ test("options carry only what was authorized for this message", () => {
   assert.deepEqual(researchOptions({ ...emptyResearch, enabled: true }, view()), { mode: "search", provider: "brave" });
   assert.deepEqual(researchOptions({ ...emptyResearch, enabled: true, query: " a  b ", share: true }, view()),
     { mode: "search", provider: "brave", query: "a b", shareWithProvider: true });
+  // A query started from an attached image's text names that attachment, so
+  // the engine labels the query with its classes; nothing else changes.
+  const visual = researchOptions({ ...emptyResearch, enabled: true, query: "CAMERA TEST 42", queryAttachments: [`a${"1".repeat(32)}`] }, view());
+  assert.deepEqual(visual.queryAttachments, [`a${"1".repeat(32)}`]);
+  assert.equal(visual.query, "CAMERA TEST 42");
+  assert.equal(researchOptions({ ...emptyResearch, enabled: true, queryAttachments: ["x"] }, view()).queryAttachments, undefined);
   assert.deepEqual(researchOptions({ ...emptyResearch, enabled: true, mode: "page", url: " https://e.org/ ", resultsOnly: true }, view()),
     { mode: "page", url: "https://e.org/", resultsOnly: true });
 });
