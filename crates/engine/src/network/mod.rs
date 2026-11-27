@@ -9,6 +9,9 @@ mod address;
 pub(crate) mod artifact;
 pub mod endpoint;
 mod http;
+/// Stage 04-C2 feasibility probe. Never compiled into the application.
+#[cfg(test)]
+mod managed_probe;
 pub(crate) mod page;
 mod transport;
 
@@ -226,6 +229,9 @@ pub struct Outbound {
     provider_retention: Retention,
     artifact_target: Option<artifact::Target>,
     page_target: Option<page::Target>,
+    /// Query string appended to the fixed route, for the 04-C2 probe only.
+    #[cfg(test)]
+    query: Option<String>,
 }
 
 impl Outbound {
@@ -267,6 +273,8 @@ impl Outbound {
             provider_retention,
             artifact_target: None,
             page_target: None,
+            #[cfg(test)]
+            query: None,
         }
     }
 

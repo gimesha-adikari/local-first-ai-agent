@@ -467,6 +467,11 @@ async fn run(
 
     let binding = job.request.binding();
     let path = format!("{}{}", endpoint.base_path(), binding.route.as_str());
+    #[cfg(test)]
+    let path = match &job.request.query {
+        Some(query) => format!("{path}?{query}"),
+        None => path,
+    };
     let request = if let Some(target) = artifact {
         http::encode_artifact(&endpoint.authority(), target)
     } else if let Some(target) = &job.request.page_target {

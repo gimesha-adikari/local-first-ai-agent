@@ -288,6 +288,8 @@ impl NetworkBoundary {
                 provider_retention: Retention::ProviderDeclared,
                 artifact_target: Some(target),
                 page_target: None,
+                #[cfg(test)]
+                query: None,
             };
             let process = self
                 .policy

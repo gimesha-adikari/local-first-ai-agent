@@ -371,6 +371,8 @@ impl NetworkBoundary {
                 provider_retention: Retention::ProviderDeclared,
                 artifact_target: None,
                 page_target: Some(target),
+                #[cfg(test)]
+                query: None,
             };
             let grants = self
                 .policy
