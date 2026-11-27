@@ -1101,6 +1101,7 @@ export default function App() {
         query={query} onQuery={setQuery} searchError={searchError} items={recent} records={records} currentKey={currentKey}
         navigationDisabled={generating || operation === "opening"} onOpen={(item) => void openConversation(item.id)}
         onOpenRecord={openRecord}
+        onGlance={() => { void invoke("glance_show").catch((error: unknown) => setError(errorMessage(error))); }}
         onKnowledge={() => openDestination("knowledge")} onMemory={() => openDestination("memory")}
         onModels={() => openModal("models")} onSettings={() => openModal("settings")} loading={!snapshot} />
 

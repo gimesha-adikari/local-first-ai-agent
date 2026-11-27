@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import packageJson from "../package.json?raw";
 import softwareNotice from "../../../third_party/software-notices/NOTICE?raw";
 import type { Appearance, Bootstrap, ModelSettings, Preferences } from "./chat";
@@ -21,7 +21,7 @@ import type { KnowledgeController } from "./useKnowledge";
 export type SettingsCategory = "general" | "chat" | "models" | "providers" | "knowledge" | "privacy" | "about";
 
 const categories: { key: SettingsCategory; label: string; description: string; icon: ReactNode }[] = [
-  { key: "general", label: "General", description: "Appearance and typing.", icon: <GearIcon size={15} /> },
+  { key: "general", label: "General", description: "Appearance, typing and the desktop shortcut.", icon: <GearIcon size={15} /> },
   { key: "chat", label: "Chat & Agent", description: "The loaded model's abilities, replies and file access.", icon: <ChatIcon size={15} /> },
   { key: "models", label: "Models", description: "Your local models and their configuration. Everything runs on this computer's processor.", icon: <CubeIcon size={15} /> },
   { key: "providers", label: "Providers", description: "Optional cloud and self-hosted intelligence, with what may be shared and monthly limits.", icon: <CloudIcon size={15} /> },
@@ -169,7 +169,61 @@ function GeneralPanel({ preferences, disabled, onChange }: {
           description={preferences.enterToSend ? "Shift+Enter adds a new line." : "Enter adds a new line. Use the send button to send."}
           onChange={(enterToSend) => onChange({ ...preferences, enterToSend })} />
       </section>
+      <ShortcutSettings />
     </div>
+  );
+}
+
+type ShortcutStatus = {
+  state: "available" | "configuring" | "active" | "denied" | "unavailable";
+  trigger: string | null;
+  canReconfigure: boolean;
+};
+
+function ShortcutSettings() {
+  const [status, setStatus] = useState<ShortcutStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const fallback: ShortcutStatus = { state: "unavailable", trigger: null, canReconfigure: false };
+
+  useEffect(() => {
+    let mounted = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      const next = await invoke<ShortcutStatus>("shortcut_status").catch(() => null);
+      if (!mounted) return;
+      setStatus(next ?? { state: "unavailable", trigger: null, canReconfigure: false });
+      if (next?.state === "configuring") timer = setTimeout(() => void refresh(), 500);
+    };
+    void refresh();
+    window.addEventListener("focus", refresh);
+    return () => { mounted = false; clearTimeout(timer); window.removeEventListener("focus", refresh); };
+  }, []);
+
+  async function configure() {
+    setBusy(true);
+    try {
+      setStatus(await invoke<ShortcutStatus>("configure_shortcut"));
+    } catch {
+      setStatus(fallback);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="settings-section">
+      <h4>Desktop shortcut</h4>
+      <p className="hint" role="status">{status?.state === "active"
+        ? `Press ${status.trigger} to open the contextual panel.`
+        : status?.state === "unavailable" ? "The desktop shortcut portal is unavailable."
+          : status?.state === "denied" ? "Shortcut permission was declined."
+            : "Choose a shortcut to open the contextual panel from another app."}</p>
+      {status?.state === "active" && !status.canReconfigure
+        ? <p className="hint">Change this shortcut in your desktop’s keyboard settings.</p>
+        : <button type="button" className="secondary-button small" disabled={busy || !status || status.state === "configuring"}
+            onClick={() => void configure()}>{busy ? "Opening…" : "Configure desktop shortcut…"}</button>}
+      <p className="hint">For a custom keyboard shortcut, use <code>local-first-ai-agent --summon</code>.</p>
+    </section>
   );
 }
 
