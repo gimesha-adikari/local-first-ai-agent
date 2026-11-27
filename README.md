@@ -117,14 +117,34 @@ build declares these dependencies automatically.
   some grounded answers show sources as uncited.
 - Semantic search returns `busy` while Chat or Agent is generating. The
   library refreshes by polling rather than by push events.
-- Local SQLite is unencrypted. Saved answers, documents, and memories can
-  contain text from selected files. Raw tool previews are held in memory for
-  the current session. Deleting a conversation removes its saved messages and
-  linked task history. Content-free audit entries and external copies can
-  remain. Earlier answers may keep quotations from deleted documents or
-  memories.
+- The local personal database is encrypted with SQLCipher in Stage 04-A builds.
+  Saved answers, documents, and memories can contain text from selected files.
+  Raw tool previews are held in memory for the current session. Deleting a
+  conversation removes its saved messages and linked task history.
+  Content-free audit entries and external copies can remain. Earlier answers
+  may keep quotations from deleted documents or memories.
 - Downgrading to v0.1.0 requires the database backup taken before the
   upgrade. The v0.1.0 executable accepts only schema version 5 and below.
+
+## Encrypted personal storage
+
+The Linux desktop uses your unlocked system keyring to open the database at
+startup. Use **Settings → Privacy & Storage → Show recovery key** and confirm
+in the native dialog to record the key in a password manager or another secure
+location. The recovery key is specific to this database. Keep it separate from
+the database file. Losing both the keyring entry and the recovery key can make
+the database permanently inaccessible. If the keyring entry goes missing or
+the profile moves to a new path, use **Enter recovery key** at startup. The app
+checks the supplied key against the database before saving it to the keyring.
+
+On first opening a legacy profile, the app copies and verifies the database
+before switching to the encrypted file. **Privacy & Storage** shows the
+original file as `conversations.sqlite3.plaintext-backup`. Verify your records
+and record your recovery key, then quit the app and remove that backup through
+your file manager when you no longer need it. File removal does not guarantee
+erasure from SSDs, system snapshots, or earlier backups. Keep the backup if you
+need to open the pre-migration state with an older build. Changes made after
+migration live in the encrypted database.
 
 ## Development on Linux
 
@@ -141,6 +161,11 @@ sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libxdo-dev \
 npm --prefix apps/desktop ci --engine-strict
 npm --prefix apps/desktop run tauri -- dev
 ```
+
+Storage bundles SQLCipher Community Edition through rusqlite and links to the
+system OpenSSL `libcrypto` on Linux. The desktop requires a persistent Secret
+Service keyring. SQLite keeps temporary query data in memory, and SQLCipher
+encrypts database pages written to journals.
 
 Use the release profile to reuse native build output. On constrained
 machines, set `CARGO_BUILD_JOBS=1` and `CMAKE_BUILD_PARALLEL_LEVEL=1`.
