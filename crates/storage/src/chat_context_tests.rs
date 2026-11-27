@@ -536,7 +536,8 @@ fn schema_eight_citation_remains_available_without_invented_historical_coverage(
     .unwrap();
     db.connection
         .execute_batch(
-            "DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+            "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+         DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
          ALTER TABLE chat_source_references DROP COLUMN cited;
          ALTER TABLE chat_context_attempts DROP COLUMN metadata;

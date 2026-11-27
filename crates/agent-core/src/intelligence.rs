@@ -19,6 +19,8 @@ pub enum SessionState {
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
     Prompt,
+    Clipboard,
+    ManualText,
     SystemPrompt,
     History,
     Knowledge,

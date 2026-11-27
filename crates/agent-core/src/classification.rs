@@ -24,6 +24,7 @@ pub struct DataClass {
 }
 
 pub const USER_INPUT: DataClass = personal("core.user-input/1");
+pub const CLIPBOARD_TEXT: DataClass = personal("core.clipboard-text/1");
 pub const HISTORY: DataClass = personal("core.history/1");
 pub const MEMORY: DataClass = personal("core.memory/1");
 pub const LIBRARY: DataClass = personal("core.library/1");
@@ -62,6 +63,7 @@ impl Default for DataClasses {
     fn default() -> Self {
         Self::new([
             USER_INPUT,
+            CLIPBOARD_TEXT,
             HISTORY,
             MEMORY,
             LIBRARY,

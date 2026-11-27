@@ -30,7 +30,7 @@ pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 const MODEL_COLUMNS: &str = "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic', artifact_key";
 const NEW_TITLE: &str = "New conversation";
 
@@ -152,6 +152,11 @@ impl SqliteStore {
         if version < 14 {
             transaction
                 .execute_batch(include_str!("../migrations/014_provider_deletion.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 15 {
+            transaction
+                .execute_batch(include_str!("../migrations/015_glance_memory.sql"))
                 .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)

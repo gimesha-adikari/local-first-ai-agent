@@ -807,7 +807,8 @@ fn schema_eleven_context_and_memory_reload_with_conservative_labels() {
     store
         .connection
         .execute_batch(
-            "DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+            "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+         DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts;
          ALTER TABLE messages DROP COLUMN classification;
          PRAGMA user_version=11;",
@@ -850,4 +851,57 @@ fn schema_eleven_context_and_memory_reload_with_conservative_labels() {
         .unwrap();
     assert!(store.get(conversation).is_err());
     store.delete(conversation).unwrap();
+}
+
+#[test]
+fn schema_fourteen_memories_upgrade_without_provenance_and_panel_memories_keep_theirs() {
+    use agent_core::classification::{CLIPBOARD_TEXT, MEMORY, USER_INPUT};
+    use agent_core::intelligence::{Receipt, SessionState};
+
+    let database = TestDatabase::new();
+    let mut store = database.open();
+    let legacy = store.create_memory("legacy personal note").unwrap();
+    store
+        .connection
+        .execute_batch(
+            "ALTER TABLE personal_memories DROP COLUMN provenance;
+             ALTER TABLE personal_memories DROP COLUMN classification;
+             PRAGMA user_version=14;",
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = database.open();
+    let upgraded = &store.list_memories("", None, 10).unwrap()[0];
+    assert_eq!(upgraded.id, legacy.id);
+    assert!(upgraded.provenance.is_none());
+    assert_eq!(upgraded.labels(), Labels::from_source(MEMORY));
+
+    let mut output = Labels::from_source(USER_INPUT);
+    output.insert(CLIPBOARD_TEXT);
+    let receipt = Receipt {
+        version: 1,
+        capability: agent_core::capability::GENERATE,
+        state: SessionState::Completed,
+        elapsed_ms: 1,
+        provider: None,
+        local_authorization: None,
+        used: Vec::new(),
+        withheld: Vec::new(),
+        output_labels: output,
+        application_retention: agent_core::capability::Retention::Session,
+        external: Vec::new(),
+        usage: Vec::new(),
+        usage_basis: None,
+    };
+    let saved = store.remember_glance("panel answer", &receipt).unwrap();
+    drop(store);
+    let mut store = database.open();
+    let edited = store.edit_memory(saved.id, "panel answer, edited").unwrap();
+    let provenance = edited.provenance.as_ref().unwrap();
+    assert_eq!(provenance["source"], "contextual_panel");
+    assert_eq!(provenance["authorization"], "explicit_user_remember");
+    // Editing keeps the origin labels: an edit never downgrades sensitivity.
+    assert!(edited.labels().contains(CLIPBOARD_TEXT));
+    assert!(edited.labels().contains(MEMORY));
 }
