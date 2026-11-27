@@ -130,7 +130,7 @@ fn bge_synthetic_retrieval_measurements() {
     let database = Arc::new(Mutex::new(db));
     let worker = EmbeddingWorker::spawn().unwrap();
     let load_start = Instant::now();
-    tauri::async_runtime::block_on(worker.submit(move |p| p.load(&model)).unwrap())
+    futures_executor::block_on(worker.submit(move |p| p.load(&model)).unwrap())
         .unwrap()
         .unwrap();
     let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
@@ -138,9 +138,9 @@ fn bge_synthetic_retrieval_measurements() {
     let mut windows = 0;
     for &id in &ids {
         let db = Arc::clone(&database);
-        windows += tauri::async_runtime::block_on(
+        windows += futures_executor::block_on(
             worker
-                .submit(move |provider| run_index(provider, &db, id, &job(id)))
+                .submit(move |provider| run_index(provider, &Policy::default(), &db, id, &job(id)))
                 .unwrap(),
         )
         .unwrap()
@@ -193,9 +193,9 @@ fn bge_synthetic_retrieval_measurements() {
                     .retrieve_knowledge(&request, mode, BGE_KEY, None)
                     .unwrap()
             } else {
-                tauri::async_runtime::block_on(
+                futures_executor::block_on(
                     worker
-                        .submit(move |p| run_retrieval(p, &db, &request, mode))
+                        .submit(move |p| run_retrieval(p, &Policy::default(), &db, &request, mode))
                         .unwrap(),
                 )
                 .unwrap()
@@ -245,7 +245,7 @@ fn restore_handles_missing_unloaded_and_unremembered_choices_without_models() {
     let database = Arc::new(Mutex::new(
         SqliteStore::open(std::path::Path::new(":memory:")).unwrap(),
     ));
-    let state = SemanticState::new().unwrap();
+    let state = SemanticState::new(Arc::new(Policy::default())).unwrap();
     let restore = |state: &SemanticState| model_status(state).restore;
     state.restore_remembered(Arc::clone(&database));
     assert_eq!(restore(&state), RestoreState::NotRemembered);
@@ -300,7 +300,7 @@ fn restore_reverifies_the_remembered_bge_file() {
         .unwrap()
         .remember_embedding_model(&path)
         .unwrap();
-    let state = SemanticState::new().unwrap();
+    let state = SemanticState::new(Arc::new(Policy::default())).unwrap();
     let started = std::time::Instant::now();
     state.restore_remembered(Arc::clone(&database));
     assert_eq!(wait(&state), RestoreState::Restored);
@@ -319,7 +319,7 @@ fn restore_reverifies_the_remembered_bge_file() {
         .unwrap()
         .remember_embedding_model(&forged)
         .unwrap();
-    let fresh = SemanticState::new().unwrap();
+    let fresh = SemanticState::new(Arc::new(Policy::default())).unwrap();
     fresh.restore_remembered(Arc::clone(&database));
     let outcome = wait(&fresh);
     std::fs::remove_file(&forged).unwrap();

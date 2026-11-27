@@ -12,3 +12,6 @@ agent-core = { path = "../agent-core" }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.191"
 gio = "=0.18.4"
+
+[dev-dependencies]
+serde_json = "=1.0.154"

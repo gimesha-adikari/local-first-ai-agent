@@ -1,5 +1,7 @@
 //! Explicit, app-wide personal memories. Chat history is never a write source.
 
+use agent_core::classification::{Labels, MEMORY};
+use agent_core::intelligence::Receipt;
 use agent_core::{
     chat_context::{MAX_CHAT_MEMORIES, MAX_MEMORY_BYTES, search_terms},
     inference::{ErrorCode, InferenceError, Result},
@@ -19,6 +21,16 @@ pub struct PersonalMemory {
     pub content: String,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<serde_json::Value>,
+    #[serde(skip)]
+    classification: Option<Labels>,
+}
+
+impl PersonalMemory {
+    pub fn labels(&self) -> agent_core::classification::Labels {
+        Labels::derived(self.classification.clone(), MEMORY)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -49,14 +61,42 @@ impl SqliteStore {
     }
 
     pub fn create_memory(&mut self, content: &str) -> Result<PersonalMemory> {
+        self.insert_memory(content, None, None)
+    }
+
+    pub fn remember_glance(&mut self, content: &str, receipt: &Receipt) -> Result<PersonalMemory> {
+        let provenance = serde_json::json!({
+            "source": "contextual_panel",
+            "authorization": "explicit_user_remember",
+            "scope": "app",
+            "provider": receipt.provider,
+            "used": receipt.used,
+        });
+        self.insert_memory(
+            content,
+            Some(provenance.to_string()),
+            Some(&receipt.output_labels),
+        )
+    }
+
+    fn insert_memory(
+        &mut self,
+        content: &str,
+        provenance: Option<String>,
+        labels: Option<&Labels>,
+    ) -> Result<PersonalMemory> {
+        let classification = labels
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| crate::storage_error())?;
         let content = validate_content(content)?;
         let now = unix_ms()?;
         self.connection
             .query_row(
-                "INSERT INTO personal_memories(content,created_at,updated_at)
-             SELECT ?1,?2,?2 WHERE (SELECT count(*) FROM personal_memories) < ?3
-             RETURNING id,content,created_at,updated_at",
-                params![content, now, MAX_MEMORIES],
+                "INSERT INTO personal_memories(content,created_at,updated_at,provenance,classification)
+             SELECT ?1,?2,?2,?4,?5 WHERE (SELECT count(*) FROM personal_memories) < ?3
+             RETURNING id,content,created_at,updated_at,provenance,classification",
+                params![content, now, MAX_MEMORIES, provenance, classification],
                 read_memory,
             )
             .optional()
@@ -75,7 +115,7 @@ impl SqliteStore {
         self.connection
             .query_row(
                 "UPDATE personal_memories SET content=?1,updated_at=max(updated_at,?2)
-             WHERE id=?3 RETURNING id,content,created_at,updated_at",
+             WHERE id=?3 RETURNING id,content,created_at,updated_at,provenance,classification",
                 params![content, unix_ms()?, id],
                 read_memory,
             )
@@ -168,6 +208,14 @@ impl SqliteStore {
     }
 
     pub fn relevant_memories(&self, question: &str) -> Result<Vec<String>> {
+        Ok(self
+            .relevant_memory_records(question)?
+            .into_iter()
+            .map(|memory| memory.content)
+            .collect())
+    }
+
+    pub fn relevant_memory_records(&self, question: &str) -> Result<Vec<PersonalMemory>> {
         if !self.memory_enabled()? {
             return Ok(Vec::new());
         }
@@ -190,7 +238,7 @@ impl SqliteStore {
         Ok(ranked
             .into_iter()
             .take(MAX_CHAT_MEMORIES)
-            .map(|(_, memory)| memory.content)
+            .map(|(_, memory)| memory)
             .collect())
     }
 
@@ -198,7 +246,7 @@ impl SqliteStore {
         let mut stmt = self
             .connection
             .prepare(
-                "SELECT id,content,created_at,updated_at FROM personal_memories
+                "SELECT id,content,created_at,updated_at,provenance,classification FROM personal_memories
              WHERE id < coalesce(?1,9223372036854775807) ORDER BY id DESC LIMIT ?2",
             )
             .map_err(sql_error)?;
@@ -215,7 +263,26 @@ fn read_memory(row: &Row<'_>) -> rusqlite::Result<PersonalMemory> {
         content: row.get(1)?,
         created_at: row.get(2)?,
         updated_at: row.get(3)?,
+        provenance: decode_memory_metadata(row, 4)?,
+        classification: decode_memory_metadata(row, 5)?,
     })
+}
+
+fn decode_memory_metadata<T: serde::de::DeserializeOwned>(
+    row: &Row<'_>,
+    col: usize,
+) -> rusqlite::Result<Option<T>> {
+    row.get::<_, Option<String>>(col)?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    col,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
 }
 
 fn validate_content(content: &str) -> Result<&str> {

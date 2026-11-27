@@ -5,8 +5,8 @@ use agent_core::{
         PendingTurn, prepare_history,
     },
     inference::{
-        AssistantReplay, ErrorCode, FinishReason, GenerationStats, InferenceError,
-        MAX_CHAT_ATTEMPT_TOKENS, Result,
+        Cancellation, ErrorCode, FinishReason, GenerationStats, InferenceError,
+        MAX_CHAT_ATTEMPT_TOKENS, Result, ResumeState,
     },
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -18,7 +18,7 @@ const MAX_CONTINUATIONS: u32 = 3;
 pub struct ContinuationPlan {
     pub turn: PendingTurn,
     pub settings: ModelSettings,
-    pub replay: AssistantReplay,
+    pub replay: ResumeState,
     pub previous_stats: GenerationStats,
 }
 
@@ -91,20 +91,21 @@ fn plan(
         ));
     }
     let settings: ModelSettings = serde_json::from_str(&stored.1).map_err(|_| storage_error())?;
-    let replay: AssistantReplay = serde_json::from_str(&stored.2).map_err(|_| storage_error())?;
-    if replay.generated.len() >= MAX_CHAT_ATTEMPT_TOKENS {
+    let replay: ResumeState = serde_json::from_str(&stored.2).map_err(|_| storage_error())?;
+    if previous_stats.generated_tokens as usize >= MAX_CHAT_ATTEMPT_TOKENS {
         return Err(ineligible(
             "This response reached its total generation limit.",
         ));
     }
     super::chat_context::exclude_contextual_answers(connection, &mut conversation)?;
     let (mut history, prompt) = prepare_history(&conversation)?;
-    if replay.excluded_turns > history.turns.len() {
+    let prompt_source = super::intelligence::prompt_source(&conversation)?;
+    if previous_stats.excluded_turns > history.turns.len() {
         return Err(ineligible(
             "The original conversation context is unavailable.",
         ));
     }
-    history.turns.drain(..replay.excluded_turns);
+    history.turns.drain(..previous_stats.excluded_turns);
     assistant.state = GenerationState::Streaming;
     Ok((
         ContinuationPlan {
@@ -113,6 +114,7 @@ fn plan(
                 assistant,
                 history,
                 prompt,
+                prompt_source,
             },
             settings,
             replay,
@@ -137,6 +139,7 @@ impl SqliteStore {
         id: ConversationId,
         message: MessageId,
         model: ModelId,
+        cancellation: &Cancellation,
     ) -> Result<ContinuationPlan> {
         let tx = self.connection.transaction().map_err(sql_error)?;
         let active: bool = tx
@@ -157,6 +160,12 @@ impl SqliteStore {
         )
         .map_err(sql_error)?;
         tx.execute("UPDATE chat_attempt_replay SET continuation_count=continuation_count+1 WHERE message_id=?1", [message]).map_err(sql_error)?;
+        if cancellation.is_explicitly_cancelled() {
+            return Err(InferenceError::new(
+                ErrorCode::Cancelled,
+                "Chat preparation was cancelled.",
+            ));
+        }
         tx.commit().map_err(sql_error)?;
         Ok(plan)
     }

@@ -1,0 +1,25 @@
+Local text recognition (OCR) languages
+======================================
+
+Screen-region text recognition runs on this computer with Tesseract inside
+a sandbox. English is the required base language and is installed with the
+package (tesseract-ocr, tesseract-ocr-eng).
+
+Recommended optional languages (not installed automatically):
+
+    sudo apt install tesseract-ocr-spa tesseract-ocr-fra tesseract-ocr-deu \
+        tesseract-ocr-por tesseract-ocr-rus tesseract-ocr-ara tesseract-ocr-hin \
+        tesseract-ocr-chi-sim tesseract-ocr-jpn tesseract-ocr-kor
+
+Together they add about 19 MB on disk (about 10 MB to download). Install
+only the ones you need. Any other tesseract-ocr-<language> package also
+works, for example tesseract-ocr-chi-tra, -heb, -tha, -sin or -tam.
+
+After installing, reopen the contextual panel. Choose up to four languages
+per recognition.
+
+Accuracy differs by language and script. The project's regression
+thresholds were measured on clean synthetic samples and are not real-world
+accuracy guarantees. Traditional Chinese was unreliable on one sample;
+Arabic can lose word spaces; Sinhala and Tamil can gain zero-width
+characters. Always check recognized text before relying on it.

@@ -11,10 +11,18 @@ tauri-build = { version = "=2.7.6", features = [] }
 
 [dependencies]
 agent-core = { path = "../../../crates/agent-core" }
+engine = { path = "../../../crates/engine" }
 agent-tools = { path = "../../../crates/tools" }
 tauri = { version = "=2.12.7", features = [] }
 inference = { path = "../../../crates/inference", features = ["llama"] }
 rfd = { version = "=0.15.4", default-features = false, features = ["gtk3"] }
+gtk = "=0.18.2"
+secret-service = { version = "6.0.0", default-features = false, features = ["rt-tokio", "crypto-rust"] }
+tokio = { version = "1.54.1", default-features = false, features = ["sync", "time"] }
+zeroize = "1.9.2"
+libloading = "=0.8.9"
+libc = "=0.2.191"
+png = "=0.18.1"
 serde.workspace = true
 serde_json = "1.0.154"
 sha2 = "=0.10.9"

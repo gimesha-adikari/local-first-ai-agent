@@ -51,6 +51,8 @@ export type ModelReference = {
   bundled: boolean;
   /** Settings follow the recommendation on every load until custom settings are saved. */
   automaticSettings: boolean;
+  /** Curated manifest entry whose size and SHA-256 the file matched; null for an unverified import. */
+  artifact?: string | null;
 };
 
 export type Bootstrap = {
@@ -59,6 +61,8 @@ export type Bootstrap = {
   models: ModelReference[];
   activeModelId: number | null;
   inference: Status;
+  /** Local-only mode and the provider Chat uses. */
+  intelligence: { localOnly: boolean; activeProvider: number | null };
 };
 
 /** Result of verifying the model resource shipped with the app (Task 04-A). */

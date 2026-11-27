@@ -30,6 +30,10 @@ pub const THREADS: i32 = 2;
 #[cfg(target_os = "linux")]
 const MODEL_NAME: &str = "bge-small-en-v1.5";
 
+/// Whether this build can load the pinned embedding backend.
+pub const fn supported() -> bool {
+    cfg!(target_os = "linux")
+}
 #[derive(Default)]
 pub struct BgeProvider {
     model: Option<LlamaModel>,

@@ -136,6 +136,26 @@ impl SqliteStore {
     }
 
     /// The listed row whose file has this full digest, if any.
+    /// Point a row whose file is gone at a newly selected copy of the same
+    /// weights, keeping its settings. The row is no longer an app resource.
+    pub fn relocate_model(&mut self, id: ModelId, path: &Path, file_name: &str) -> Result<()> {
+        let path = path.to_str().ok_or_else(|| {
+            InferenceError::new(ErrorCode::InvalidPath, "The model path is not valid UTF-8.")
+        })?;
+        updated(self.connection.execute(
+            "UPDATE models SET path = ?1, file_name = ?2, bundled_resource = NULL WHERE id = ?3",
+            params![path, file_name, id],
+        ))
+    }
+
+    /// Record which curated manifest entry the file matched, or clear it.
+    pub fn set_model_artifact(&mut self, id: ModelId, artifact: Option<&str>) -> Result<()> {
+        updated(self.connection.execute(
+            "UPDATE models SET artifact_key = ?1 WHERE id = ?2",
+            params![artifact, id],
+        ))
+    }
+
     pub fn model_with_sha256(&self, sha256: &str) -> Result<Option<ModelReference>> {
         self.connection
             .query_row(
@@ -195,7 +215,7 @@ impl SqliteStore {
                         |row| {
                             Ok(crate::SavedModelRow {
                                 reference: model_reference(row)?,
-                                path: PathBuf::from(row.get::<_, String>(5)?),
+                                path: PathBuf::from(row.get::<_, String>(6)?),
                             })
                         },
                     )

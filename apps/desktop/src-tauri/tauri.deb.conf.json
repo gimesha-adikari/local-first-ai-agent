@@ -1,0 +1,25 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "active": true,
+    "targets": ["deb"],
+    "icon": ["icons/icon.png"],
+    "linux": {
+      "deb": {
+        "depends": ["bubblewrap", "poppler-utils", "util-linux", "libpipewire-0.3-0t64 | libpipewire-0.3-0", "tesseract-ocr", "tesseract-ocr-eng"],
+        "recommends": ["gnome-keyring | kwalletmanager", "xdg-desktop-portal"],
+        "desktopTemplate": "legacy-launcher.desktop.hbs",
+        "preInstallScript": "deb-preinst",
+        "files": {
+          "/usr/share/applications/io.github.gimesha-adikari.localfirstaiagent.desktop": "io.github.gimesha-adikari.localfirstaiagent.desktop",
+          "/usr/share/doc/local-first-ai-agent/LICENSE": "../../../LICENSE",
+          "/usr/share/doc/local-first-ai-agent/NOTICE": "../../../third_party/software-notices/NOTICE",
+          "/usr/share/doc/local-first-ai-agent/copyright": "../../../third_party/software-notices/copyright",
+          "/usr/share/doc/local-first-ai-agent/rust-COPYRIGHT-library.html": "../../../third_party/software-notices/rust-COPYRIGHT-library.html",
+          "/usr/share/doc/local-first-ai-agent/sources/option-ext-0.2.0.crate": "../../../third_party/software-notices/sources/option-ext-0.2.0.crate",
+          "/usr/share/doc/local-first-ai-agent/README.ocr-languages": "ocr-languages.txt"
+        }
+      }
+    }
+  }
+}

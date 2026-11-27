@@ -14,8 +14,9 @@ use storage::{
     semantic::RetrievalMode,
 };
 
-use super::{dense_unusable, prepare_knowledge};
-use crate::chat_context::{KnowledgeSelection, retrieval_query};
+use super::{
+    KnowledgeSelection, PreparedKnowledge, dense_unusable, prepare_knowledge, retrieval_query,
+};
 
 fn library() -> (SqliteStore, i64) {
     let mut db = SqliteStore::open(Path::new(":memory:")).unwrap();
@@ -53,7 +54,7 @@ fn prepare(
     mode: RetrievalMode,
     grounding: Grounding,
     question: &str,
-) -> super::PreparedKnowledge {
+) -> PreparedKnowledge {
     let selection = KnowledgeSelection {
         mode,
         document_ids: vec![id],
@@ -181,9 +182,12 @@ fn automatic_settings_follow_each_real_model() {
         let (trained, _) = inference::trained_context(&path).unwrap();
         let mut saved = ModelSettings::recommended(2048);
         saved.enable_thinking = true;
-        let settings =
-            tauri::async_runtime::block_on(super::recommended_for_file(path.clone(), saved))
-                .unwrap();
+        let settings = futures_executor::block_on(
+            crate::tests::harness()
+                .engine
+                .recommended_for_file(path.clone(), saved),
+        )
+        .unwrap();
         println!(
             "{variable}: trained={trained} context={} max_tokens={} threads={}",
             settings.model.context_length, settings.max_tokens, settings.model.threads

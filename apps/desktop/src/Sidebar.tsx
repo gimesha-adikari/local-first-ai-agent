@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { stateLabel } from "./agent";
 import type { TaskState } from "./agentTypes";
 import {
-  AgentIcon, BookIcon, ChatIcon, ChevronRightIcon, ComposeIcon, CubeIcon, GearIcon, MemoryIcon, PanelLeftIcon, SearchIcon, Spinner,
+  AgentIcon, BookIcon, ChatIcon, ChevronRightIcon, ComposeIcon, CubeIcon, GearIcon, MemoryIcon, PanelLeftIcon, QuoteIcon, SearchIcon, Spinner,
 } from "./icons";
 import { IconButton } from "./ui";
 
@@ -15,10 +15,11 @@ export type RecordItem = { key: string; id: string; title: string; updatedAt: nu
 export default function Sidebar({
   collapsed, onToggle, onNewThread, newDisabled, searching, onSearching, query, onQuery, searchError,
   items, records, currentKey, navigationDisabled, onOpen, onOpenRecord, onModels, onSettings, loading,
-  onKnowledge, onMemory,
+  onKnowledge, onMemory, onGlance,
 }: {
   onKnowledge: () => void;
   onMemory: () => void;
+  onGlance: () => void;
   collapsed: boolean;
   onToggle: () => void;
   onNewThread: () => void;
@@ -56,6 +57,7 @@ export default function Sidebar({
           aria-current={currentKey === "knowledge" ? "page" : undefined}><BookIcon size={18} /></IconButton>
         <IconButton label="Memory" onClick={onMemory} disabled={navigationDisabled}
           aria-current={currentKey === "memory" ? "page" : undefined}><MemoryIcon size={18} /></IconButton>
+        <IconButton label="Contextual panel" onClick={onGlance}><QuoteIcon size={18} /></IconButton>
         <IconButton label="Models" onClick={onModels}><CubeIcon size={18} /></IconButton>
         <span className="spacer" />
         <IconButton label="Settings" onClick={onSettings}><GearIcon size={18} /></IconButton>
@@ -151,6 +153,9 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-bottom">
+        <button type="button" className="nav-item" onClick={onGlance}>
+          <QuoteIcon size={16} /><span>Contextual panel</span>
+        </button>
         <button type="button" className="nav-item" onClick={onSettings}>
           <GearIcon size={16} /><span>Settings</span>
         </button>

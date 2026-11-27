@@ -1,24 +1,14 @@
 //! PDF text-layer extraction in a bounded Linux subprocess. The authorized
 //! file's bytes are the only document input. No document path reaches Poppler.
 
-use std::{
-    fs::File,
-    io::{self, Read, Seek, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::process::{CommandExt, ExitStatusExt},
-    },
-    process::{Child, Command, ExitStatus, Stdio},
-    thread,
-    time::Duration,
-};
+use std::{os::unix::process::ExitStatusExt, process::ExitStatus};
 
 use agent_core::agent::{
     AgentError, AgentErrorCode, AgentResult, MAX_PDF_PAGES, MAX_PDF_RANGE_PAGES,
     MAX_PDF_TEXT_BYTES, PdfPageRange, PdfPageText, ToolOutput,
 };
 
-use crate::filesystem::escaped_len;
+use crate::{filesystem::escaped_len, sandbox};
 
 const METADATA_LIMIT: usize = 16 * 1024;
 const EXTRACTED_LIMIT: usize = 64 * 1024;
@@ -227,241 +217,36 @@ fn run_parser(
     output_limit: usize,
     check: &dyn Fn() -> AgentResult<()>,
 ) -> AgentResult<Vec<u8>> {
-    check()?;
-    let filter = parser_filter()?;
-    let filter_fd = filter.as_raw_fd();
-    let filter_argument = filter_fd.to_string();
     // Each invocation has independent address-space and CPU ceilings.
     // The caller's checkpoint bounds combined wall time and handles cancellation.
-    let mut command = Command::new("/usr/bin/prlimit");
-    command
-        .args([
-            "--as=268435456:268435456",
-            "--cpu=2:2",
-            "--fsize=8388608:8388608",
-            "--nofile=64:64",
-            "--core=0:0",
-        ])
-        .args([
-            "--",
-            "/usr/bin/bwrap",
-            "--unshare-user",
-            "--unshare-all",
-            "--disable-userns",
-            "--die-with-parent",
-            "--new-session",
-            "--clearenv",
-            "--setenv",
-            "LC_ALL",
-            "C",
-            "--ro-bind",
-            "/usr/lib",
-            "/usr/lib",
-            "--ro-bind-try",
-            "/usr/lib64",
-            "/usr/lib64",
-            "--ro-bind",
-            executable,
-            executable,
-            "--ro-bind-try",
-            "/usr/share/poppler",
-            "/usr/share/poppler",
-            "--ro-bind-try",
-            "/usr/share/fonts",
-            "/usr/share/fonts",
-            "--ro-bind-try",
-            "/etc/fonts",
-            "/etc/fonts",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--dev",
-            "/dev",
-            "--ro-bind-data",
-            "0",
-            "/document.pdf",
-            "--seccomp",
-            &filter_argument,
-            "--chdir",
-            "/",
-            "--",
-            executable,
-        ])
-        .args(arguments)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // SAFETY: the filter File remains live until spawn returns. In the
-    // child this closure only clears CLOEXEC on that descriptor using fcntl.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::fcntl(filter_fd, libc::F_SETFD, 0) < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-    let process = command.spawn().map_err(|_| unavailable())?;
-    let mut process = ParserChild(process);
-    let writer = process.0.stdin.take().ok_or_else(unavailable)?;
-    let mut stdout = process.0.stdout.take().ok_or_else(unavailable)?;
-    let mut stderr = process.0.stderr.take().ok_or_else(unavailable)?;
-    nonblocking(&writer)?;
-    nonblocking(&stdout)?;
-    nonblocking(&stderr)?;
-    let mut writer = Some(writer);
-    let mut consumed = 0;
-    let mut output = Vec::new();
-    let mut diagnostics = Vec::new();
-
-    let status = loop {
-        check()?;
-        if let Some(pipe) = writer.as_mut() {
-            let end = input.len().min(consumed + 16 * 1024);
-            match pipe.write(&input[consumed..end]) {
-                Ok(n) => {
-                    consumed += n;
-                    if consumed == input.len() {
-                        writer = None;
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => writer = None,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return Err(unavailable()),
-            }
-        }
-        let stdout_done = drain(&mut stdout, &mut output, output_limit)?;
-        let stderr_done = drain(&mut stderr, &mut diagnostics, DIAGNOSTICS_LIMIT)?;
-        if let Some(status) = process.0.try_wait().map_err(|_| unavailable())?
-            && stdout_done
-            && stderr_done
-        {
-            break status;
-        }
-        thread::sleep(Duration::from_millis(2));
+    let spec = sandbox::Spec {
+        executable,
+        read_only: &["/usr/share/poppler", "/usr/share/fonts", "/etc/fonts"],
+        input_path: "/document.pdf",
+        environment: &[("LC_ALL", "C")],
+        limits: sandbox::Limits {
+            address_space: 268_435_456,
+            cpu_seconds: 2,
+            file_size: 8_388_608,
+            files: 64,
+        },
     };
+    let outcome = sandbox::run(
+        &spec,
+        arguments,
+        input,
+        output_limit,
+        DIAGNOSTICS_LIMIT,
+        check,
+    )
+    .map_err(|failure| match failure {
+        sandbox::Failure::Unavailable => unavailable(),
+        sandbox::Failure::OutputLimit => limit(),
+        sandbox::Failure::Stopped(error) => error,
+    })?;
     check()?;
-    classify(status, &diagnostics)?;
-    Ok(output)
-}
-
-/// Apply after Bubblewrap has set up namespaces. Poppler does not need to
-/// fork or create sockets. Keeping the parser single-process makes its
-/// address-space and CPU limits apply to the whole untrusted workload.
-fn parser_filter() -> AgentResult<File> {
-    #[cfg(target_arch = "x86_64")]
-    let (audit_arch, denied): (u32, &[libc::c_long]) = (
-        0xc000_003e,
-        &[
-            libc::SYS_clone,
-            libc::SYS_clone3,
-            libc::SYS_fork,
-            libc::SYS_vfork,
-            libc::SYS_socket,
-            libc::SYS_socketpair,
-        ],
-    );
-    #[cfg(target_arch = "aarch64")]
-    let (audit_arch, denied): (u32, &[libc::c_long]) = (
-        0xc000_00b7,
-        &[
-            libc::SYS_clone,
-            libc::SYS_clone3,
-            libc::SYS_socket,
-            libc::SYS_socketpair,
-        ],
-    );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let (audit_arch, denied): (u32, &[libc::c_long]) = (0, &[]);
-    if denied.is_empty() {
-        return Err(unavailable());
-    }
-
-    // Each sock_filter is {u16 code, u8 jt, u8 jf, u32 k}. seccomp_data
-    // puts syscall number at byte 0 and audit architecture at byte 4.
-    let mut code = Vec::new();
-    let mut instruction = |op: u16, yes: u8, no: u8, value: u32| {
-        code.extend(op.to_ne_bytes());
-        code.extend([yes, no]);
-        code.extend(value.to_ne_bytes());
-    };
-    instruction(0x20, 0, 0, 4); // load architecture
-    instruction(0x15, 1, 0, audit_arch);
-    instruction(0x06, 0, 0, libc::SECCOMP_RET_KILL_PROCESS);
-    instruction(0x20, 0, 0, 0); // load syscall number
-    // Exclude the x32 ABI and the reserved legacy x32 syscall range.
-    instruction(0x35, 0, 1, 512);
-    instruction(0x06, 0, 0, libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32);
-    for syscall in denied {
-        instruction(0x15, 0, 1, *syscall as u32);
-        instruction(0x06, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32);
-    }
-    instruction(0x06, 0, 0, libc::SECCOMP_RET_ALLOW);
-
-    // SAFETY: the name is a NUL-terminated literal. A nonnegative return
-    // value is a newly owned anonymous fd and becomes File's responsibility.
-    let fd = unsafe { libc::memfd_create(c"agent-pdf-seccomp".as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(unavailable());
-    }
-    let mut filter = unsafe { File::from_raw_fd(fd) };
-    filter.write_all(&code).map_err(|_| unavailable())?;
-    filter.rewind().map_err(|_| unavailable())?;
-    Ok(filter)
-}
-
-struct ParserChild(Child);
-
-impl Drop for ParserChild {
-    fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            // Bubblewrap's private PID namespace and die-with-parent kill the
-            // parser as well when this supervisor is stopped.
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-}
-
-fn nonblocking(pipe: &impl AsRawFd) -> AgentResult<()> {
-    // SAFETY: the borrowed pipe owns a valid descriptor for both calls.
-    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        return Err(unavailable());
-    }
-    Ok(())
-}
-
-fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, maximum: usize) -> AgentResult<bool> {
-    let mut buffer = [0u8; 4096];
-    match pipe.read(&mut buffer) {
-        Ok(0) => Ok(true),
-        Ok(n) if bytes.len() + n <= maximum => {
-            bytes.extend_from_slice(&buffer[..n]);
-            Ok(false)
-        }
-        Ok(_) => Err(limit()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(_) => Err(unavailable()),
-    }
+    classify(outcome.status, &outcome.diagnostics)?;
+    Ok(outcome.output)
 }
 
 fn classify(status: ExitStatus, diagnostics: &[u8]) -> AgentResult<()> {

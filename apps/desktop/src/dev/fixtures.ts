@@ -48,6 +48,27 @@ const minute = 60_000;
 let nextMessage = 200;
 let nextTask = 60;
 let scenario = "default";
+// Provider scenarios: "providers" (a ready cloud provider used for Chat and a
+// self-hosted server) and "onboarding" (no models and no providers).
+let providers: { id: number; settings: Json; credential: string }[] = [];
+let nextProvider = 3;
+let intelligence = { localOnly: true, activeProvider: null as number | null };
+const providerViews = () => providers.map((item) => {
+  const settings = item.settings as Json & { locality: string; endpoint: string; requiresKey: boolean; retention: string; imageInput: boolean };
+  const local = /\/\/(localhost|127\.)/.test(settings.endpoint);
+  const credential = settings.requiresKey ? item.credential : null;
+  return {
+    id: item.id, settings, origin: settings.endpoint, network: settings.locality === "cloud" ? "public" : local ? "loopback" : "local_network",
+    encrypted: settings.endpoint.startsWith("https://"), credential, period: "2026-11",
+    usage: item.id === 1
+      ? { requests: 14, reportedTokens: 48_210, estimatedTokens: 1_536, reservedTokens: 0, costMicros: 182_400, unpricedRequests: 0 }
+      : { requests: 0, reportedTokens: 0, estimatedTokens: 0, reservedTokens: 0, costMicros: 0, unpricedRequests: 0 },
+    modalities: settings.imageInput ? ["text", "image"] : ["text"],
+    readiness: intelligence.localOnly ? "local_only" : settings.retention === "unknown" ? "needs_retention"
+      : credential === "missing" ? "needs_credential" : "ready",
+    active: !intelligence.localOnly && intelligence.activeProvider === item.id,
+  };
+});
 let inference: Json = { phase: "ready", model: qwen35 };
 let activeModelId: number | null = 2;
 let active: { conversationId: number; turnId: string; taskId: string; approval: Json | null;
@@ -410,6 +431,24 @@ export async function installFixtures(name: string) {
   scenario = name;
   if (name === "nomodel" || bundledScenarios.has(name)) { inference = { phase: "empty", model: null }; activeModelId = null; }
   if (bundledScenarios.has(name)) models.splice(0, models.length);
+  if (name === "onboarding") { inference = { phase: "empty", model: null }; activeModelId = null; models.splice(0, models.length); }
+  if (name === "providers") {
+    inference = { phase: "empty", model: null }; activeModelId = null; models.splice(0, models.length);
+    const base = { contextTokens: 128000, maxOutputTokens: 2048, temperature: 0.7, streamUsage: true, imageInput: true };
+    providers = [
+      { id: 1, credential: "stored", settings: { ...base, name: "Example Cloud", endpoint: "https://api.example.com/v1", locality: "cloud",
+        model: "example-large", requiresKey: true, retention: "provider_policy",
+        retentionSummary: "Kept up to 30 days for abuse monitoring; not used for training.",
+        sharing: { history: true, memories: false, documents: false },
+        pricing: { currency: "USD", inputMicrosPerMillion: 2_500_000, outputMicrosPerMillion: 10_000_000 },
+        budget: { monthlyTokens: 1_000_000, monthlyCostMicros: 5_000_000 } } },
+      { id: 2, credential: "missing", settings: { ...base, imageInput: false, contextTokens: 8192, maxOutputTokens: 1024,
+        name: "Home server", endpoint: "http://192.168.1.20:8000/v1", locality: "self_hosted", model: "llama-3-8b",
+        requiresKey: false, retention: "none", retentionSummary: "", sharing: { history: true, memories: true, documents: true },
+        pricing: null, budget: { monthlyTokens: null, monthlyCostMicros: null } } },
+    ];
+    intelligence = { localOnly: false, activeProvider: 1 };
+  }
   if (name === "light") document.documentElement.dataset.appearance = "light";
   seed();
   if (name !== "nomodel" && name !== "restart" && !bundledScenarios.has(name)) {
@@ -429,7 +468,28 @@ export async function installFixtures(name: string) {
           preferences: { appearance: name === "light" ? "light" : "system", defaults: settings(768), enterToSend: true },
           databasePath: "/home/user/.local/share/io.github.gimesha-adikari.localfirstaiagent/chat/conversations.sqlite3",
           models, activeModelId, inference,
+          intelligence: structuredClone(intelligence),
         };
+      case "provider_list": return structuredClone(providerViews());
+      case "intelligence_settings": return structuredClone(intelligence);
+      case "set_intelligence_settings":
+        intelligence = { ...(args.settings as typeof intelligence) };
+        return null;
+      case "provider_save": {
+        const saved = { id: Number(args.id ?? nextProvider++), settings: args.settings as Json, credential: "missing" };
+        providers = [...providers.filter((item) => item.id !== saved.id), saved];
+        return providerViews().find((item) => item.id === saved.id);
+      }
+      case "provider_delete":
+        providers = providers.filter((item) => item.id !== Number(args.id));
+        return null;
+      case "provider_enter_credential":
+        providers = providers.map((item) => item.id === Number(args.id) ? { ...item, credential: "stored" } : item);
+        return "stored";
+      case "provider_delete_credential":
+        providers = providers.map((item) => item.id === Number(args.id) ? { ...item, credential: "missing" } : item);
+        return "missing";
+      case "provider_test": return { status: 200, models: ["fixture-model", "other-model"], modelListed: true, elapsedMs: 182 };
       case "list_conversations": {
         const query = String(args.query ?? "").toLowerCase();
         return conversations
@@ -474,7 +534,7 @@ export async function installFixtures(name: string) {
       case "prepare_bundled_model": {
         await wait(name === "firstlaunch" ? 1200 : 0);
         if (name === "corrupted") return { state: "corrupted", model: null, autoLoad: false };
-        if (name === "nobundle") return { state: "missing", model: null, autoLoad: false };
+        if (name === "nobundle" || name === "onboarding" || name === "providers") return { state: "missing", model: null, autoLoad: false };
         if (!models.some((item) => item.id === lfm.id)) models.push(lfm);
         return { state: "ready", model: lfm, autoLoad: models.length === 1 };
       }

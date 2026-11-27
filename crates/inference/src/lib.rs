@@ -1,5 +1,6 @@
 //! Dedicated local inference worker and optional llama.cpp provider.
 
+mod adapter;
 #[cfg(feature = "llama")]
 mod backend;
 #[cfg(feature = "llama")]
@@ -8,6 +9,7 @@ pub mod embedding;
 mod gguf;
 #[cfg(feature = "llama")]
 mod llama;
+pub use adapter::LocalInference;
 mod worker;
 
 #[cfg(feature = "llama")]

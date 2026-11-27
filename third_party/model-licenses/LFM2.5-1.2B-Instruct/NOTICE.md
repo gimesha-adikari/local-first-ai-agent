@@ -1,8 +1,9 @@
 # LFM2.5-1.2B-Instruct model notice
 
-Linux packages built with `tauri.bundled-model.conf.json` include the
-LFM2.5-1.2B-Instruct language model by Liquid AI, Inc. as a separate
-resource file. The model is licensed under the LFM Open License v1.0
+Linux packages up to v0.2.0 included the LFM2.5-1.2B-Instruct language
+model by Liquid AI, Inc. as a separate resource file. Since stage 03-C the
+package ships no model; the same file can be imported as a checksum-verified
+local model (curated manifest entry `lfm2.5-1.2b-instruct-q4_k_m`). The model is licensed under the LFM Open License v1.0
 (`LICENSE` in this directory, installed next to the model). That license
 applies only to the model file. It does not license the application, and
 the application's own license does not cover the model.

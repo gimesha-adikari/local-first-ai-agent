@@ -77,6 +77,7 @@ fn foundation_chat_prompts() {
         request.temperature = 0.0;
         if label == "multi-turn" {
             request.history.turns.push(CompletedTurn {
+                provenance: None,
                 user: "My dog is named Pico.".into(),
                 assistant: "I will remember that your dog is named Pico.".into(),
             });
@@ -161,10 +162,12 @@ fn qwen_remembers_the_retained_turn_after_trimming() {
         system: "Answer with information from this conversation.".into(),
         turns: vec![
             CompletedTurn {
+                provenance: None,
                 user: "A long unrelated passage. ".repeat(160),
                 assistant: "Understood.".into(),
             },
             CompletedTurn {
+                provenance: None,
                 user: "My dog's name is Pico.".into(),
                 assistant: "I will remember that your dog's name is Pico.".into(),
             },

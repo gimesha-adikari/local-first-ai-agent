@@ -1,10 +1,13 @@
 {
   "identifier": "main",
-  "description": "Access saved conversations, the local inference worker, explicitly authorized local agent tools, and the local knowledge library.",
+  "description": "Access saved conversations, the local inference worker, explicitly authorized local agent tools, the local knowledge library, and provider configuration and status. Credentials are entered natively and never pass through this window.",
   "windows": [
     "main"
   ],
   "permissions": [
+    "allow-shortcut-status",
+    "allow-configure-shortcut",
+    "allow-glance-show",
     "allow-bootstrap",
     "allow-list-conversations",
     "allow-get-conversation",
@@ -68,6 +71,14 @@
     "allow-memory-edit",
     "allow-memory-delete",
     "allow-memory-clear",
+    "allow-provider-list",
+    "allow-provider-save",
+    "allow-provider-delete",
+    "allow-provider-test",
+    "allow-provider-enter-credential",
+    "allow-provider-delete-credential",
+    "allow-intelligence-settings",
+    "allow-set-intelligence-settings",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import packageJson from "../package.json?raw";
 import softwareNotice from "../../../third_party/software-notices/NOTICE?raw";
 import type { Appearance, Bootstrap, ModelSettings, Preferences } from "./chat";
@@ -7,21 +7,24 @@ import {
   Advanced, Capabilities, ModelLicense, ModelsPanel, OutputLimitExplanation, type ModelAction,
 } from "./Dialogs";
 import {
-  BookIcon, ChatIcon, ChevronRightIcon, CpuIcon, CubeIcon, GearIcon, InfoIcon, MemoryIcon, MonitorIcon, MoonIcon,
+  BookIcon, ChatIcon, ChevronRightIcon, CloudIcon, CpuIcon, CubeIcon, GearIcon, InfoIcon, MemoryIcon, MonitorIcon, MoonIcon,
   PowerIcon, ShieldIcon, Spinner, SunIcon,
 } from "./icons";
 import { errorMessage } from "./inference";
 import { embeddingCopy } from "./knowledge";
 import { builtInModelName, capabilityGuidance, modelLabel, referenceProfile } from "./models";
 import { Callout, Dialog, Segmented, Switch } from "./ui";
+import { ProvidersPanel } from "./ProvidersPanel";
+import type { IntelligenceSettings, ProviderView } from "./providers";
 import type { KnowledgeController } from "./useKnowledge";
 
-export type SettingsCategory = "general" | "chat" | "models" | "knowledge" | "privacy" | "about";
+export type SettingsCategory = "general" | "chat" | "models" | "providers" | "knowledge" | "privacy" | "about";
 
 const categories: { key: SettingsCategory; label: string; description: string; icon: ReactNode }[] = [
-  { key: "general", label: "General", description: "Appearance and typing.", icon: <GearIcon size={15} /> },
+  { key: "general", label: "General", description: "Appearance, typing and the desktop shortcut.", icon: <GearIcon size={15} /> },
   { key: "chat", label: "Chat & Agent", description: "The loaded model's abilities, replies and file access.", icon: <ChatIcon size={15} /> },
   { key: "models", label: "Models", description: "Your local models and their configuration. Everything runs on this computer's processor.", icon: <CubeIcon size={15} /> },
+  { key: "providers", label: "Providers", description: "Optional cloud and self-hosted intelligence, with what may be shared and monthly limits.", icon: <CloudIcon size={15} /> },
   { key: "knowledge", label: "Knowledge & Memory", description: "Semantic search, document context and saved memories.", icon: <BookIcon size={15} /> },
   { key: "privacy", label: "Privacy & Storage", description: "What is stored on this computer, and where.", icon: <ShieldIcon size={15} /> },
   { key: "about", label: "About & Licenses", description: "Version, model licenses and notices.", icon: <InfoIcon size={15} /> },
@@ -40,7 +43,7 @@ export type ModelsPanelProps = Omit<Parameters<typeof ModelsPanel>[0], "drafts" 
 
 export function SettingsDialog({
   snapshot, category, onCategory, onSavePreferences, onClose, models, modelAction, knowledge, knowledgeLock,
-  memoryEnabled, onMemoryEnabledChange, onOpenKnowledge, onOpenMemory, onManageAccess,
+  memoryEnabled, onMemoryEnabledChange, onOpenKnowledge, onOpenMemory, onManageAccess, providers,
 }: {
   snapshot: Bootstrap;
   category: SettingsCategory;
@@ -56,6 +59,7 @@ export function SettingsDialog({
   onOpenKnowledge: () => void;
   onOpenMemory: () => void;
   onManageAccess: () => void;
+  providers: { list: ProviderView[]; intelligence: IntelligenceSettings; busy: boolean; onChanged: () => Promise<void> };
 }) {
   // Drafts live here so switching categories never discards them.
   const [preferences, setPreferences] = useState(snapshot.preferences);
@@ -113,6 +117,10 @@ export function SettingsDialog({
                 return next;
               })} />
           )}
+          {category === "providers" && (
+            <ProvidersPanel providers={providers.list} intelligence={providers.intelligence} busy={providers.busy}
+              onChanged={providers.onChanged} />
+          )}
           {category === "knowledge" && (
             <KnowledgePanel knowledge={knowledge} lockReason={knowledgeLock} memoryEnabled={memoryEnabled}
               onMemoryEnabledChange={onMemoryEnabledChange} onOpenKnowledge={onOpenKnowledge} onOpenMemory={onOpenMemory} />
@@ -161,7 +169,61 @@ function GeneralPanel({ preferences, disabled, onChange }: {
           description={preferences.enterToSend ? "Shift+Enter adds a new line." : "Enter adds a new line. Use the send button to send."}
           onChange={(enterToSend) => onChange({ ...preferences, enterToSend })} />
       </section>
+      <ShortcutSettings />
     </div>
+  );
+}
+
+type ShortcutStatus = {
+  state: "available" | "configuring" | "active" | "denied" | "unavailable";
+  trigger: string | null;
+  canReconfigure: boolean;
+};
+
+function ShortcutSettings() {
+  const [status, setStatus] = useState<ShortcutStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const fallback: ShortcutStatus = { state: "unavailable", trigger: null, canReconfigure: false };
+
+  useEffect(() => {
+    let mounted = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      const next = await invoke<ShortcutStatus>("shortcut_status").catch(() => null);
+      if (!mounted) return;
+      setStatus(next ?? { state: "unavailable", trigger: null, canReconfigure: false });
+      if (next?.state === "configuring") timer = setTimeout(() => void refresh(), 500);
+    };
+    void refresh();
+    window.addEventListener("focus", refresh);
+    return () => { mounted = false; clearTimeout(timer); window.removeEventListener("focus", refresh); };
+  }, []);
+
+  async function configure() {
+    setBusy(true);
+    try {
+      setStatus(await invoke<ShortcutStatus>("configure_shortcut"));
+    } catch {
+      setStatus(fallback);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="settings-section">
+      <h4>Desktop shortcut</h4>
+      <p className="hint" role="status">{status?.state === "active"
+        ? `Press ${status.trigger} to open the contextual panel.`
+        : status?.state === "unavailable" ? "The desktop shortcut portal is unavailable."
+          : status?.state === "denied" ? "Shortcut permission was declined."
+            : "Choose a shortcut to open the contextual panel from another app."}</p>
+      {status?.state === "active" && !status.canReconfigure
+        ? <p className="hint">Change this shortcut in your desktop’s keyboard settings.</p>
+        : <button type="button" className="secondary-button small" disabled={busy || !status || status.state === "configuring"}
+            onClick={() => void configure()}>{busy ? "Opening…" : "Configure desktop shortcut…"}</button>}
+      <p className="hint">For a custom keyboard shortcut, use <code>local-first-ai-agent --summon</code>.</p>
+    </section>
   );
 }
 
@@ -310,7 +372,11 @@ function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
       <section className="settings-section">
         <h4>On this computer</h4>
         <ul className="privacy-list">
-          <li>Everything runs locally. Chat, Agent, Knowledge and Memory need no internet connection, and the app doesn't download models.</li>
+          <li>{snapshot.intelligence.localOnly
+            ? "Local-only mode is on: the app makes no outbound connections. Chat, Agent, Knowledge, Memory and the contextual panel, including screen capture and text recognition, run on this computer, and the app doesn't download models."
+            : "Local-only mode is off. Chat and the contextual panel send requests only to the provider you select, after showing what will be shared. Agent, Knowledge, Memory, screen capture and text recognition still run locally, and the app doesn't download models."}</li>
+          <li>The contextual panel reads the clipboard or the screen only when you ask. Each screen capture asks your desktop for permission again, holds one frame in memory, and keeps only the region you confirm until the panel closes. Nothing from the panel is saved unless you choose Remember.</li>
+          <li>Provider API keys are kept in your system keyring, never in the database or this window.</li>
           <li>Conversations, imported document text, semantic indexes and saved memories are stored in an ordinary SQLite database. It isn't encrypted.</li>
           <li>The paths of models you choose, including the remembered semantic model, are stored locally and never shown to the interface or sent anywhere.</li>
           <li>The agent can read only files and folders you select. Access is read-only, expires automatically, and ends when the app closes.</li>
@@ -334,7 +400,7 @@ function AboutPanel() {
     <div className="settings-stack">
       <section className="settings-section">
         <h4>Local-first AI Agent</h4>
-        <p className="hint">{appVersion ? `Version ${appVersion}. ` : ""}Offline Chat, Agent, Knowledge and Memory on your own computer.</p>
+        <p className="hint">{appVersion ? `Version ${appVersion}. ` : ""}Chat, Agent, Knowledge and Memory on your own computer, with optional cloud or self-hosted providers for Chat.</p>
       </section>
       <ModelLicense />
       <section className="settings-section" aria-label="Semantic search model license">

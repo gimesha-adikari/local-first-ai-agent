@@ -324,7 +324,9 @@ fn migrates_populated_schema_seven_without_changing_saved_state() {
     .unwrap();
     db.connection
         .execute_batch(
-            "DROP TABLE chat_source_references; DROP TABLE chat_context_attempts;
+            "DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+         ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
+        DROP TABLE chat_source_references; DROP TABLE chat_context_attempts;
         DROP TABLE memory_settings; DROP TABLE personal_memories;
         DROP TABLE chat_route_coverage; ALTER TABLE models DROP COLUMN content_sha256;
         DROP TABLE model_runtime; ALTER TABLE models DROP COLUMN settings_mode;
@@ -534,7 +536,10 @@ fn schema_eight_citation_remains_available_without_invented_historical_coverage(
     .unwrap();
     db.connection
         .execute_batch(
-            "ALTER TABLE chat_source_references DROP COLUMN cited;
+            "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+         DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+         ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
+         ALTER TABLE chat_source_references DROP COLUMN cited;
          ALTER TABLE chat_context_attempts DROP COLUMN metadata;
          DROP TABLE chat_route_coverage; ALTER TABLE models DROP COLUMN content_sha256;
          DROP TABLE model_runtime; ALTER TABLE models DROP COLUMN settings_mode;

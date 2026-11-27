@@ -160,16 +160,31 @@ Ordinary tests are model-free. Real-model tests are opt-in and receive an
 existing local file through `AGENT_TEST_MODEL`. Keep weights, generated
 files and local profiles outside Git. [CPU inference benchmarks](docs/verification-v0.0.2.md)
 
-### Build the bundled package
+### Build the Debian package
 
-The Debian build uses a local copy of the pinned LFM2.5 GGUF. The staging
-script verifies it and links it into the ignored packaging resources.
+The base package contains no language or embedding model weights. Models are
+optional, verified local imports, and Chat can also use a cloud or
+self-hosted OpenAI-compatible provider.
 
 ```sh
-scripts/stage-bundled-model.sh /path/to/LFM2.5-1.2B-Instruct-Q4_K_M.gguf
 npm --prefix apps/desktop run tauri -- build \
-  --config src-tauri/tauri.bundled-model.conf.json --bundles deb -- --locked
+  --config src-tauri/tauri.deb.conf.json --bundles deb -- --locked
 ```
+
+The package depends on Tesseract with English data and the PipeWire client
+library for contextual screen-region text recognition. Other OCR languages
+are optional `tesseract-ocr-*` packages; the recommended set is listed in
+`/usr/share/doc/local-first-ai-agent/README.ocr-languages`.
+
+### Providers
+
+Settings → Providers configures OpenAI-compatible cloud services and servers
+you run. Local-only mode, the default, makes no outbound connections. Every
+remote request passes the Rust network boundary, carries only the categories
+you allow, and is checked against the monthly limit first. API keys are
+entered in a native dialog and kept in the system keyring (Secret Service);
+without a keyring, providers that need a key stay off.
+[Stage 03-C record](docs/stage-03-c-providers.md)
 
 ## Licenses and notices
 
@@ -179,11 +194,11 @@ and license notices, and the MPL-2.0 source copy for `option-ext` under
 `/usr/share/doc/local-first-ai-agent/`.
 [Application license](LICENSE) · [Software copyright and notices](third_party/software-notices/copyright)
 
-Bundled LFM2.5 remains under the separate LFM Open License v1.0.
-Section 5 limits commercial use by legal entities with annual revenue
-of US$10 million or more. Redistribution requires the license text,
-which the package installs with the model notice beside the GGUF.
-[Bundled model license and notice](third_party/model-licenses/LFM2.5-1.2B-Instruct/NOTICE.md)
+LFM2.5, formerly bundled, is no longer part of the package. It remains
+under the separate LFM Open License v1.0 when you import it; section 5
+limits commercial use by legal entities with annual revenue of US$10
+million or more.
+[LFM2.5 license and notice](third_party/model-licenses/LFM2.5-1.2B-Instruct/NOTICE.md)
 
 See the [roadmap](docs/roadmap.md) and
 [distribution notice verification](docs/task-07-a-distribution-notices.md)

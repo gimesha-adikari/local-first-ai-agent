@@ -272,6 +272,7 @@ impl DecisionRequest {
             turns
                 .into_iter()
                 .map(|(turn, observations)| CompletedTurn {
+                    provenance: turn.provenance,
                     user: escape_markers(&json!({"historical_user_text":turn.user}).to_string()),
                     assistant: escape_markers(
                         &json!({
@@ -317,6 +318,37 @@ impl DecisionRequest {
         }
         self.steps.push(step);
         Ok(())
+    }
+
+    /// Labels come from the task, trusted tool observations and stored context.
+    /// Reuse the adapter's history-fit count when classifying the decision.
+    pub fn input_labels(&self, excluded_turns: usize) -> crate::classification::Labels {
+        use crate::classification::{AGENT_CONTEXT, HISTORY, Labels, SYSTEM_TEXT, USER_INPUT};
+        let mut labels = Labels::derived(
+            [
+                Labels::from_source(USER_INPUT),
+                Labels::from_source(SYSTEM_TEXT),
+            ],
+            AGENT_CONTEXT,
+        );
+        for step in &self.steps {
+            if let DecisionStep::Observation { observation, .. } = step {
+                labels.inherit(&observation.labels());
+            }
+        }
+        for turn in self
+            .conversation
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .skip(excluded_turns)
+        {
+            labels.insert(HISTORY);
+            if let Some(source) = &turn.provenance {
+                labels.inherit(&source.labels);
+            }
+        }
+        labels
     }
 
     pub fn generation_request(&self) -> Result<GenerationRequest> {

@@ -3,7 +3,10 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use agent_core::{chat::Appearance, inference::FinishReason};
+use agent_core::{
+    chat::Appearance,
+    inference::{Cancellation, FinishReason},
+};
 
 use super::*;
 
@@ -421,12 +424,9 @@ fn synthetic_replay_stats() -> GenerationStats {
         excluded_turns: 0,
         output_budget: None,
         context_usage: None,
-        assistant_replay: Some(agent_core::inference::AssistantReplay {
-            prompt_fingerprint: 42,
-            generated: vec![13, 17],
-            utf8_tail: vec![0xe2, 0x82],
-            excluded_turns: 0,
-        }),
+        assistant_replay: Some(agent_core::inference::ResumeState::encode(&serde_json::json!({
+            "prompt_fingerprint": 42, "generated": [13, 17], "utf8_tail": [226, 130], "excluded_turns": 0,
+        })).unwrap()),
     }
 }
 
@@ -474,18 +474,38 @@ fn continuation_reopens_same_attempt_and_retains_checkpoint_on_restart() {
     );
     drop(store);
     let mut store = database.open();
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    let result = store.begin_continuation(id, assistant, model.id, &cancelled);
+    assert_eq!(result.err().unwrap().code, ErrorCode::Cancelled);
+    assert_eq!(
+        store
+            .continuation_remaining(id, assistant, model.id)
+            .unwrap(),
+        3
+    );
+    let cancellation = Cancellation::default();
     assert!(
         store
-            .begin_continuation(id, assistant, model.id + 1)
+            .begin_continuation(id, assistant, model.id + 1, &cancellation)
             .is_err()
     );
-    let plan = store.begin_continuation(id, assistant, model.id).unwrap();
+    let plan = store
+        .begin_continuation(id, assistant, model.id, &cancellation)
+        .unwrap();
     assert_eq!(plan.turn.assistant.id, assistant);
     assert!(plan.turn.user.is_none());
     assert!(plan.settings.enable_thinking);
     assert!(plan.turn.assistant.content.ends_with("```rust\n"));
-    assert_eq!(plan.replay.utf8_tail, vec![0xe2, 0x82]);
-    assert!(store.begin_continuation(id, assistant, model.id).is_err());
+    assert_eq!(
+        plan.replay.decode::<serde_json::Value>().unwrap()["utf8_tail"],
+        serde_json::json!([226, 130])
+    );
+    assert!(
+        store
+            .begin_continuation(id, assistant, model.id, &cancellation)
+            .is_err()
+    );
     let append = plan.turn.assistant.content + "fn main() {}";
     store.checkpoint(assistant, &append).unwrap();
     drop(store);
@@ -544,7 +564,9 @@ fn continuation_is_bounded_and_preserves_latest_attempt_ownership() {
                 .unwrap(),
             3 - index
         );
-        let plan = store.begin_continuation(id, assistant, model.id).unwrap();
+        let plan = store
+            .begin_continuation(id, assistant, model.id, &Cancellation::default())
+            .unwrap();
         let content = plan.turn.assistant.content + " next";
         store
             .finish(
@@ -555,7 +577,11 @@ fn continuation_is_bounded_and_preserves_latest_attempt_ownership() {
             )
             .unwrap();
     }
-    assert!(store.begin_continuation(id, assistant, model.id).is_err());
+    assert!(
+        store
+            .begin_continuation(id, assistant, model.id, &Cancellation::default())
+            .is_err()
+    );
     let saved = store.get(id).unwrap();
     assert_eq!(saved.messages.len(), 2);
     assert_eq!(saved.messages[1].content, "Initial next next next");
@@ -750,3 +776,132 @@ mod relevance_tests;
 
 #[path = "model_tests.rs"]
 mod model_tests;
+
+#[test]
+fn schema_eleven_context_and_memory_reload_with_conservative_labels() {
+    use agent_core::classification::{
+        DataClasses, HISTORY, LIBRARY, MEMORY, MODEL_OUTPUT, Sensitivity, USER_INPUT,
+    };
+
+    let database = TestDatabase::new();
+    let mut store = database.open();
+    let conversation = store.create().unwrap().id;
+    let turn = store
+        .begin_chat_with_context(
+            conversation,
+            TurnAction::Send("legacy question".into()),
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    store
+        .finish(
+            turn.assistant.id,
+            "legacy answer",
+            GenerationState::Complete,
+            None,
+        )
+        .unwrap();
+    let memory = store.create_memory("legacy personal note").unwrap();
+    // Recreate the immediately preceding schema with genuine pre-03-B records.
+    store
+        .connection
+        .execute_batch(
+            "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+         DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+         ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts;
+         ALTER TABLE messages DROP COLUMN classification;
+         PRAGMA user_version=11;",
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = database.open();
+    let saved = store.get(conversation).unwrap();
+    assert_eq!(saved.messages[0].content, "legacy question");
+    assert_eq!(saved.messages[1].content, "legacy answer");
+    for class in [HISTORY, USER_INPUT] {
+        assert!(saved.messages[0].labels.contains(class));
+    }
+    for class in [HISTORY, LIBRARY, MEMORY, MODEL_OUTPUT] {
+        assert!(saved.messages[1].labels.contains(class));
+        assert_eq!(
+            DataClasses::default().sensitivity(class.id),
+            Some(Sensitivity::Personal)
+        );
+    }
+    assert_eq!(store.list_memories("", None, 20).unwrap()[0].id, memory.id);
+    assert!(
+        store.list_memories("", None, 20).unwrap()[0]
+            .labels()
+            .contains(MEMORY)
+    );
+    assert!(
+        store
+            .intelligence_receipts(turn.assistant.id)
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE messages SET classification=?1 WHERE id=?2",
+            params!["[\"unknown.class/1\"]", turn.assistant.id],
+        )
+        .unwrap();
+    assert!(store.get(conversation).is_err());
+    store.delete(conversation).unwrap();
+}
+
+#[test]
+fn schema_fourteen_memories_upgrade_without_provenance_and_panel_memories_keep_theirs() {
+    use agent_core::classification::{CLIPBOARD_TEXT, MEMORY, USER_INPUT};
+    use agent_core::intelligence::{Receipt, SessionState};
+
+    let database = TestDatabase::new();
+    let mut store = database.open();
+    let legacy = store.create_memory("legacy personal note").unwrap();
+    store
+        .connection
+        .execute_batch(
+            "ALTER TABLE personal_memories DROP COLUMN provenance;
+             ALTER TABLE personal_memories DROP COLUMN classification;
+             PRAGMA user_version=14;",
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = database.open();
+    let upgraded = &store.list_memories("", None, 10).unwrap()[0];
+    assert_eq!(upgraded.id, legacy.id);
+    assert!(upgraded.provenance.is_none());
+    assert_eq!(upgraded.labels(), Labels::from_source(MEMORY));
+
+    let mut output = Labels::from_source(USER_INPUT);
+    output.insert(CLIPBOARD_TEXT);
+    let receipt = Receipt {
+        version: 1,
+        capability: agent_core::capability::GENERATE,
+        state: SessionState::Completed,
+        elapsed_ms: 1,
+        provider: None,
+        local_authorization: None,
+        used: Vec::new(),
+        withheld: Vec::new(),
+        output_labels: output,
+        application_retention: agent_core::capability::Retention::Session,
+        external: Vec::new(),
+        usage: Vec::new(),
+        usage_basis: None,
+    };
+    let saved = store.remember_glance("panel answer", &receipt).unwrap();
+    drop(store);
+    let mut store = database.open();
+    let edited = store.edit_memory(saved.id, "panel answer, edited").unwrap();
+    let provenance = edited.provenance.as_ref().unwrap();
+    assert_eq!(provenance["source"], "contextual_panel");
+    assert_eq!(provenance["authorization"], "explicit_user_remember");
+    // Editing keeps the origin labels: an edit never downgrades sensitivity.
+    assert!(edited.labels().contains(CLIPBOARD_TEXT));
+    assert!(edited.labels().contains(MEMORY));
+}

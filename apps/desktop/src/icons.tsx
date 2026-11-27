@@ -51,6 +51,7 @@ export const SunIcon = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r=
 export const MoonIcon = (p: IconProps) => <Icon {...p}><path d="M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z" /></Icon>;
 export const MonitorIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="4.5" width="17" height="11.5" rx="1.5" /><path d="M9 20h6M12 16v4" /></Icon>;
 export const UploadIcon = (p: IconProps) => <Icon {...p}><path d="M12 15.5v-11M7.5 9 12 4.5 16.5 9" /><path d="M4.5 15v3.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V15" /></Icon>;
+export const CloudIcon = (p: IconProps) => <Icon {...p}><path d="M7.5 18.5h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 7.4 9.1 4.75 4.75 0 0 0 7.5 18.5z" /></Icon>;
 export const PowerIcon = (p: IconProps) => <Icon {...p}><path d="M12 3.5v8" /><path d="M7 6.5a7 7 0 1 0 10 0" /></Icon>;
 
 export const BookIcon = (p: IconProps) => <Icon {...p}><path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H18.5v13H6.5A1.5 1.5 0 0 0 5 18.5z" /><path d="M5 18.5A1.5 1.5 0 0 0 6.5 20h12v-3" /><path d="M9 8h6" /></Icon>;
@@ -65,3 +66,6 @@ export function Spinner({ size = 14 }: { size?: number }) {
     </svg>
   );
 }
+export const CropIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 9V5.5a1 1 0 0 1 1-1H9M15 4.5h3.5a1 1 0 0 1 1 1V9M19.5 15v3.5a1 1 0 0 1-1 1H15M9 19.5H5.5a1 1 0 0 1-1-1V15" /><rect x="8.5" y="8.5" width="7" height="7" rx="1" /></Icon>;
+export const ImageIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="5" width="17" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m4.5 17.5 4.5-4.5 3.5 3.5 2.5-2.5 4.5 4" /></Icon>;
+export const ScanTextIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 8.5V6a1.5 1.5 0 0 1 1.5-1.5h2.5M15.5 4.5H18A1.5 1.5 0 0 1 19.5 6v2.5M19.5 15.5V18a1.5 1.5 0 0 1-1.5 1.5h-2.5M8.5 19.5H6A1.5 1.5 0 0 1 4.5 18v-2.5" /><path d="M8.5 9.5h7M8.5 12h7M8.5 14.5h4" /></Icon>;

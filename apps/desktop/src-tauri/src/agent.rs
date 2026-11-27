@@ -24,11 +24,14 @@ use agent_core::{
         StoredAudit, StoredExecution, StoredTask, StoredTaskDetail, StoredTaskEvent, TaskId,
         TaskRequest, TaskState, ToolArguments, ToolId, ToolObservation, ToolRegistry, run_task,
     },
+    capability::{AGENT_DECISION, Decide, Invocation, Invoke, Retention},
     chat::ConversationId,
+    classification::{Labels, MODEL_OUTPUT},
     inference::{Cancellation, ErrorCode, InferenceError},
 };
 use agent_tools::{NativeTools, supported_registry};
-use inference::{InferenceWorker, Pending};
+use engine::policy::{Operation, Permission, Policy, Session};
+use inference::{InferenceWorker, LocalInference, Pending};
 use serde::Serialize;
 use serde_json::Value;
 use storage::SqliteStore;
@@ -678,7 +681,9 @@ fn wait_for<T>(pending: Pending<T>) -> std::result::Result<T, InferenceError> {
 
 struct DesktopAgentHost {
     app: AppHandle,
-    worker: Arc<InferenceWorker>,
+    adapter: LocalInference,
+    policy: Arc<Policy>,
+    result_labels: Labels,
     database: Arc<Mutex<SqliteStore>>,
     session: Arc<AgentSession>,
     task_timeout_ms: u64,
@@ -717,8 +722,35 @@ impl RuntimeHost for DesktopAgentHost {
                 .map_err(|_| context_unavailable())?;
             apply_context(&mut request, turn, &self.history, &scopes, &cache);
         }
-        let pending = self.worker.decide(request, cancellation)?;
+        let operation = Operation::local(
+            &Session::new(cancellation.clone()),
+            AGENT_DECISION,
+            "agent",
+            request.input_labels(0),
+            Retention::Session,
+        );
+        self.policy
+            .authorize_local(Permission::Process, &operation)
+            .map_err(|denial| {
+                let code = if denial == engine::policy::Denial::Cancelled {
+                    if cancellation.is_deadline_elapsed() {
+                        ErrorCode::TimedOut
+                    } else {
+                        ErrorCode::Cancelled
+                    }
+                } else {
+                    ErrorCode::GenerationFailed
+                };
+                InferenceError::new(code, "The intelligence policy denied this Agent decision.")
+            })?;
+        let pending = self.adapter.invoke(
+            Invocation::<Decide>::new(request.clone(), cancellation),
+            |_| Ok(()),
+        )?;
         let response = wait_for(pending)?;
+        self.result_labels
+            .inherit(&request.input_labels(response.stats.excluded_turns));
+        self.result_labels.insert(MODEL_OUTPUT);
         let excluded = self
             .omitted_by_storage
             .saturating_add(response.stats.excluded_turns);
@@ -897,10 +929,24 @@ impl RuntimeHost for DesktopAgentHost {
         answer: Option<&str>,
     ) -> AgentResult<()> {
         let answer = answer.map(|answer| redact_scope_ids(answer.to_owned(), &self.session));
+        if answer.is_some() && self.turn.is_some() {
+            let operation = Operation::local(
+                // Completing a local store transaction must still work if
+                // Stop arrives after the bounded task produced its answer.
+                &Session::new(Cancellation::default()),
+                AGENT_DECISION,
+                "agent-answer",
+                self.result_labels.clone(),
+                Retention::SavedLocally,
+            );
+            self.policy
+                .authorize_local(Permission::Retain, &operation)
+                .map_err(|_| storage_error())?;
+        }
         self.database
             .lock()
             .map_err(|_| storage_error())?
-            .record_agent_event_with_answer(id, event, answer.as_deref())
+            .record_classified_agent_event(id, event, answer.as_deref(), Some(&self.result_labels))
     }
 
     fn proposed(&mut self, id: TaskId, call: &agent_core::agent::ValidatedCall) {
@@ -998,9 +1044,9 @@ fn start_task(
         .map(AgentLimits::with_task_timeout_seconds)
         .transpose()?
         .unwrap_or_default();
-    let operation = state.reserve().map_err(|_| busy_error())?;
+    let operation = state.engine.reserve().map_err(|_| busy_error())?;
     state.agent.join_previous();
-    let status = state.worker.status().map_err(map_inference)?;
+    let status = state.engine.worker().status().map_err(map_inference)?;
     let model = status
         .model
         .filter(|model| model.supports_thinking && status.phase == inference::Phase::Ready)
@@ -1011,7 +1057,7 @@ fn start_task(
             )
         })?;
     let (id, turn, history, omitted_by_storage) = {
-        let mut database = state.database.lock().map_err(|_| storage_error())?;
+        let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
         if let Some(conversation) = conversation {
             let (history, omitted) = database
                 .agent_context(conversation)
@@ -1034,15 +1080,16 @@ fn start_task(
         .agent
         .activate(id, cancellation.clone(), turn, limits.task_timeout_ms)
     {
-        if let Ok(mut database) = state.database.lock() {
+        if let Ok(mut database) = state.engine.store().lock() {
             let _ = database.interrupt_agent_task(id);
         }
         return Err(error);
     }
 
     let session = Arc::clone(&state.agent);
-    let worker = Arc::clone(&state.worker);
-    let database = Arc::clone(&state.database);
+    let adapter = state.engine.inference_adapter().clone();
+    let policy = Arc::clone(state.engine.intelligence_policy());
+    let database = Arc::clone(state.engine.store());
     let task_prompt = prompt;
     let operation_guard = operation;
     let app_handle = app.clone();
@@ -1064,7 +1111,9 @@ fn start_task(
             };
             let mut host = DesktopAgentHost {
                 app: app_handle.clone(),
-                worker,
+                adapter,
+                policy,
+                result_labels: Labels::default(),
                 database,
                 session: Arc::clone(&session),
                 task_timeout_ms: limits.task_timeout_ms,
@@ -1122,7 +1171,7 @@ fn start_task(
         Err(_) => {
             drop(task_thread);
             state.agent.clear_active(id);
-            if let Ok(mut database) = state.database.lock() {
+            if let Ok(mut database) = state.engine.store().lock() {
                 let _ = database.interrupt_agent_task(id);
             }
             return Err(AgentError::new(
@@ -1163,7 +1212,7 @@ pub fn list_agent_tasks(
     limit: Option<u32>,
 ) -> AgentResult<Vec<AgentTaskSummary>> {
     let before = before.as_deref().map(parse_task_id).transpose()?;
-    let database = state.database.lock().map_err(|_| storage_error())?;
+    let database = state.engine.store().lock().map_err(|_| storage_error())?;
     database
         .list_agent_tasks(before, limit.unwrap_or(30))
         .map(|tasks| tasks.into_iter().map(Into::into).collect())
@@ -1173,7 +1222,8 @@ pub fn list_agent_tasks(
 pub fn get_agent_task(state: State<'_, Desktop>, task_id: String) -> AgentResult<AgentTaskDetail> {
     let id = parse_task_id(&task_id)?;
     let mut detail: AgentTaskDetail = state
-        .database
+        .engine
+        .store()
         .lock()
         .map_err(|_| storage_error())?
         .agent_task(id)?
@@ -1233,7 +1283,7 @@ fn grant_selected(
             .filesystem()
             .grant_selected(&mut policy, path, kind, SCOPE_LIFETIME)?;
     let persisted = policy.flush_audit(|namespace, batch| {
-        let mut database = state.database.lock().map_err(|_| storage_error())?;
+        let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
         database.persist_permission_audit(namespace, batch)
     });
     if let Err(error) = persisted {
@@ -1243,7 +1293,7 @@ fn grant_selected(
             .filesystem()
             .revoke(&mut policy, &scope.id);
         let _ = policy.flush_audit(|namespace, batch| {
-            let mut database = state.database.lock().map_err(|_| storage_error())?;
+            let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
             database.persist_permission_audit(namespace, batch)
         });
         return Err(error);
@@ -1261,7 +1311,7 @@ fn grant_selected(
 pub async fn choose_agent_file(
     state: State<'_, Desktop>,
 ) -> AgentResult<Option<AgentScopeDisplay>> {
-    let _operation = state.reserve().map_err(|_| busy_error())?;
+    let _operation = state.engine.reserve().map_err(|_| busy_error())?;
     let Some(file) = rfd::AsyncFileDialog::new()
         .set_title("Grant read access to one file")
         .pick_file()
@@ -1288,7 +1338,7 @@ pub async fn choose_agent_file(
 pub async fn choose_agent_directory(
     state: State<'_, Desktop>,
 ) -> AgentResult<Option<AgentScopeDisplay>> {
-    let _operation = state.reserve().map_err(|_| busy_error())?;
+    let _operation = state.engine.reserve().map_err(|_| busy_error())?;
     let Some(directory) = rfd::AsyncFileDialog::new()
         .set_title("Grant read access to one directory")
         .pick_folder()
@@ -1357,7 +1407,7 @@ pub fn revoke_agent_scope(state: State<'_, Desktop>, scope_id: String) -> AgentR
             .map_err(|_| storage_error())?
             .revoke(internal_id);
         policy.flush_audit(|namespace, batch| {
-            let mut database = state.database.lock().map_err(|_| storage_error())?;
+            let mut database = state.engine.store().lock().map_err(|_| storage_error())?;
             database.persist_permission_audit(namespace, batch)
         })?;
     }

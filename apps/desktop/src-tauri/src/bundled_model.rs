@@ -1,12 +1,11 @@
-//! Discovery and integrity verification of the application-bundled model.
+//! Discovery and integrity verification of the legacy application model.
 //!
-//! The GGUF ships as a separate Tauri resource. It is verified against a
-//! pinned size and SHA-256 before it is registered, and a missing or
-//! corrupted resource never prevents the application from starting.
+//! A Debian upgrade may retain the previously bundled GGUF in system state.
+//! It is verified against a pinned size and SHA-256 before it is registered.
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
@@ -16,11 +15,14 @@ use agent_core::{
     chat::{ChatStore, ModelId, ModelReference},
     inference::{ErrorCode, InferenceError, Result},
 };
+use engine::{
+    database,
+    models::{content_key, recommended_for_model, sha256_hex},
+};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 
-use crate::commands::{Desktop, database, recommended_for_model};
+use crate::commands::Desktop;
 
 /// Pinned identity of a bundled model resource.
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +48,15 @@ pub const LFM25: BundledSpec = BundledSpec {
 
 const VERIFIED_STAMP: &str = "bundled-model.verified";
 const LFM25_TRAINED_CONTEXT: u32 = 128_000;
+
+fn retained_resource_dir() -> Option<&'static Path> {
+    // This is the destination of the Debian pre-install script.
+    cfg!(target_os = "linux").then(|| Path::new("/var/lib/local-first-ai-agent"))
+}
+
+fn retained_model_dir(path: &Path) -> Option<&'static Path> {
+    retained_resource_dir().filter(|dir| path == dir.join(LFM25.resource))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,24 +114,6 @@ fn stamp_line(spec: &BundledSpec, path: &Path, metadata: &fs::Metadata) -> Optio
     ))
 }
 
-pub(crate) fn sha256_hex(path: &Path) -> std::io::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1 << 20];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
 fn write_stamp(path: &Path, line: &str) {
     let temporary = path.with_extension("verified.tmp");
     let mut options = fs::OpenOptions::new();
@@ -137,32 +130,6 @@ fn write_stamp(path: &Path, line: &str) {
     if written.is_err() || fs::rename(&temporary, path).is_err() {
         let _ = fs::remove_file(&temporary);
     }
-}
-
-/// Sampled content identity: file size and the SHA-256 of the first and last
-/// MiB. Equal identities are treated as the same weights at different paths.
-/// Reads at most 2 MiB and never modifies the file.
-pub fn content_key(path: &Path) -> std::io::Result<String> {
-    use std::io::{Seek, SeekFrom};
-    const SAMPLE: u64 = 1 << 20;
-    let mut file = fs::File::open(path)?;
-    let size = file.metadata()?.len();
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; SAMPLE as usize];
-    let head = file.read(&mut buffer)?;
-    hasher.update(&buffer[..head]);
-    if size > SAMPLE {
-        file.seek(SeekFrom::Start(size.saturating_sub(SAMPLE).max(SAMPLE)))?;
-        let mut tail = Vec::with_capacity(SAMPLE as usize);
-        file.take(SAMPLE).read_to_end(&mut tail)?;
-        hasher.update(&tail);
-    }
-    let digest: String = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    Ok(format!("s1:{size}:{digest}"))
 }
 
 /// Record sampled identities for listed files that can be read now, compute
@@ -186,6 +153,12 @@ pub fn reconcile_models(
         // The bundled file was just verified against its pinned digest.
         if let Some((id, sha256)) = verified {
             db.set_model_sha256(id, sha256)?;
+            if let Some(artifact) = engine::manifest::CURATED
+                .iter()
+                .find(|artifact| artifact.sha256 == sha256)
+            {
+                db.set_model_artifact(id, Some(artifact.key))?;
+            }
         }
     }
     let candidates = database(db)?.duplicate_candidates()?;
@@ -231,6 +204,47 @@ pub fn verify(spec: &BundledSpec, resource_dir: &Path, stamp_dir: &Path) -> Veri
     }
 }
 
+fn verify_installed(
+    spec: &BundledSpec,
+    resource_dir: &Path,
+    retained_dir: Option<&Path>,
+    stamp_dir: &Path,
+) -> Verification {
+    let verification = verify(spec, resource_dir, stamp_dir);
+    match (verification, retained_dir) {
+        (Verification::Missing, Some(dir)) => verify(spec, dir, stamp_dir),
+        (verification, _) => verification,
+    }
+}
+
+/// A previously verified row can outlive its file. Recheck the retained
+/// package artifact before loading it, using the same stamp as startup.
+pub async fn check_retained_model(state: &Desktop, id: ModelId) -> Result<()> {
+    let path = database(state.engine.store())?.model(id)?.path;
+    let Some(dir) = retained_model_dir(&path) else {
+        return Ok(());
+    };
+    let invalid = || {
+        InferenceError::new(
+            ErrorCode::InvalidModel,
+            "The retained LFM2.5 model is missing or failed verification.",
+        )
+    };
+    let stamp_dir = state
+        .engine
+        .database_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(invalid)?;
+    match tauri::async_runtime::spawn_blocking(move || verify(&LFM25, dir, &stamp_dir))
+        .await
+        .map_err(|_| invalid())?
+    {
+        Verification::Verified(_) => Ok(()),
+        Verification::Missing | Verification::Corrupted => Err(invalid()),
+    }
+}
+
 pub fn register(
     db: &mut storage::SqliteStore,
     spec: &BundledSpec,
@@ -252,7 +266,11 @@ pub fn register(
         }
     };
     // A new row starts with automatic settings. Existing rows keep theirs.
-    let mut settings = recommended_for_model(LFM25_TRAINED_CONTEXT, spec.bytes);
+    let mut settings = recommended_for_model(
+        LFM25_TRAINED_CONTEXT,
+        spec.bytes,
+        crate::platform::available_memory(),
+    );
     // LFM2.5-Instruct has no switchable Thinking mode.
     settings.enable_thinking = false;
     let registration = db.register_bundled_model(spec.key, &path, spec.file_name, settings)?;
@@ -279,23 +297,29 @@ pub async fn prepare_bundled_model(
     };
     let resource_dir = app.path().resource_dir().map_err(|_| unavailable())?;
     let stamp_dir = state
-        .database_path
+        .engine
+        .database_path()
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(unavailable)?;
-    let verification =
-        tauri::async_runtime::spawn_blocking(move || verify(&LFM25, &resource_dir, &stamp_dir))
-            .await
-            .map_err(|_| unavailable())?;
-    let mut bundled = register(&mut *database(&state.database)?, &LFM25, verification)?;
-    let store = Arc::clone(&state.database);
+    let verification = tauri::async_runtime::spawn_blocking(move || {
+        verify_installed(&LFM25, &resource_dir, retained_resource_dir(), &stamp_dir)
+    })
+    .await
+    .map_err(|_| unavailable())?;
+    let verified_path = match &verification {
+        Verification::Verified(path) => Some(path.clone()),
+        Verification::Missing | Verification::Corrupted => None,
+    };
+    let mut bundled = register(&mut *database(state.engine.store())?, &LFM25, verification)?;
+    let store = Arc::clone(state.engine.store());
     let verified = bundled.model.as_ref().map(|model| model.id);
     tauri::async_runtime::spawn_blocking(move || {
         reconcile_models(&store, verified.map(|id| (id, LFM25.sha256)))
     })
     .await
     .map_err(|_| unavailable())??;
-    let db = database(&state.database)?;
+    let db = database(state.engine.store())?;
     if let Some(model) = &bundled.model {
         bundled.model = Some(db.model(model.id)?.reference);
     }
@@ -303,7 +327,9 @@ pub async fn prepare_bundled_model(
     // Restore the last Chat model that loaded successfully, unless the user
     // explicitly unloaded it. A missing file is reported and not loaded.
     bundled.restore = db.chat_model_to_restore()?.map(|saved| ModelRestore {
-        available: saved.path.is_file(),
+        available: saved.path.is_file()
+            && (retained_model_dir(&saved.path).is_none()
+                || verified_path.as_ref() == Some(&saved.path)),
         model: saved.reference,
     });
     // Without a model to restore, load the bundled model automatically only
@@ -351,6 +377,7 @@ mod tests {
     };
 
     fn fixture_spec() -> BundledSpec {
+        use sha2::{Digest, Sha256};
         let digest = {
             let mut hasher = Sha256::new();
             hasher.update(b"synthetic gguf");
@@ -438,10 +465,107 @@ mod tests {
     }
 
     #[test]
+    fn retained_upgrade_model_keeps_its_id_settings_and_restore_choice() {
+        let spec = fixture_spec();
+        let old = Scratch::new();
+        let retained = Scratch::new();
+        let old_path = old.0.join(spec.resource);
+        let retained_path = retained.0.join(spec.resource);
+        fs::write(&old_path, b"synthetic gguf").unwrap();
+        let mut db = storage::SqliteStore::open(&old.0.join("profile.sqlite3")).unwrap();
+        let legacy = register(&mut db, &spec, verify(&spec, &old.0, &old.0))
+            .unwrap()
+            .model
+            .unwrap();
+        let mut custom = legacy.settings;
+        custom.max_tokens = 99;
+        db.save_model_settings(legacy.id, custom).unwrap();
+        let imported_path = old.0.join("imported.gguf");
+        fs::write(&imported_path, b"user import").unwrap();
+        let imported = db
+            .remember_model(&imported_path, "imported.gguf", custom)
+            .unwrap();
+        db.set_last_chat_model(legacy.id).unwrap();
+        drop(db);
+
+        // Mirror the package upgrade: the original package path disappears.
+        fs::rename(&old_path, &retained_path).unwrap();
+        let mut db = storage::SqliteStore::open(&old.0.join("profile.sqlite3")).unwrap();
+        let verified = verify_installed(&spec, &old.0, Some(&retained.0), &old.0);
+        let upgraded = register(&mut db, &spec, verified).unwrap().model.unwrap();
+        assert_eq!(upgraded.id, legacy.id);
+        assert_eq!(upgraded.settings, custom);
+        let restored = db.chat_model_to_restore().unwrap().unwrap();
+        assert_eq!(restored.reference.id, legacy.id);
+        assert_eq!(restored.path, retained_path);
+        let saved_import = db.model(imported.id).unwrap();
+        assert_eq!(saved_import.path, imported_path);
+        assert_eq!(saved_import.reference.settings, imported.settings);
+        assert_eq!(fs::read(imported_path).unwrap(), b"user import");
+
+        fs::write(retained_path, b"corrupt").unwrap();
+        assert_eq!(
+            verify_installed(&spec, &old.0, Some(&retained.0), &old.0),
+            Verification::Corrupted
+        );
+    }
+
+    #[test]
     fn pinned_lfm_identity_is_consistent() {
         assert!(LFM25.resource.ends_with(LFM25.file_name));
         assert_eq!(LFM25.sha256.len(), 64);
         assert!(LFM25.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        // The formerly bundled file is the curated manifest entry.
+        let curated = engine::manifest::LFM25;
+        assert_eq!(
+            (
+                curated.key,
+                curated.file_name,
+                curated.bytes,
+                curated.sha256
+            ),
+            (LFM25.key, LFM25.file_name, LFM25.bytes, LFM25.sha256)
+        );
+    }
+
+    /// The Debian base package carries no language or embedding model
+    /// weights (OQ-1). Models are optional verified imports.
+    #[test]
+    fn base_package_configuration_contains_no_model_weights() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for name in ["tauri.conf.json", "tauri.deb.conf.json"] {
+            let text = fs::read_to_string(root.join(name)).unwrap();
+            let config: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let bundle = &config["bundle"];
+            let mut paths = Vec::new();
+            if let Some(resources) = bundle["resources"].as_object() {
+                paths.extend(resources.iter().flat_map(|(from, to)| {
+                    [from.clone(), to.as_str().unwrap_or_default().to_owned()]
+                }));
+            }
+            if let Some(resources) = bundle["resources"].as_array() {
+                paths.extend(
+                    resources
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned)),
+                );
+            }
+            if let Some(files) = bundle["linux"]["deb"]["files"].as_object() {
+                paths.extend(files.iter().flat_map(|(to, from)| {
+                    [to.clone(), from.as_str().unwrap_or_default().to_owned()]
+                }));
+            }
+            for path in paths {
+                let lower = path.to_ascii_lowercase();
+                assert!(
+                    ![".gguf", ".safetensors", ".onnx", ".bin", ".pt", "/models/"]
+                        .iter()
+                        .any(|suffix| lower.contains(suffix)),
+                    "{name} packages model data: {path}"
+                );
+            }
+        }
+        assert!(!root.join("tauri.bundled-model.conf.json").exists());
     }
 
     /// Reconciles a disposable copy of a real profile database. Prints the

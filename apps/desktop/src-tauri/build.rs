@@ -1,5 +1,20 @@
 fn main() {
     let app_manifest = tauri_build::AppManifest::new().commands(&[
+        "shortcut_status",
+        "configure_shortcut",
+        "glance_show",
+        "glance_state",
+        "glance_clipboard",
+        "glance_run",
+        "glance_stop",
+        "glance_copy",
+        "glance_remember",
+        "glance_dismiss",
+        "glance_open_main",
+        "glance_capture",
+        "glance_capture_clear",
+        "glance_ocr",
+        "glance_estimate",
         "bootstrap",
         "list_conversations",
         "get_conversation",
@@ -63,6 +78,14 @@ fn main() {
         "memory_edit",
         "memory_delete",
         "memory_clear",
+        "provider_list",
+        "provider_save",
+        "provider_delete",
+        "provider_test",
+        "provider_enter_credential",
+        "provider_delete_credential",
+        "intelligence_settings",
+        "set_intelligence_settings",
     ]);
     let attributes = tauri_build::Attributes::new().app_manifest(app_manifest);
     tauri_build::try_build(attributes).expect("failed to configure the Tauri application");

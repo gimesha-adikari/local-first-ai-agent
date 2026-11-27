@@ -2,23 +2,25 @@
 
 mod agent;
 mod bundled_model;
+mod capture;
 mod chat_context;
 mod commands;
+mod credentials;
 #[cfg(all(test, target_os = "linux"))]
 mod desktop_acceptance;
 mod knowledge;
+mod panel;
+mod platform;
+mod portal_bus;
+mod providers;
 mod semantic;
+mod summon;
 
-use std::{
-    path::Path,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64},
-    },
-};
+use std::{path::Path, sync::Arc};
 
 use agent::*;
 use commands::*;
+use engine::Engine;
 use inference::{InferenceWorker, LlamaProvider};
 use storage::SqliteStore;
 use tauri::Manager;
@@ -54,17 +56,36 @@ fn prepare_database(path: &Path) -> std::io::Result<()> {
 }
 
 fn main() {
-    run_desktop(tauri::Builder::default(), || {
-        InferenceWorker::spawn(LlamaProvider::default)
-    });
+    let instance = match summon::claim() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("Could not start the desktop application: {error}");
+            std::process::exit(1)
+        }
+    };
+    run_desktop_instance(
+        tauri::Builder::default(),
+        || InferenceWorker::spawn(LlamaProvider::default),
+        Some(instance),
+    );
 }
 
+#[cfg(test)]
 fn run_desktop(
     builder: tauri::Builder<tauri::Wry>,
     spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
 ) {
+    run_desktop_instance(builder, spawn_worker, None)
+}
+
+fn run_desktop_instance(
+    builder: tauri::Builder<tauri::Wry>,
+    spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
+    instance: Option<summon::Instance>,
+) {
     builder
-        .manage(knowledge::KnowledgeJobs::default())
+        .register_uri_scheme_protocol("glance-crop", panel::crop_protocol)
         .setup(move |app| {
             let path = app
                 .path()
@@ -73,25 +94,39 @@ fn run_desktop(
             prepare_database(&path)?;
             let database = SqliteStore::open(&path)?;
             let worker = Arc::new(spawn_worker()?);
-            let semantic = semantic::SemanticState::new()?;
-            let database = Arc::new(Mutex::new(database));
-            semantic.restore_remembered(Arc::clone(&database));
-            app.manage(semantic);
+            let engine = Arc::new(Engine::with_network(
+                Arc::new(platform::TauriPlatform),
+                worker,
+                database,
+                path,
+                Arc::new(credentials::SecretServiceStore),
+                engine::network::BoundaryConfig::default(),
+            )?);
             let agent = Arc::new(
                 AgentSession::new().map_err(|error| std::io::Error::other(error.message))?,
             );
-            app.manage(Desktop {
-                worker,
-                agent,
-                database,
-                database_path: path,
-                operations: Arc::new(AtomicBool::new(false)),
-                active_model: AtomicI64::new(0),
-                chat_cancellation: Mutex::new(None),
-            });
+            app.manage(Desktop { engine, agent });
+            app.manage(panel::Panel::default());
+            panel::prewarm(app.handle());
+            summon::install(app.handle(), instance);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            summon::shortcut_status,
+            summon::configure_shortcut,
+            panel::glance_show,
+            panel::glance_state,
+            panel::glance_clipboard,
+            panel::glance_run,
+            panel::glance_stop,
+            panel::glance_copy,
+            panel::glance_remember,
+            panel::glance_dismiss,
+            panel::glance_open_main,
+            panel::screen::glance_capture,
+            panel::screen::glance_capture_clear,
+            panel::screen::glance_ocr,
+            panel::screen::glance_estimate,
             bootstrap,
             list_conversations,
             get_conversation,
@@ -155,6 +190,14 @@ fn run_desktop(
             chat_context::memory_edit,
             chat_context::memory_delete,
             chat_context::memory_clear,
+            providers::provider_list,
+            providers::provider_save,
+            providers::provider_delete,
+            providers::provider_test,
+            providers::provider_enter_credential,
+            providers::provider_delete_credential,
+            providers::intelligence_settings,
+            providers::set_intelligence_settings,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");

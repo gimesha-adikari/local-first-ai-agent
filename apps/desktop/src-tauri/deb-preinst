@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+# The package manager removes obsolete resources during unpack. Retain only
+# the known legacy artifact, outside the package-owned payload.
+[ "${1:-}" = upgrade ] || exit 0
+root=${DPKG_ROOT:-}
+package=local-first-ai-agent
+model=LFM2.5-1.2B-Instruct-Q4_K_M.gguf
+legacy=$root/usr/lib/$package/models/$model
+state=$root/var/lib/$package
+retained=$state/models/$model
+[ -e "$legacy" ] || [ -L "$legacy" ] || exit 0
+
+fail() {
+    echo "$package: cannot preserve the bundled model: $1" >&2
+    echo "The upgrade stopped before removing $legacy. Preserve that file before retrying." >&2
+    exit 1
+}
+
+safe_model() {
+    [ ! -L "$1" ] && [ -f "$1" ] || return 1
+    case "$(stat -c '%u:%a' -- "$1")" in
+        0:644|0:444) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+verified() {
+    safe_model "$1" || return 1
+    [ "$(stat -c '%s' -- "$1")" = 730895168 ] || return 1
+    digest=$(sha256sum < "$1") || return 1
+    [ "${digest%% *}" = b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5 ]
+}
+
+for dir in "$state" "$state/models"; do
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+        mkdir -m 0755 -- "$dir" || fail "could not create $dir"
+    fi
+    [ ! -L "$dir" ] && [ -d "$dir" ] && [ "$(stat -c '%u:%a' -- "$dir")" = 0:755 ] ||
+        fail "$dir is not a root-owned model directory with mode 0755"
+done
+
+if [ -e "$retained" ] || [ -L "$retained" ]; then
+    verified "$retained" || fail "the existing retained file failed verification"
+else
+    safe_model "$legacy" || fail "the old file is not a regular root-owned model with its expected permissions"
+    staging=$(mktemp -d -- "$state/models/.upgrade.XXXXXX") || fail "could not stage the model"
+    trap 'rm -f -- "$staging/$model"; rmdir -- "$staging"' EXIT
+    trap 'exit 1' HUP INT TERM
+    if ! ln -T -- "$legacy" "$staging/$model" 2>/dev/null; then
+        # /usr and /var can be on separate filesystems.
+        cp -p --reflink=auto -- "$legacy" "$staging/$model" || fail "could not copy the old file"
+    fi
+    verified "$staging/$model" || fail "the old file failed verification"
+    ln -T -- "$staging/$model" "$retained" || fail "could not publish the verified file"
+fi
+sync -- "$retained" "$state/models" "$state" "$root/var/lib" ||
+    fail "could not flush the retained file to disk"

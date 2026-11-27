@@ -38,6 +38,10 @@ import {
 } from "./unified";
 import { useAgent } from "./useAgent";
 import { useKnowledge } from "./useKnowledge";
+import {
+  type IntelligenceSettings, type ProviderView, activeRemote, disclosure, listProviders, localityLabel, readinessCopy,
+} from "./providers";
+import { Onboarding, RemoteDisclosure } from "./RemoteViews";
 
 type Modal = "settings" | "access" | "rename" | "delete" | "instructions";
 type Operation = "opening" | "creating" | "saving" | "generating";
@@ -131,6 +135,9 @@ export default function App() {
   const [memoryEnabled, setMemoryEnabled] = useState<boolean | null>(null);
   const [pendingChat, setPendingChat] = useState<PendingChat | null>(null);
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
+  const [providers, setProviders] = useState<ProviderView[]>([]);
+  const providerRefresh = useRef(0);
+  const [providersBusy, setProvidersBusy] = useState(false);
   const viewRef = useRef<View>({ kind: "empty" });
   const agent = useAgent({ onTurnSettled: (identity) => settleTurn(identity) });
   viewRef.current = view;
@@ -177,6 +184,7 @@ export default function App() {
       setSnapshot(initial);
       setSelectedModelId(initial.activeModelId ?? initial.models[0]?.id ?? null);
       setSummaries(list);
+      void listProviders().then((list) => { if (active) setProviders(list); }).catch(() => undefined);
       // Verify and register the bundled model. Existing models, their order
       // and settings are unchanged; it loads only when it is the only model.
       void invoke<BundledModel>("prepare_bundled_model").then((bundled) => {
@@ -287,8 +295,12 @@ export default function App() {
   const phase = snapshot?.inference.phase ?? "empty";
   const modelInfo = snapshot?.inference.model ?? null;
   const modelReady = phase === "ready";
+  const remote = activeRemote(snapshot?.intelligence ?? null, providers);
+  const remoteReady = remote?.readiness === "ready";
+  /** Chat can answer with the loaded local model or the selected provider. */
+  const chatReady = remote ? remoteReady : modelReady;
   const activeReference = snapshot?.models.find((model) => model.id === snapshot.activeModelId) ?? null;
-  const supportsThinking = !!modelInfo?.supportsThinking;
+  const supportsThinking = !remote && !!modelInfo?.supportsThinking;
   const supportsAgent = !!modelInfo?.supportsAgent;
   const agentUnavailable = !agent.eventReady ? "Connecting to Agent events…"
     : !modelReady ? "Load a model to use Agent mode"
@@ -466,7 +478,8 @@ export default function App() {
   }
 
   async function generate(kind: "send" | "regenerate" | "continue", regenerate: RegenerateRequest = {}, messageId?: number) {
-    if (!snapshot || !modelReady || knowledge.holdsLease) return;
+    if (!snapshot || knowledge.holdsLease) return;
+    if (kind === "continue" ? !modelReady : !chatReady) return;
     const content = draft;
     if (kind === "send" && !content.trim()) return;
     if (kind === "regenerate" && !canRegenerateLatest(conversation)) return;
@@ -491,7 +504,7 @@ export default function App() {
     }
     const id = ensured.conversation.id;
     const before = new Set(ensured.conversation.turns.map((turn) => turn.id));
-    const modelName = activeReference?.fileName ?? null;
+    const modelName = remote ? `${remote.settings.name} · ${remote.settings.model}` : activeReference?.fileName ?? null;
     const options = chatRequestOptions({
       thinking, supportsThinking,
       maxTokens: regenerate.maxTokens ?? (parsedOverride === null ? null : parsedOverride),
@@ -887,6 +900,20 @@ export default function App() {
   }
 
   /** Models and Settings share one categorized dialog; "models" opens its Models category. */
+  async function refreshProviders() {
+    const sequence = ++providerRefresh.current;
+    setProvidersBusy(true);
+    try {
+      const intelligence = await invoke<IntelligenceSettings>("intelligence_settings");
+      if (sequence !== providerRefresh.current) return;
+      setSnapshot((current) => current && { ...current, intelligence });
+      const list = await listProviders();
+      if (sequence === providerRefresh.current) setProviders(list);
+    } finally {
+      if (sequence === providerRefresh.current) setProvidersBusy(false);
+    }
+  }
+
   function openModal(next: Modal | "models", category?: SettingsCategory) {
     setModelError(null);
     setModelNotice(null);
@@ -967,17 +994,20 @@ export default function App() {
 
   const canSend = !busy && !!draft.trim() && (mode === "agent"
     ? agentAvailable && validTimeout(Number(taskTimeout))
-    : !!snapshot && modelReady && !Number.isNaN(parsedOverride) && !knowledgeBlocked);
+    : !!snapshot && chatReady && !Number.isNaN(parsedOverride) && !knowledgeBlocked);
 
   const composerStatus = !snapshot ? (startupError ? "The app couldn't start." : "Starting…")
-    : generating ? (stopping ? "Stopping…" : pendingChat ? pendingChat.label : "Generating locally…")
+    : generating ? (stopping ? "Stopping…" : pendingChat ? pendingChat.label
+      : remote ? `Waiting for ${remote.settings.name}…` : "Generating locally…")
       : agent.running ? (activeHere
         ? (agent.activeApproval ? "Waiting for your approval. Approve, deny or cancel above." : "Agent is working. You can cancel at any time.")
         : `An Agent turn is running in “${shorten(activeTitle ?? "another conversation", 40)}”.`)
         : modelAction ? statusText
           : leaseText ? leaseText
+          : mode === "chat" && remote ? (remoteReady ? disclosure(remote)
+            : `${remote.settings.name} isn't ready: ${readinessCopy(remote).label}. Open Providers in Settings.`)
           : !modelReady ? (bundled === "checking" && !snapshot.models.length ? "Checking the built-in assistant…"
-            : phase === "loading" ? "Loading model…" : "Load a model to start · Everything runs on this device")
+            : phase === "loading" ? "Loading model…" : "Load a local model, or select a provider in Settings, to start")
             : mode === "agent" ? (agentUnavailable ?? "Agent uses only tools and files you allow · Local only")
               : knowledgeBlocked ? `${readiness.blocked!.title}. ${readiness.blocked!.detail}`
               : `Local inference · ${snapshot.preferences.enterToSend ? "Enter to send, Shift+Enter for a new line" : "Use the send button to send"}`;
@@ -999,7 +1029,9 @@ export default function App() {
       <p>
         {mode === "agent"
           ? "The agent can calculate, describe this device, search and read files you select, and find or open applications after you approve."
-          : "Chat runs entirely on this computer with your local model."}
+          : remote ? `Chat sends your requests to ${remote.settings.name} (${localityLabel(remote).toLowerCase()}). Agent mode stays on this computer.`
+            : snapshot && !snapshot.models.length ? "Chat needs a local model or a provider you connect."
+            : "Chat runs entirely on this computer with your local model."}
       </p>
       {!snapshot && !startupError && <p className="hint" role="status">Starting…</p>}
       {startupError && <Callout tone="error" title="The app couldn't start" role="alert">{startupError}</Callout>}
@@ -1008,7 +1040,13 @@ export default function App() {
           <Spinner size={13} />{loadingBuiltIn ? `Starting ${builtInModelName}, the built-in assistant…` : "Loading the model…"}
         </p>
       )}
-      {snapshot && !modelReady && phase !== "loading" && !modelAction && (bundled === "checking" && !snapshot.models.length ? (
+      {snapshot && mode === "chat" && remote && !remoteReady && (
+        <Callout tone="warning" title={`${remote.settings.name} isn't ready`}
+          actions={<button type="button" className="primary-button small" onClick={() => openModal("settings", "providers")}>Open Providers</button>}>
+          {readinessCopy(remote).detail ?? readinessCopy(remote).label}
+        </Callout>
+      )}
+      {snapshot && !modelReady && !(mode === "chat" && remote) && phase !== "loading" && !modelAction && (bundled === "checking" && !snapshot.models.length ? (
         <p className="hint inline-status" role="status"><Spinner size={13} />Checking the built-in assistant…</p>
       ) : bundled === "corrupted" ? (
         <Callout tone="error" role="alert" title="The built-in assistant couldn't be verified"
@@ -1018,15 +1056,16 @@ export default function App() {
           Its model file is damaged or was changed, so it wasn't loaded. Reinstall the app to restore it
           {snapshot.models.length ? ", or choose one of your models." : ", or import a GGUF model from this computer."}
         </Callout>
-      ) : (
-        <Callout tone="accent" title={snapshot.models.length ? "Choose a model to begin" : "Import a model to begin"}
-          actions={<button type="button" className="primary-button small" onClick={() => openModal("models")}>
-            {snapshot.models.length ? "Choose a model" : "Import a model"}
-          </button>}>
-          {snapshot.models.length
-            ? `Your models are listed in Models. ${builtInModelName} handles everyday Chat; ${advancedModelName} adds Agent tasks and Thinking.`
-            : `This copy of the app doesn't include the built-in assistant. Select a GGUF model file from this computer, such as ${advancedModelName}.`}
+      ) : snapshot.models.length ? (
+        <Callout tone="accent" title="Choose a model to begin"
+          actions={<>
+            <button type="button" className="primary-button small" onClick={() => openModal("models")}>Choose a model</button>
+            <button type="button" className="secondary-button small" onClick={() => openModal("settings", "providers")}>Use a provider</button>
+          </>}>
+          {`Your models are listed in Models. ${builtInModelName} handles everyday Chat; ${advancedModelName} adds Agent tasks and Thinking. You can also connect a cloud or self-hosted provider for Chat.`}
         </Callout>
+      ) : (
+        <Onboarding onLocal={() => openModal("models")} onProviders={() => openModal("settings", "providers")} />
       ))}
       {snapshot && modelReady && mode === "agent" && !supportsAgent && (
         <Callout tone="accent" title={`Agent needs ${advancedModelName}`}
@@ -1034,7 +1073,7 @@ export default function App() {
           {capabilityGuidance(modelInfo)}
         </Callout>
       )}
-      {snapshot && modelReady && (mode === "chat" || supportsAgent) && (
+      {snapshot && (mode === "chat" ? chatReady : modelReady && supportsAgent) && (
         <ul className="suggestions" aria-label="Suggestions">
           {(mode === "agent" ? agentSuggestions : chatSuggestions).map((text) => (
             <li key={text}>
@@ -1063,6 +1102,7 @@ export default function App() {
         query={query} onQuery={setQuery} searchError={searchError} items={recent} records={records} currentKey={currentKey}
         navigationDisabled={generating || operation === "opening"} onOpen={(item) => void openConversation(item.id)}
         onOpenRecord={openRecord}
+        onGlance={() => { void invoke("glance_show").catch((error: unknown) => setError(errorMessage(error))); }}
         onKnowledge={() => openDestination("knowledge")} onMemory={() => openDestination("memory")}
         onModels={() => openModal("models")} onSettings={() => openModal("settings")} loading={!snapshot} />
 
@@ -1076,12 +1116,21 @@ export default function App() {
         <header className="topbar">
           <h1 className="topbar-title" title={title}>{title}</h1>
           <span className="spacer" />
-          <button type="button" className="status-pill" onClick={() => openModal("models")}
-            title="Models" aria-label={`Model status: ${statusText}. Open models.`}>
-            <span className={`status-dot status-${modelAction ? "loading" : phase}`} aria-hidden="true" />
-            <span className="status-pill-label">Local</span>
-            <span className="status-pill-model">{statusText}</span>
-          </button>
+          {remote ? (
+            <button type="button" className="status-pill" onClick={() => openModal("settings", "providers")}
+              title="Providers" aria-label={`Chat uses ${remote.settings.name}. Open providers.`}>
+              <span className={`status-dot status-${remoteReady ? "ready" : "empty"}`} aria-hidden="true" />
+              <span className="status-pill-label">{remote.settings.locality === "cloud" ? "Cloud" : "Self-hosted"}</span>
+              <span className="status-pill-model">{remote.settings.name} · {remote.settings.model}</span>
+            </button>
+          ) : (
+            <button type="button" className="status-pill" onClick={() => openModal("models")}
+              title="Models" aria-label={`Model status: ${statusText}. Open models.`}>
+              <span className={`status-dot status-${modelAction ? "loading" : phase}`} aria-hidden="true" />
+              <span className="status-pill-label">Local</span>
+              <span className="status-pill-model">{statusText}</span>
+            </button>
+          )}
           {view.kind === "conversation" && conversation && (
             <Menu label="Conversation options" align="end" trigger={<MoreIcon size={18} />} className="topbar-menu" disabled={busy}>
               {(close) => (
@@ -1190,6 +1239,9 @@ export default function App() {
               Models shows the recommended settings, which you can review before applying.
             </Callout>
           )}
+          {mode === "chat" && remote && remoteReady && (
+            <RemoteDisclosure provider={remote} onOpen={() => openModal("settings", "providers")} />
+          )}
           <Composer inputRef={composer} mode={mode} onModeChange={setMode}
             agentAvailable={agentAvailable} agentUnavailable={agentUnavailable}
             draft={draft} onDraftChange={setDraft} onSubmit={submit}
@@ -1250,7 +1302,8 @@ export default function App() {
           knowledge={knowledge} knowledgeLock={lockReason} memoryEnabled={memoryEnabled} onMemoryEnabledChange={changeMemoryEnabled}
           onOpenKnowledge={() => { setModal(null); openDestination("knowledge"); }}
           onOpenMemory={() => { setModal(null); openDestination("memory"); }}
-          onManageAccess={() => openModal("access")} />
+          onManageAccess={() => openModal("access")}
+          providers={{ list: providers, intelligence: snapshot.intelligence, busy: providersBusy || chatBusy, onChanged: refreshProviders }} />
       )}
       {modal === "access" && (
         <AccessDialog scopes={agent.scopes} remaining={agent.scopeRemaining} action={agent.scopeAction}

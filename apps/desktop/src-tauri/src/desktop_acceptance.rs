@@ -9,8 +9,8 @@ use agent_core::{
     agent::{DecisionRequest, DecisionResponse},
     chat::{ChatStore, ModelSettings},
     inference::{
-        AssistantReplay, Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats,
-        InferenceError, InferenceProvider, ModelConfig, ModelInfo, OutputBudget, Result, TextDelta,
+        Cancellation, ErrorCode, FinishReason, GenerationRequest, GenerationStats, InferenceError,
+        InferenceProvider, ModelConfig, ModelInfo, OutputBudget, Result, ResumeState, TextDelta,
     },
 };
 use serde_json::{Value, json};
@@ -44,6 +44,9 @@ impl InferenceProvider for Fixture {
         cancellation: &Cancellation,
         emit: &mut dyn FnMut(TextDelta) -> Result<()>,
     ) -> Result<GenerationStats> {
+        if request.prompt.contains("quoted_context") {
+            return glance_generation(request, cancellation, emit);
+        }
         if request.prompt != "Fixture Chat continuation" {
             return Err(InferenceError::new(
                 ErrorCode::GenerationFailed,
@@ -57,12 +60,16 @@ impl InferenceProvider for Fixture {
             ));
         }
         let earlier = request.chat.as_ref().and_then(|chat| chat.replay.as_ref());
-        let mut generated = earlier.map_or_else(Vec::new, |replay| replay.generated.clone());
+        let mut generated: Vec<i32> =
+            earlier.map_or_else(Vec::new, |replay| replay.decode().unwrap());
         let piece = match generated.len() {
             0 => "First ",
             1 => "second ",
             _ => "stopped.",
         };
+        if let Some(observer) = &request.context_observer {
+            observer.decoded(Default::default(), 0)?;
+        }
         emit(TextDelta { text: piece.into() })?;
         generated.push(17);
         let reason = if request.max_tokens == 3 {
@@ -93,12 +100,8 @@ impl InferenceProvider for Fixture {
                 context_length: 2048,
             }),
             context_usage: None,
-            assistant_replay: (reason == FinishReason::TokenLimit).then_some(AssistantReplay {
-                prompt_fingerprint: 42,
-                generated,
-                utf8_tail: Vec::new(),
-                excluded_turns: 0,
-            }),
+            assistant_replay: (reason == FinishReason::TokenLimit)
+                .then(|| ResumeState::encode(&generated).unwrap()),
         })
     }
 
@@ -191,6 +194,56 @@ impl InferenceProvider for Fixture {
     }
 }
 
+/// A contextual panel request. `HOLD_LOCAL` streams once, then waits for Stop.
+fn glance_generation(
+    request: &GenerationRequest,
+    cancellation: &Cancellation,
+    emit: &mut dyn FnMut(TextDelta) -> Result<()>,
+) -> Result<GenerationStats> {
+    let context = request.context.as_ref();
+    if let Some(observer) = &request.context_observer {
+        observer.decoded(context.map_or_else(Default::default, |c| c.usage()), 0)?;
+    }
+    let reason = if request.prompt.contains("HOLD_LOCAL") {
+        emit(TextDelta {
+            text: "Holding the synthetic request".into(),
+        })?;
+        let started = Instant::now();
+        while !cancellation.is_cancelled() && started.elapsed() < Duration::from_secs(20) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        FinishReason::Cancelled
+    } else {
+        let memory = context.is_some_and(|c| !c.memories.is_empty());
+        let document = context.is_some_and(|c| c.evidence.is_some());
+        for piece in [
+            "Local fixture key points: ",
+            "the tanks collect rainwater",
+            if memory { "; memory supplied" } else { "" },
+            if document { "; document supplied" } else { "" },
+            ".",
+        ] {
+            if !piece.is_empty() {
+                emit(TextDelta { text: piece.into() })?;
+            }
+        }
+        FinishReason::EndOfGeneration
+    };
+    Ok(GenerationStats {
+        reason,
+        prompt_tokens: 12,
+        prompt_tokens_per_second: None,
+        generated_tokens: 5,
+        time_to_first_token_ms: Some(1),
+        elapsed_ms: 2,
+        tokens_per_second: 1.0,
+        excluded_turns: 0,
+        output_budget: None,
+        context_usage: context.map(|c| c.usage()),
+        assistant_replay: None,
+    })
+}
+
 fn isolated_profile() -> PathBuf {
     let profile = PathBuf::from(
         std::env::var_os("AGENT_ACCEPTANCE_PROFILE").expect("temporary acceptance profile"),
@@ -203,6 +256,12 @@ fn isolated_profile() -> PathBuf {
         .unwrap();
     assert_eq!(data, profile.join("data"));
     profile
+}
+
+/// Load a supplied embedding file through the production selection path.
+fn select_embedding(engine: &engine::Engine, path: PathBuf) {
+    let lease = engine.begin_embedding_selection().unwrap();
+    tauri::async_runtime::block_on(engine.select_embedding_model(lease, path)).unwrap();
 }
 
 fn fixture_worker() -> Result<InferenceWorker> {
@@ -222,26 +281,31 @@ fn desktop_approval_fixture() {
 #[test]
 #[ignore = "launches a deterministic packaged WebView under an isolated X11 profile"]
 fn unified_ipc_desktop_fixture() {
-    run_webview_fixture(
+    run_webview_fixture_with_worker(
         isolated_profile(),
         include_str!("unified_ipc_acceptance.js"),
         "document.documentElement.dataset.unifiedIpcResult || ''",
         |webview| {
             let desktop = webview.state::<crate::commands::Desktop>();
-            let model = desktop
-                .database
-                .lock()
-                .unwrap()
-                .remember_model(
-                    Path::new("/synthetic/fixture.gguf"),
-                    "fixture.gguf",
-                    ModelSettings::default(),
-                )
-                .unwrap();
-            desktop
-                .active_model
-                .store(model.id, std::sync::atomic::Ordering::Release);
+            let settings = ModelSettings::default();
+            let model = {
+                let mut db = desktop.engine.store().lock().unwrap();
+                let model = db
+                    .remember_model(
+                        Path::new("/synthetic/fixture.gguf"),
+                        "fixture.gguf",
+                        settings,
+                    )
+                    .unwrap();
+                // Custom settings load as given, without inspecting a file.
+                db.set_model_settings(model.id, settings, false).unwrap();
+                model
+            };
+            tauri::async_runtime::block_on(desktop.engine.load_model(model.id, settings)).unwrap();
         },
+        // Empty, so the engine's own load path loads the scripted model.
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(90),
     );
 }
 
@@ -282,16 +346,16 @@ fn semantic_ipc_desktop_fixture() {
         "document.documentElement.dataset.semanticIpcResult || ''",
         |webview| {
             let desktop = webview.state::<crate::commands::Desktop>();
-            let mut db = desktop.database.lock().unwrap();
+            let mut db = desktop.engine.store().lock().unwrap();
             let long = "! ".repeat(32 * 1024);
             for (i, (name, body)) in [
                 (
                     "Rail",
-                    "The railway station dispatches regional passenger trains every morning.",
+                    "Regional trains depart from platform four every thirty minutes on weekdays.",
                 ),
                 (
                     "Tart",
-                    "A lemon tart is a dessert served cold. Chill it before slicing.",
+                    "Preheat the oven to 180 degrees and chill the lemon tart for two hours before serving.",
                 ),
                 ("Cancellation fixture", long.as_str()),
             ]
@@ -335,12 +399,9 @@ fn contextual_chat_ipc_desktop_fixture() {
         .expect("contextual Chat WebView fixture"),
         "document.documentElement.dataset.contextualChatIpcResult || ''",
         move |webview| {
-            webview
-                .state::<crate::semantic::SemanticState>()
-                .load_fixture_embedding(embedding.clone())
-                .unwrap();
             let desktop = webview.state::<crate::commands::Desktop>();
-            let mut db = desktop.database.lock().unwrap();
+            select_embedding(&desktop.engine, embedding.clone());
+            let mut db = desktop.engine.store().lock().unwrap();
             let settings = ModelSettings {
                 model: ModelConfig {
                     context_length: 1024,
@@ -350,12 +411,15 @@ fn contextual_chat_ipc_desktop_fixture() {
                 max_tokens: 96,
                 ..Default::default()
             };
-            db.remember_model(
-                &model,
-                model.file_name().unwrap().to_str().unwrap(),
-                settings,
-            )
-            .unwrap();
+            let saved = db
+                .remember_model(
+                    &model,
+                    model.file_name().unwrap().to_str().unwrap(),
+                    settings,
+                )
+                .unwrap();
+            // Budget assertions require the fixture's fixed 1,024-token context.
+            db.set_model_settings(saved.id, settings, false).unwrap();
 
             let large = "large ".to_owned() + &"abcd ".repeat(375);
             for (i, (name, body)) in [
@@ -419,10 +483,10 @@ fn task05_integration_desktop_fixture() {
         "document.documentElement.dataset.task05Result || ''",
         move |webview| {
             let started = Instant::now();
-            webview
-                .state::<crate::semantic::SemanticState>()
-                .load_fixture_embedding(bge.clone())
-                .unwrap();
+            select_embedding(
+                &webview.state::<crate::commands::Desktop>().engine,
+                bge.clone(),
+            );
             let load_ms = started.elapsed().as_millis();
             webview
                 .eval(format!(
@@ -430,21 +494,24 @@ fn task05_integration_desktop_fixture() {
                 ))
                 .unwrap();
             let desktop = webview.state::<crate::commands::Desktop>();
-            let mut db = desktop.database.lock().unwrap();
-            db.remember_model(
-                &model,
-                model.file_name().unwrap().to_str().unwrap(),
-                ModelSettings {
-                    model: ModelConfig {
-                        context_length: 1024,
-                        threads: 4,
-                    },
-                    temperature: 0.0,
-                    max_tokens: 96,
-                    ..ModelSettings::default()
+            let mut db = desktop.engine.store().lock().unwrap();
+            let settings = ModelSettings {
+                model: ModelConfig {
+                    context_length: 1024,
+                    threads: 4,
                 },
-            )
-            .unwrap();
+                temperature: 0.0,
+                max_tokens: 96,
+                ..ModelSettings::default()
+            };
+            let saved = db
+                .remember_model(
+                    &model,
+                    model.file_name().unwrap().to_str().unwrap(),
+                    settings,
+                )
+                .unwrap();
+            db.set_model_settings(saved.id, settings, false).unwrap();
             for i in 1..=128_u8 {
                 let (name, body) = match i {
                     1 => ("Orchard guide.pdf".into(),
@@ -485,6 +552,178 @@ fn task05_integration_desktop_fixture() {
         },
         || InferenceWorker::spawn(inference::LlamaProvider::default),
         Duration::from_secs(180),
+    );
+}
+
+/// Completion requests that reached any loopback provider fixture.
+static COMPLETIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Dimensions of every image a loopback provider received, decoded from
+/// the request body (the panel must never send more than the crop).
+static RECEIVED_IMAGES: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
+
+fn base64_decode(text: &str) -> Vec<u8> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    let (mut buffer, mut bits) = (0u32, 0);
+    for byte in text.bytes().filter_map(value) {
+        buffer = (buffer << 6) | u32::from(byte);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    out
+}
+
+fn record_images(body: &[u8]) {
+    let Ok(json) = serde_json::from_slice::<Value>(body) else {
+        return;
+    };
+    for message in json["messages"].as_array().into_iter().flatten() {
+        for part in message["content"].as_array().into_iter().flatten() {
+            if let Some(url) = part["image_url"]["url"].as_str()
+                && let Some(data) = url.strip_prefix("data:image/png;base64,")
+            {
+                let bytes = base64_decode(data);
+                let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+                if let Ok(reader) = decoder.read_info() {
+                    let info = reader.info();
+                    RECEIVED_IMAGES
+                        .lock()
+                        .unwrap()
+                        .push((info.width, info.height));
+                }
+            }
+        }
+    }
+}
+
+/// A loopback OpenAI-compatible server. `/models` lists how many requests
+/// arrived before it, so the WebView script can prove local-only mode sent
+/// nothing.
+fn openai_fixture() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut seen = 0;
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = Vec::new();
+            let mut buffer = [0; 8192];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let length = text
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().to_owned())
+                })
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let head = text.find("\r\n\r\n").map_or(0, |end| end + 4);
+            while request.len() < head + length {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            if request
+                .windows(b"HOLD_FOR_POLICY".len())
+                .any(|s| s == b"HOLD_FOR_POLICY")
+            {
+                let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"waiting\"}}]}\n\n";
+                stream.write_all(response).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(12)))
+                    .unwrap();
+                // Revocation must close the connection while the fixture is waiting.
+                assert_eq!(stream.read(&mut buffer).unwrap(), 0);
+                seen += 1;
+                continue;
+            }
+            if !text.starts_with("GET /v1/models ") {
+                COMPLETIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                record_images(&request[head.min(request.len())..]);
+            }
+            let response = if text.starts_with("GET /v1/models ") {
+                let auth = if text.contains("\r\nAuthorization: Bearer sk-synthetic-dialog-123\r\n")
+                {
+                    "auth-ok"
+                } else {
+                    "auth-missing"
+                };
+                let body = format!(
+                    r#"{{"data":[{{"id":"fixture-model"}},{{"id":"seen-{seen}"}},{{"id":"{auth}"}}]}}"#
+                );
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            } else {
+                let mut body = String::new();
+                for piece in ["Remote ", "fixture ", "answer"] {
+                    body.push_str(&format!(
+                        "data: {}\n\n",
+                        json!({"choices":[{"delta":{"content":piece}}]})
+                    ));
+                }
+                body.push_str(
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                );
+                body.push_str("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n");
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            seen += 1;
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+#[ignore = "launches a packaged WebView under an isolated X11 profile with a loopback provider fixture"]
+fn providers_ipc_desktop_fixture() {
+    let port = openai_fixture();
+    run_webview_fixture_with_worker(
+        isolated_profile(),
+        include_str!("providers_ipc_acceptance.js").replace("__PORT__", &port.to_string()),
+        "document.documentElement.dataset.providersIpcResult || ''",
+        |_| {},
+        // No local model is loaded: Chat can only complete through the provider.
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(90),
+    );
+}
+
+#[test]
+#[ignore = "opens the native GTK key dialog; an XTest helper types a synthetic key in an isolated X11 and keyring session"]
+fn credential_entry_desktop_fixture() {
+    let port = openai_fixture();
+    run_webview_fixture_with_worker(
+        isolated_profile(),
+        include_str!("credential_ipc_acceptance.js").replace("__PORT__", &port.to_string()),
+        "document.documentElement.dataset.credentialIpcResult || ''",
+        |_| {},
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(90),
     );
 }
 
@@ -557,4 +796,270 @@ fn run_webview_fixture_with_worker(
             });
         });
     run_desktop(builder, worker);
+}
+
+/// Capture the isolated X display, with the panel's geometry beside it.
+fn glance_screenshot(app: &tauri::AppHandle, stage: &str) {
+    let (Some(directory), Some(display)) = (
+        std::env::var_os("AGENT_GLANCE_SCREENSHOTS"),
+        std::env::var_os("DISPLAY"),
+    ) else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let screen = std::env::var("AGENT_GLANCE_SCREEN").unwrap_or_else(|_| "1280x860".into());
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-f", "x11grab", "-draw_mouse", "0"])
+        .args(["-video_size", &screen, "-i"])
+        .arg(display)
+        .args(["-frames:v", "1", "-y"])
+        .arg(directory.join(format!("{stage}.png")))
+        .status()
+        .unwrap();
+    assert!(status.success(), "screenshot {stage} failed");
+    if let Some(panel) = app.get_webview_window("panel") {
+        let (position, size) = (panel.outer_position().unwrap(), panel.outer_size().unwrap());
+        let geometry =
+            json!({"x": position.x, "y": position.y, "width": size.width, "height": size.height});
+        std::fs::write(
+            directory.join(format!("{stage}.json")),
+            geometry.to_string(),
+        )
+        .unwrap();
+    }
+}
+
+fn eval_json(webview: &tauri::WebviewWindow, expression: &str) -> Option<Value> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    webview
+        .eval_with_callback(expression, move |raw| {
+            let _ = tx.send(raw);
+        })
+        .ok()?;
+    let raw = rx.recv_timeout(Duration::from_millis(500)).ok()?;
+    serde_json::from_str::<String>(&raw)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+/// Drives the panel's real DOM and IPC. Each screenshot stage waits for the
+/// host to capture it; the host also reports how many requests reached the
+/// loopback provider at that moment.
+fn watch_panel(panel: tauri::WebviewWindow, main: tauri::WebviewWindow) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut captured = String::new();
+    let outcome = loop {
+        if Instant::now() > deadline {
+            break json!({"pass": false, "error": "panel fixture timed out"});
+        }
+        thread::sleep(Duration::from_millis(100));
+        let Some(state) = eval_json(
+            &panel,
+            "JSON.stringify({stage: document.documentElement.dataset.glanceStage || '', result: document.documentElement.dataset.glanceResult || ''})",
+        ) else {
+            continue;
+        };
+        let stage = state["stage"].as_str().unwrap_or_default().to_owned();
+        if !stage.is_empty() && stage != captured {
+            glance_screenshot(panel.app_handle(), &stage);
+            let seen = COMPLETIONS.load(std::sync::atomic::Ordering::SeqCst);
+            let images = json!(*RECEIVED_IMAGES.lock().unwrap()).to_string();
+            panel
+                .eval(format!(
+                    "document.documentElement.dataset.remoteSeen = '{seen}'; document.documentElement.dataset.remoteImages = {}; document.documentElement.dataset.glanceShot = {};",
+                    json!(images),
+                    json!(stage)
+                ))
+                .unwrap();
+            captured = stage;
+        }
+        if let Some(result) = state["result"]
+            .as_str()
+            .filter(|raw| !raw.is_empty())
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        {
+            break result;
+        }
+    };
+    // Escape dismisses the panel: its session ends, the window hides and its
+    // page reloads empty. A new summon then starts a fresh session.
+    let _ = panel.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))");
+    let app = main.app_handle().clone();
+    let empty_page = "JSON.stringify(!document.documentElement.dataset.glanceResult && document.getElementById('glance-source')?.value === '' && !document.querySelector('.glance-output'))";
+    let settled = |deadline: Duration, probe: &dyn Fn() -> bool| {
+        let end = Instant::now() + deadline;
+        while Instant::now() < end {
+            if probe() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    };
+    let closed = settled(Duration::from_secs(5), &|| {
+        app.state::<crate::panel::Panel>().is_closed()
+            && !panel.is_visible().unwrap_or(true)
+            && eval_json(&panel, empty_page) == Some(json!(true))
+    });
+    let reopen = app.clone();
+    app.run_on_main_thread(move || {
+        crate::panel::present(&reopen, None).unwrap();
+    })
+    .unwrap();
+    let reopened_fresh = settled(Duration::from_secs(5), &|| {
+        panel.is_visible().unwrap_or(false)
+            && !app.state::<crate::panel::Panel>().is_closed()
+            && eval_json(&panel, empty_page) == Some(json!(true))
+    });
+    let _ = panel.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))");
+    let closed_again = settled(Duration::from_secs(5), &|| {
+        app.state::<crate::panel::Panel>().is_closed() && !panel.is_visible().unwrap_or(true)
+    });
+    let clipboard = std::process::Command::new("xclip")
+        .args(["-o", "-selection", "clipboard"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let report = json!({"panel": outcome, "closed": closed && closed_again,
+        "reopened_fresh": reopened_fresh, "clipboard": clipboard});
+    main.eval(format!("window.__glancePanelDone({report})"))
+        .unwrap();
+}
+
+#[test]
+#[ignore = "opens the native contextual panel in an isolated X11 profile with a loopback provider and an external clipboard owner"]
+fn glance_panel_desktop_fixture() {
+    let profile = isolated_profile();
+    let port = openai_fixture();
+    let main_script =
+        include_str!("glance_main_acceptance.js").replace("__PORT__", &port.to_string());
+    let panel_script = include_str!("glance_panel_acceptance.js");
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let panel_opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let builder = tauri::Builder::default()
+        .any_thread()
+        .on_page_load(move |webview, page| {
+            if page.event() != tauri::webview::PageLoadEvent::Finished {
+                return;
+            }
+            let app = webview.app_handle().clone();
+            match webview.label() {
+                "main" if !opened.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                    prepare_glance_profile(&app);
+                    webview.eval(&main_script).unwrap();
+                    let main = app.get_webview_window("main").unwrap();
+                    let result_path = profile.join("ipc-result.json");
+                    thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(180);
+                        while Instant::now() < deadline {
+                            if let Some(result) = eval_json(
+                                &main,
+                                "document.documentElement.dataset.glanceIpcResult || ''",
+                            ) {
+                                std::fs::write(&result_path, result.to_string()).unwrap();
+                                main.app_handle().exit(i32::from(result["pass"] != true));
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(200));
+                        }
+                        std::fs::write(
+                            &result_path,
+                            r#"{"pass":false,"error":"fixture timed out"}"#,
+                        )
+                        .unwrap();
+                        main.app_handle().exit(1);
+                    });
+                }
+                "panel" if !panel_opened.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                    webview.eval(panel_script).unwrap();
+                    let panel = app.get_webview_window("panel").unwrap();
+                    let main = app.get_webview_window("main").unwrap();
+                    thread::spawn(move || watch_panel(panel, main));
+                }
+                _ => {}
+            }
+        });
+    run_desktop(builder, || InferenceWorker::spawn(|| Fixture));
+}
+
+/// A synthetic "screen": the English OCR sample placed on a larger white
+/// canvas, with the region covering only the sample.
+fn synthetic_screen() -> (agent_core::screen::Frame, agent_core::screen::Region) {
+    let sample = include_bytes!("../../../../crates/tools/tests/fixtures/ocr-latin-eng-14.png");
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&sample[..]))
+        .read_info()
+        .unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    let channels = info.color_type.samples();
+    let (width, height) = (info.width, info.height);
+    let (canvas_w, canvas_h) = (width * 3, height * 4);
+    let (left, top) = (40u32, 60u32);
+    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let source = ((y * width + x) as usize) * channels;
+            let target = (((y + top) * canvas_w + x + left) * 4) as usize;
+            canvas[target..target + 3].copy_from_slice(&pixels[source..source + 3]);
+        }
+    }
+    let frame = agent_core::screen::Frame::from_raw(
+        &canvas,
+        canvas_w,
+        canvas_h,
+        (canvas_w * 4) as usize,
+        0,
+        agent_core::screen::PixelFormat::Rgba,
+    )
+    .unwrap();
+    (
+        frame,
+        agent_core::screen::Region {
+            x: left,
+            y: top,
+            width,
+            height,
+        },
+    )
+}
+
+/// A scripted local model and one synthetic knowledge document.
+fn prepare_glance_profile(app: &tauri::AppHandle) {
+    *crate::panel::screen::FIXTURE.lock().unwrap() = Some(synthetic_screen());
+    let desktop = app.state::<crate::commands::Desktop>();
+    let settings = ModelSettings::default();
+    let model = {
+        let mut db = desktop.engine.store().lock().unwrap();
+        let model = db
+            .remember_model(
+                Path::new("/synthetic/fixture.gguf"),
+                "fixture.gguf",
+                settings,
+            )
+            .unwrap();
+        db.set_model_settings(model.id, settings, false).unwrap();
+        let mut chunks = Vec::new();
+        agent_core::knowledge::append_chunks(
+            &mut chunks,
+            "Synthetic orchard plan: the rainwater tanks collect water for dry weeks and refill each spring.\n",
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        db.save_knowledge(
+            &storage::knowledge::DocumentImport {
+                name: "Synthetic orchard plan.txt",
+                format: agent_core::knowledge::DocumentFormat::Txt,
+                fingerprint: &[7; 32],
+                file_bytes: 64,
+                pdf_coverage: None,
+                chunks: &chunks,
+            },
+            None,
+            |_| Ok(()),
+        )
+        .unwrap();
+        model
+    };
+    tauri::async_runtime::block_on(desktop.engine.load_model(model.id, settings)).unwrap();
 }

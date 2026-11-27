@@ -36,6 +36,7 @@ fn keeps_system_and_latest_user_with_the_newest_complete_turns() {
         system: "system".into(),
         turns: (1..=3)
             .map(|i| CompletedTurn {
+                provenance: None,
                 user: format!("user {i}"),
                 assistant: format!("assistant {i}"),
             })
@@ -71,6 +72,7 @@ fn message(position: i64, role: MessageRole, state: GenerationState, content: &s
         role,
         state,
         content: content.into(),
+        labels: Default::default(),
         created_at: 0,
         stats: None,
         context: None,

@@ -146,6 +146,16 @@ impl SqliteStore {
         event: &RuntimeEvent,
         answer: Option<&str>,
     ) -> AgentResult<()> {
+        self.record_classified_agent_event(id, event, answer, None)
+    }
+
+    pub fn record_classified_agent_event(
+        &mut self,
+        id: TaskId,
+        event: &RuntimeEvent,
+        answer: Option<&str>,
+        labels: Option<&agent_core::classification::Labels>,
+    ) -> AgentResult<()> {
         let number = id_number(id)?;
         let payload = encoded(event)?;
         let timestamp = now()?;
@@ -263,11 +273,15 @@ impl SqliteStore {
                     TaskState::Interrupted => "interrupted",
                     _ => "failed",
                 };
+                let classification = labels
+                    .filter(|labels| !labels.is_empty())
+                    .map(encoded)
+                    .transpose()?;
                 sql(tx.execute(
-                    "UPDATE messages SET state=?1, content=?2 WHERE id=(
+                    "UPDATE messages SET state=?1, content=?2, classification=?4 WHERE id=(
                         SELECT assistant_message_id FROM conversation_agent_turns WHERE task_id=?3
                      ) AND state='streaming'",
-                    params![state, answer.unwrap_or_default(), number],
+                    params![state, answer.unwrap_or_default(), number, classification],
                 ))?;
                 sql(tx.execute(
                     "UPDATE conversations SET updated_at=max(updated_at,?1) WHERE id=(

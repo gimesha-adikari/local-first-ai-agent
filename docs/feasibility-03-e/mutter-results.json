@@ -1,0 +1,193 @@
+{
+ "cycles": [
+  {
+   "start_to_node_ms": 6.7,
+   "node_to_frame_ms": 40.9,
+   "pipeline_teardown_ms": 5.0,
+   "stop_to_node_removed_ms": 14.9,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.6,
+   "node_to_frame_ms": 27.9,
+   "pipeline_teardown_ms": 3.1,
+   "stop_to_node_removed_ms": 15.3,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.5,
+   "node_to_frame_ms": 26.3,
+   "pipeline_teardown_ms": 3.1,
+   "stop_to_node_removed_ms": 15.0,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.7,
+   "node_to_frame_ms": 26.5,
+   "pipeline_teardown_ms": 2.4,
+   "stop_to_node_removed_ms": 15.2,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.9,
+   "node_to_frame_ms": 43.2,
+   "pipeline_teardown_ms": 2.4,
+   "stop_to_node_removed_ms": 14.8,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.7,
+   "node_to_frame_ms": 42.5,
+   "pipeline_teardown_ms": 2.1,
+   "stop_to_node_removed_ms": 14.7,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.5,
+   "node_to_frame_ms": 42.5,
+   "pipeline_teardown_ms": 2.3,
+   "stop_to_node_removed_ms": 15.3,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.6,
+   "node_to_frame_ms": 42.4,
+   "pipeline_teardown_ms": 2.1,
+   "stop_to_node_removed_ms": 15.2,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.4,
+   "node_to_frame_ms": 42.9,
+   "pipeline_teardown_ms": 2.1,
+   "stop_to_node_removed_ms": 15.1,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.7,
+   "node_to_frame_ms": 42.7,
+   "pipeline_teardown_ms": 2.3,
+   "stop_to_node_removed_ms": 14.8,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.6,
+   "node_to_frame_ms": 43.2,
+   "pipeline_teardown_ms": 2.2,
+   "stop_to_node_removed_ms": 14.7,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  },
+  {
+   "start_to_node_ms": 4.5,
+   "node_to_frame_ms": 27.4,
+   "pipeline_teardown_ms": 2.3,
+   "stop_to_node_removed_ms": 15.0,
+   "node_removed": true,
+   "frame": [
+    1280,
+    800
+   ],
+   "bytes": 3072000
+  }
+ ],
+ "checks": {
+  "test_card_red_samples": 2000,
+  "sha256_first_frame": "6ae95f8f5e7238a7",
+  "area_frame": [
+   800,
+   600
+  ],
+  "area_start_to_frame_ms": 28.0,
+  "cancel_before_frame_node_removed": true,
+  "cancel_before_frame_ms": 15.6,
+  "overlay_first_draw_ms": 60.3,
+  "red_samples_while_dimmed_overlay_up": 0,
+  "no_leftover_nodes": true,
+  "files_created_during_capture": [
+   "<disposable profile>/cache/mesa_shader_cache/*",
+   "<disposable profile>/runtime/shell.log",
+   "<investigation log>"
+  ]
+ },
+ "summary": {
+  "start_to_node_ms": {
+   "min": 4.4,
+   "p50": 4.6,
+   "p95": 4.9,
+   "max": 6.7
+  },
+  "node_to_frame_ms": {
+   "min": 26.3,
+   "p50": 42.5,
+   "p95": 43.2,
+   "max": 43.2
+  },
+  "stop_to_node_removed_ms": {
+   "min": 14.7,
+   "p50": 15.0,
+   "p95": 15.3,
+   "max": 15.3
+  },
+  "start_to_frame_ms": {
+   "min": 30.8,
+   "p50": 47.1,
+   "p95": 47.8,
+   "max": 48.1
+  }
+ }
+}

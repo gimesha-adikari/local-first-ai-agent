@@ -109,6 +109,12 @@ pub struct KnowledgeHit {
     pub score: f64,
 }
 
+impl KnowledgeHit {
+    pub fn labels(&self) -> agent_core::classification::Labels {
+        self.source.labels()
+    }
+}
+
 impl SqliteStore {
     pub fn save_knowledge(
         &mut self,
