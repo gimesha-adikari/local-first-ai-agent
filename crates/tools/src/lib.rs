@@ -2,11 +2,15 @@
 
 #[cfg(target_os = "linux")]
 mod applications;
+#[cfg(target_os = "linux")]
+pub mod attachment;
 mod calculator;
 #[cfg(target_os = "linux")]
 mod device;
 #[cfg(target_os = "linux")]
 mod filesystem;
+#[cfg(target_os = "linux")]
+pub mod image;
 #[cfg(target_os = "linux")]
 pub mod knowledge;
 #[cfg(target_os = "linux")]

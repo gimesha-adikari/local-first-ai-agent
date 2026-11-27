@@ -209,10 +209,24 @@ impl Tesseract {
         languages: &[String],
         check: &dyn Fn() -> Result<(), OcrError>,
     ) -> Result<OcrOutput, OcrError> {
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(error(OcrErrorKind::Invalid));
+        }
+        self.recognize_image(png, languages, check)
+    }
+
+    /// Recognize text in a PNG or JPEG image that the caller has already
+    /// validated and bounded. Decoding happens only inside the sandbox.
+    pub fn recognize_image(
+        &self,
+        png: &[u8],
+        languages: &[String],
+        check: &dyn Fn() -> Result<(), OcrError>,
+    ) -> Result<OcrOutput, OcrError> {
         if png.len() > MAX_IMAGE_BYTES {
             return Err(error(OcrErrorKind::Limit));
         }
-        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") && !png.starts_with(&[0xff, 0xd8, 0xff]) {
             return Err(error(OcrErrorKind::Invalid));
         }
         let installed = self.languages();
