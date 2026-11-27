@@ -16,6 +16,8 @@ pub mod knowledge;
 #[cfg(target_os = "linux")]
 pub mod ocr;
 #[cfg(target_os = "linux")]
+mod orientation;
+#[cfg(target_os = "linux")]
 mod pdf;
 #[cfg(target_os = "linux")]
 mod sandbox;

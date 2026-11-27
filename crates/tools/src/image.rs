@@ -7,6 +7,11 @@
 //! the OCR sandbox or by the WebView preview, both after the bound. Every
 //! kept image is rebuilt from an allowlist of chunks or segments, so text,
 //! EXIF, XMP, ICC, IPTC and comment metadata never leave this module.
+//!
+//! Before EXIF is discarded, its Orientation is honoured: a rotated or
+//! mirrored photo is decoded (after the bound), turned upright and
+//! re-encoded, so previews, local OCR and any authorized transmission all
+//! see the intended orientation (Stage 04-E).
 
 use agent_core::{
     agent::{AgentError, AgentErrorCode, AgentResult},
@@ -20,6 +25,8 @@ pub struct ValidatedImage {
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// The photo was turned upright from its EXIF orientation.
+    pub orientation_corrected: bool,
 }
 
 impl std::fmt::Debug for ValidatedImage {
@@ -30,6 +37,7 @@ impl std::fmt::Debug for ValidatedImage {
             .field("bytes", &self.bytes.len())
             .field("width", &self.width)
             .field("height", &self.height)
+            .field("orientation_corrected", &self.orientation_corrected)
             .finish()
     }
 }
@@ -108,6 +116,7 @@ fn png(bytes: &[u8], check: &dyn Fn() -> AgentResult<()>) -> AgentResult<Validat
     let mut seen_idat = false;
     let mut ended = false;
     let mut chunks = 0u32;
+    let mut orientation = None;
     while offset < rest.len() {
         chunks += 1;
         if chunks > 100_000 || ended {
@@ -149,6 +158,9 @@ fn png(bytes: &[u8], check: &dyn Fn() -> AgentResult<()>) -> AgentResult<Validat
             }
             b"IDAT" => seen_idat = true,
             b"IEND" => ended = true,
+            b"eXIf" if orientation.is_none() => {
+                orientation = crate::orientation::exif_orientation(data);
+            }
             _ => {}
         }
         let critical = kind[0].is_ascii_uppercase();
@@ -167,12 +179,31 @@ fn png(bytes: &[u8], check: &dyn Fn() -> AgentResult<()>) -> AgentResult<Validat
         return Err(corrupt());
     }
     decode_png(&output, check)?;
+    if let Some(orientation) = orientation {
+        let upright = crate::orientation::upright_png(&output, orientation, check)?;
+        drop(output);
+        return upright_result(png(&upright, check));
+    }
     Ok(ValidatedImage {
         kind: AttachmentKind::Png,
         bytes: output,
         width,
         height,
+        orientation_corrected: false,
     })
+}
+
+/// The re-validated upright image, within the same file size limit.
+fn upright_result(image: AgentResult<ValidatedImage>) -> AgentResult<ValidatedImage> {
+    let mut image = image?;
+    if image.bytes.len() > MAX_IMAGE_FILE_BYTES {
+        return Err(AgentError::new(
+            AgentErrorCode::KnowledgeLimit,
+            "The photo turned upright is larger than 10 MB.",
+        ));
+    }
+    image.orientation_corrected = true;
+    Ok(image)
 }
 
 /// Decode every row to prove the compressed data is complete and bounded.
@@ -208,6 +239,7 @@ fn jpeg(bytes: &[u8], check: &dyn Fn() -> AgentResult<()>) -> AgentResult<Valida
     let mut frame = None;
     let mut scans = 0;
     let mut segments = 0u32;
+    let mut orientation = None;
     loop {
         segments += 1;
         if segments > 8192 {
@@ -300,7 +332,15 @@ fn jpeg(bytes: &[u8], check: &dyn Fn() -> AgentResult<()>) -> AgentResult<Valida
             // JFIF and Adobe colour information are kept; every other
             // application segment (EXIF, XMP, ICC, IPTC) and comments go.
             0xe0 | 0xee => output.extend_from_slice(segment),
-            0xe1..=0xed | 0xef | 0xfe => {}
+            // The first EXIF block's orientation is read, then dropped.
+            0xe1 => {
+                if orientation.is_none()
+                    && let Some(tiff) = payload.strip_prefix(b"Exif\0\0")
+                {
+                    orientation = crate::orientation::exif_orientation(tiff);
+                }
+            }
+            0xe2..=0xed | 0xef | 0xfe => {}
             // Tables, restart intervals and other structural segments.
             0xc4 | 0xdb | 0xdd | 0xcc => output.extend_from_slice(segment),
             _ => return Err(corrupt()),
@@ -310,11 +350,17 @@ fn jpeg(bytes: &[u8], check: &dyn Fn() -> AgentResult<()>) -> AgentResult<Valida
     if scans == 0 {
         return Err(corrupt());
     }
+    if let Some(orientation) = orientation {
+        let upright = crate::orientation::upright_jpeg(&output, orientation, check)?;
+        drop(output);
+        return upright_result(jpeg(&upright, check));
+    }
     Ok(ValidatedImage {
         kind: AttachmentKind::Jpeg,
         bytes: output,
         width,
         height,
+        orientation_corrected: false,
     })
 }
 
@@ -426,6 +472,121 @@ mod tests {
         out.extend_from_slice(&[0xff, 0xd9]);
         out.extend_from_slice(b"trailing bytes");
         out
+    }
+
+    /// A 16×8 RGB photo: the left half red, the right half blue, a green
+    /// top-left 4×4 corner. Encoded as a real baseline JPEG.
+    fn photo_pixels() -> Vec<u8> {
+        let mut pixels = Vec::new();
+        for y in 0..8 {
+            for x in 0..16 {
+                pixels.extend_from_slice(match (x, y) {
+                    (0..4, 0..4) => &[0, 200, 0],
+                    (0..8, _) => &[220, 0, 0],
+                    _ => &[0, 0, 220],
+                });
+            }
+        }
+        pixels
+    }
+
+    fn real_jpeg(exif: Option<Vec<u8>>) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        jpeg_encoder::Encoder::new(&mut encoded, 95)
+            .encode(&photo_pixels(), 16, 8, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        let Some(tiff) = exif else { return encoded };
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend(tiff);
+        let mut out = encoded[..2].to_vec();
+        out.extend_from_slice(&[0xff, 0xe1]);
+        out.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        out.extend(payload);
+        out.extend_from_slice(&encoded[2..]);
+        out
+    }
+
+    fn decoded_rgb(bytes: &[u8]) -> (usize, usize, Vec<u8>) {
+        let mut decoder = zune_jpeg::JpegDecoder::new(bytes);
+        let pixels = decoder.decode().unwrap();
+        let (w, h) = decoder.dimensions().unwrap();
+        (w, h, pixels)
+    }
+
+    fn colour(pixels: &[u8], width: usize, x: usize, y: usize) -> &'static str {
+        let p = &pixels[(y * width + x) * 3..(y * width + x) * 3 + 3];
+        match (p[0] > 120, p[1] > 120, p[2] > 120) {
+            (true, false, false) => "red",
+            (false, true, false) => "green",
+            (false, false, true) => "blue",
+            _ => "other",
+        }
+    }
+
+    #[test]
+    fn rotated_and_mirrored_photos_are_turned_upright_before_metadata_goes() {
+        // Upright photos keep the lossless path and are not re-encoded.
+        let upright = real_jpeg(None);
+        let kept = validate(AttachmentKind::Jpeg, &upright, &ok).unwrap();
+        assert!(!kept.orientation_corrected);
+        assert_eq!(kept.bytes, upright);
+        let one = validate(
+            AttachmentKind::Jpeg,
+            &real_jpeg(Some(crate::orientation::tests::tiff(1, false))),
+            &ok,
+        )
+        .unwrap();
+        assert!(!one.orientation_corrected);
+
+        // Orientation 6: stored sideways, shown rotated 90° clockwise.
+        let rotated = real_jpeg(Some(crate::orientation::tests::tiff(6, true)));
+        let image = validate(AttachmentKind::Jpeg, &rotated, &ok).unwrap();
+        assert!(image.orientation_corrected);
+        assert_eq!((image.width, image.height), (8, 16));
+        assert!(!image.bytes.windows(4).any(|w| w == b"Exif"));
+        let (w, h, pixels) = decoded_rgb(&image.bytes);
+        assert_eq!((w, h), (8, 16));
+        // The stored top-left green corner is now at the top right; the red
+        // left half is now the top half.
+        assert_eq!(colour(&pixels, w, 6, 1), "green");
+        assert_eq!(colour(&pixels, w, 1, 1), "red");
+        assert_eq!(colour(&pixels, w, 4, 12), "blue");
+
+        // Orientation 2: mirrored horizontally.
+        let mirrored = real_jpeg(Some(crate::orientation::tests::tiff(2, false)));
+        let image = validate(AttachmentKind::Jpeg, &mirrored, &ok).unwrap();
+        let (w, h, pixels) = decoded_rgb(&image.bytes);
+        assert_eq!((w, h), (16, 8));
+        assert_eq!(colour(&pixels, w, 14, 1), "green");
+        assert_eq!(colour(&pixels, w, 2, 6), "blue");
+        assert_eq!(colour(&pixels, w, 13, 6), "red");
+
+        // A PNG with an eXIf orientation of 8 (rotated 90° counter-clockwise).
+        let mut raw = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut raw, 16, 8);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&photo_pixels()).unwrap();
+        }
+        let iend = raw.len() - 12;
+        let mut with_exif = raw[..iend].to_vec();
+        with_exif.extend(chunk(b"eXIf", &crate::orientation::tests::tiff(8, false)));
+        with_exif.extend_from_slice(&raw[iend..]);
+        let image = validate(AttachmentKind::Png, &with_exif, &ok).unwrap();
+        assert!(image.orientation_corrected);
+        assert_eq!((image.width, image.height), (8, 16));
+        assert!(!image.bytes.windows(4).any(|w| w == b"eXIf"));
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(&image.bytes));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut pixels).unwrap();
+        // The green corner moves to the bottom left; red becomes the bottom half.
+        assert_eq!(colour(&pixels, 8, 1, 14), "green");
+        assert_eq!(colour(&pixels, 8, 6, 12), "red");
+        assert_eq!(colour(&pixels, 8, 4, 3), "blue");
     }
 
     #[test]
