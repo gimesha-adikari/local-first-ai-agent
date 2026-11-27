@@ -373,8 +373,9 @@ function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
         <h4>On this computer</h4>
         <ul className="privacy-list">
           <li>{snapshot.intelligence.localOnly
-            ? "Local-only mode is on: the app makes no outbound connections. Chat, Agent, Knowledge and Memory run on this computer, and the app doesn't download models."
-            : "Local-only mode is off. Chat sends requests only to the provider you select in Providers, with only the information you allowed. Agent, Knowledge and Memory still run locally, and the app doesn't download models."}</li>
+            ? "Local-only mode is on: the app makes no outbound connections. Chat, Agent, Knowledge, Memory and the contextual panel, including screen capture and text recognition, run on this computer, and the app doesn't download models."
+            : "Local-only mode is off. Chat and the contextual panel send requests only to the provider you select, after showing what will be shared. Agent, Knowledge, Memory, screen capture and text recognition still run locally, and the app doesn't download models."}</li>
+          <li>The contextual panel reads the clipboard or the screen only when you ask. Each screen capture asks your desktop for permission again, holds one frame in memory, and keeps only the region you confirm until the panel closes. Nothing from the panel is saved unless you choose Remember.</li>
           <li>Provider API keys are kept in your system keyring, never in the database or this window.</li>
           <li>Conversations, imported document text, semantic indexes and saved memories are stored in an ordinary SQLite database. It isn't encrypted.</li>
           <li>The paths of models you choose, including the remembered semantic model, are stored locally and never shown to the interface or sent anywhere.</li>

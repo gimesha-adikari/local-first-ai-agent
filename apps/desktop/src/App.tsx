@@ -1030,6 +1030,7 @@ export default function App() {
         {mode === "agent"
           ? "The agent can calculate, describe this device, search and read files you select, and find or open applications after you approve."
           : remote ? `Chat sends your requests to ${remote.settings.name} (${localityLabel(remote).toLowerCase()}). Agent mode stays on this computer.`
+            : snapshot && !snapshot.models.length ? "Chat needs a local model or a provider you connect."
             : "Chat runs entirely on this computer with your local model."}
       </p>
       {!snapshot && !startupError && <p className="hint" role="status">Starting…</p>}

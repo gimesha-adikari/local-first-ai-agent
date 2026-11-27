@@ -11,17 +11,32 @@ export type GlanceProvider = {
   sharing: { documents: boolean; memories: boolean }; imageInput?: boolean; retentionSummary?: string;
 };
 
-export type OcrState = { available: boolean; engine: string | null; languages: string[]; defaults: string[] };
+export type OcrState = {
+  available: boolean; engine: string | null; languages: string[]; defaults: string[];
+  guidance: string | null; missingRecommended: string[];
+};
+
+const languageNames: Record<string, string> = {
+  eng: "English", spa: "Spanish", fra: "French", deu: "German", por: "Portuguese", ita: "Italian", rus: "Russian",
+  ukr: "Ukrainian", ara: "Arabic", heb: "Hebrew", hin: "Hindi", ben: "Bengali", chi_sim: "Chinese (Simplified)",
+  chi_tra: "Chinese (Traditional)", jpn: "Japanese", kor: "Korean", tha: "Thai", vie: "Vietnamese", tur: "Turkish",
+  ind: "Indonesian", sin: "Sinhala", tam: "Tamil", nld: "Dutch", pol: "Polish", swe: "Swedish",
+};
+
+/** A readable name for Tesseract language data, falling back to its code. */
+export function languageName(code: string): string {
+  return languageNames[code] ?? code;
+}
 
 export type GlanceState = {
-  localAvailable: boolean; memoryEnabled: boolean; providers: GlanceProvider[];
+  localAvailable: boolean; localOnly: boolean; memoryEnabled: boolean; providers: GlanceProvider[];
   documents: { id: number; name: string }[]; ocr?: OcrState;
 };
 
 export type Region = { x: number; y: number; width: number; height: number };
 export type CaptureRecord = {
   source: string; portalVersion: number; persistMode: number; restoreToken: string; restoreTokenReturned: boolean;
-  cursor: string; consentMs: number; sessionClosedMs: number; monitor: [number, number, number, number] | null;
+  cursor: string; consentMs: number; sessionClosedMs: number; sessionCloseConfirmed: boolean; monitor: [number, number, number, number] | null;
   stream: { library: string; format: string; width: number; height: number; frames: number; rejectedBuffers: number; settled: string; firstFrameMs: number; waitedMs: number };
 };
 export type RegionRecord = { region: Region; frameWidth: number; frameHeight: number };

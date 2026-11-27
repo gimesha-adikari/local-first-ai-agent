@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { inputProblem, prepareGlance, recipes } from "./glance.ts";
 
-const state = { localAvailable: true, memoryEnabled: true, providers: [], documents: [{ id: 3, name: "Notes" }] };
+const state = { localAvailable: true, localOnly: false, memoryEnabled: true, providers: [], documents: [{ id: 3, name: "Notes" }] };
 const provider = { id: 7, revision: "exact-revision", sharing: { documents: true, memories: false } };
 
 test("all eight recipes keep the reviewed text intact and begin without a sharing grant", () => {
@@ -59,4 +59,11 @@ test("a screen crop is offered only to image providers and makes text optional",
   const text = prepareGlance(state, undefined, "summarize", "Recognized text", "", "", false, []);
   assert.equal(text.image, undefined);
   assert.equal(text.crop, undefined);
+});
+
+test("OCR languages show readable names and keep unknown codes", async () => {
+  const { languageName } = await import("./glance.ts");
+  assert.equal(languageName("chi_sim"), "Chinese (Simplified)");
+  assert.equal(languageName("ara"), "Arabic");
+  assert.equal(languageName("xyz"), "xyz");
 });

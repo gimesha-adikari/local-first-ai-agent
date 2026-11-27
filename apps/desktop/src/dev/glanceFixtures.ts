@@ -5,7 +5,7 @@ import type { GlanceInput, GlanceReceipt, GlanceState } from "../glance";
 
 export function installGlanceFixtures() {
   const state: GlanceState = {
-    localAvailable: true, memoryEnabled: true,
+    localAvailable: true, localOnly: false, memoryEnabled: true,
     providers: [{ id: 1, name: "Example provider", model: "sample-model", locality: "cloud", revision: "fixture",
       sharing: { memories: true, documents: true }, retention: "none" }],
     documents: [{ id: 1, name: "Orchard notes" }],

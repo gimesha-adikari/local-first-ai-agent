@@ -4,7 +4,7 @@ import { AlertIcon, ArrowUpIcon, CheckIcon, ChevronDownIcon, CloseIcon, CloudIco
   ImageIcon, LaunchIcon, MemoryIcon, QuoteIcon, ScanTextIcon, ShieldIcon, SlidersIcon, Spinner, StopIcon, ThinkIcon, TrashIcon } from "./icons";
 import { errorMessage } from "./inference";
 import { classNames, inputProblem, prepareGlance, recipes, type CropInfo, type Estimate, type GlanceReceipt, type GlanceInput,
-  type GlanceProvider, type GlanceResult, type GlanceState, type OcrRecord, type Recipe, type ScreenReceipt } from "./glance";
+  languageName, type GlanceProvider, type GlanceResult, type GlanceState, type OcrRecord, type Recipe, type ScreenReceipt } from "./glance";
 import { IconButton } from "./ui";
 import "./glance.css";
 
@@ -35,10 +35,10 @@ function ScreenDetails({ screen }: { screen: ScreenReceipt }) {
   const { capture, region, ocr } = screen;
   return <>
     <dt>Capture</dt><dd>{`${capture.source}${capture.portalVersion ? ` v${capture.portalVersion}` : ""}, fresh consent (persist mode ${capture.persistMode}, restore token ${capture.restoreTokenReturned ? "returned and discarded" : "none"}), cursor ${capture.cursor}`}</dd>
-    <dt>Frame</dt><dd>{`${capture.stream.width} × ${capture.stream.height} ${capture.stream.format}, ${capture.stream.frames} frame(s), ${capture.stream.settled}, stream closed after ${capture.sessionClosedMs} ms`}</dd>
+    <dt>Frame</dt><dd>{`${capture.stream.width} × ${capture.stream.height} ${capture.stream.format}, ${capture.stream.frames} frame(s), ${capture.stream.settled}, screen sharing ended after ${capture.sessionClosedMs} ms${capture.sessionCloseConfirmed ? " (confirmed)" : " (not confirmed by the desktop)"}`}</dd>
     <dt>Region</dt><dd>{`${region.region.width} × ${region.region.height} at ${region.region.x}, ${region.region.y} of ${region.frameWidth} × ${region.frameHeight}`}</dd>
     <dt>Full frame</dt><dd>{screen.fullFrame}</dd>
-    <dt>Recognition</dt><dd>{ocr ? `${ocr.engine} (${ocr.languages.join(", ")}), ${ocr.characters} characters in ${ocr.elapsedMs} ms, on this device` : "Not used"}</dd>
+    <dt>Recognition</dt><dd>{ocr ? `${ocr.engine} (${ocr.languages.map(languageName).join(", ")}), ${ocr.characters} characters in ${ocr.elapsedMs} ms, on this device` : "Not used"}</dd>
     <dt>Image</dt><dd>{screen.imageAttached ? "The selected region was attached to this request" : "Not sent"}</dd>
   </>;
 }
@@ -189,7 +189,7 @@ export default function Glance() {
     void action("glance_ocr", value => {
       const { text: recognizedText, record } = value as { text: string; record: OcrRecord };
       setText(recognizedText); setSource("Screen text"); setRecognized(record);
-      setNotice(recognizedText ? `Recognized on this device with ${record.engine} (${record.languages.join(", ")}) in ${record.elapsedMs} ms. Check the text before processing it.`
+      setNotice(recognizedText ? `Recognized on this device with ${record.engine} (${record.languages.map(languageName).join(", ")}) in ${record.elapsedMs} ms. Check the text before processing it.`
         : "No text was recognized in this region.");
       editor.current?.focus();
     }, { request: { crop: crop.id, languages: ocrLanguages } });
@@ -218,7 +218,7 @@ export default function Glance() {
           <label id="source-label" htmlFor="glance-source">Source text</label>
           <span>{text ? `${source} · ${Array.from(text).length.toLocaleString()} characters` : "Manual"}</span>
         </div>
-        <textarea id="glance-source" ref={editor} value={text} readOnly={locked} placeholder="Paste or type the text to work with…"
+        <textarea id="glance-source" ref={editor} value={text} readOnly={locked} dir="auto" placeholder="Paste or type the text to work with…"
           onChange={e => { setText(e.target.value); setSource(old => old === "Manual" ? old : old.includes("Screen") || old.includes("screen") ? "Edited screen text" : "Edited clipboard"); }} />
         <div className="glance-source-actions">
           <button type="button" disabled={locked} onClick={() => void action("glance_clipboard", value => {
@@ -236,19 +236,20 @@ export default function Glance() {
         <div className="glance-crop-meta">
           <strong>Screen region</strong>
           <span>{crop.width} × {crop.height} px · from a {crop.region.frameWidth} × {crop.region.frameHeight} screen</span>
-          {recognized && <span>{recognized.characters} characters recognized ({recognized.languages.join(", ")})</span>}
+          {recognized && <span>{recognized.characters} characters recognized ({recognized.languages.map(languageName).join(", ")})</span>}
           <div className="glance-crop-actions">
             <button type="button" disabled={locked || !state?.ocr?.available || !ocrLanguages.length} onClick={extract}><ScanTextIcon size={14} />Extract text</button>
             {recognized && text && <button type="button" disabled={locked} onClick={() => void action("glance_copy", () => setNotice("Text copied."), { text })}><CopyIcon size={14} />Copy text</button>}
             <button type="button" disabled={locked} onClick={discard}><TrashIcon size={14} />Discard</button>
           </div>
-          {state?.ocr?.available && <details className="glance-languages"><summary>Languages: {ocrLanguages.join(", ") || "none"}<ChevronDownIcon size={12} /></summary>
-            <div>{state.ocr.languages.map(code => <label className="glance-choice" key={code}><input type="checkbox" disabled={locked}
+          {state?.ocr?.available && <details className="glance-languages"><summary>Languages: {ocrLanguages.map(languageName).join(", ") || "none"}<ChevronDownIcon size={12} /></summary>
+            <div>{state.ocr.languages.map(code => <label className="glance-choice" key={code} title={code}><input type="checkbox" disabled={locked || (!ocrLanguages.includes(code) && ocrLanguages.length >= 4)}
               checked={ocrLanguages.includes(code)} onChange={e => setOcrLanguages(current => e.target.checked
-                ? (current.length < 4 ? [...current, code] : current) : current.filter(item => item !== code))} />{code}</label>)}</div>
-            <p>Recognition quality differs by language and script. Up to four at a time.</p>
+                ? (current.length < 4 ? [...current, code] : current) : current.filter(item => item !== code))} />{languageName(code)}</label>)}</div>
+            <p>Recognition quality differs by language and script. Choose up to four.</p>
+            {state.ocr.missingRecommended.length > 0 && <p>More languages: install <code>{state.ocr.missingRecommended.join(" ")}</code> with apt, then reopen this panel.</p>}
           </details>}
-          {!state?.ocr?.available && <p className="glance-note">Local text recognition needs Tesseract.</p>}
+          {state?.ocr?.guidance && <p className="glance-note" role="note">{state.ocr.guidance}</p>}
           {provider?.imageInput && <label className="glance-choice"><input type="checkbox" checked={useImage && imageReady} disabled={locked || !imageReady}
             onChange={e => setUseImage(e.target.checked)} /><ImageIcon size={14} />Send this image to {provider.name}</label>}
           {provider?.imageInput && !crop.imageEligible && <p className="glance-note">This region is too large to send as an image.</p>}
@@ -279,6 +280,7 @@ export default function Glance() {
           </div>
         </details>
       </fieldset>
+      {state?.localOnly && <p className="glance-note">Local-only mode is on: requests stay on this device. Screen capture and text recognition still work.</p>}
       {state && !state.localAvailable && !provider && <p className="glance-note">Load a local model in the main window{state.providers.length ? " or choose a configured provider" : ""}.</p>}
       {review && <section className="glance-review" aria-labelledby="review-heading" tabIndex={-1} ref={reviewBox}>
         <h2 id="review-heading"><ShieldIcon size={16} />Review this request</h2>
@@ -295,7 +297,7 @@ export default function Glance() {
       </section>}
       {(running || output || result?.receipt) && <section aria-labelledby="result-title" ref={outputBox} className="glance-result">
         <div className="glance-section-head"><h2 id="result-title">Result</h2>{running && <span role="status"><Spinner size={13} />Generating</span>}</div>
-        {output && <div className="glance-output">{output}</div>}
+        {output && <div className="glance-output" dir="auto">{output}</div>}
         {result && output && <div className="glance-result-actions">
           <button type="button" disabled={!!pending} onClick={() => void action("glance_copy", () => setNotice("Result copied."))}><CopyIcon size={14} />Copy</button>
           <button type="button" disabled={!!pending || remembered || result.receipt?.state !== "completed" || !!result.error} onClick={() => void action("glance_remember", () => { setRemembered(true); setNotice("Result saved to memory."); })}>
