@@ -28,7 +28,7 @@ void (async () => {
         contextTokens: 8192,
         maxOutputTokens: 128,
         temperature: 0.2,
-        imageInput: false,
+        imageInput: true,
         streamUsage: true,
         requiresKey: false,
         retention: "none",
@@ -63,6 +63,15 @@ void (async () => {
     assert(report.clipboard === "Remote fixture answer", `External clipboard owner saw ${JSON.stringify(report.clipboard)}`);
     result.steps.push(...report.panel.steps.map((step) => `panel: ${step}`));
     result.steps.push("Escape ended the session, hid the warm panel and reloaded it empty; a new summon started fresh; Copy reached the external clipboard");
+
+    const cropLoad = await new Promise((resolve) => {
+      const image = new Image();
+      image.onload = () => resolve("loaded");
+      image.onerror = () => resolve("refused");
+      image.src = `glance-crop://localhost/${report.panel.cropId}.png`;
+    });
+    assert(cropLoad === "refused", "The main window could load the panel's screen crop");
+    result.steps.push("the crop protocol refuses the main window and the dismissed session");
 
     const memories = await call("memory_list", { query: null, beforeId: null, limit: 10 });
     assert(memories.length === 2, `Expected one remembered result, found ${memories.length - 1}`);

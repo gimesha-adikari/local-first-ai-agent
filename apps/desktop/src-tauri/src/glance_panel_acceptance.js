@@ -134,6 +134,57 @@ void (async () => {
     assert(!button("Remember"), "A stopped result can be remembered");
     await shot("07-stopped");
     result.steps.push("Stop cancelled streaming; the partial response stays visible, the receipt is cancelled and Remember is unavailable");
+
+    // Screen region: a synthetic frame through the production crop path.
+    set(select("Process with"), "");
+    await click("Capture region");
+    const preview = () => document.querySelector(".glance-crop img");
+    await until(() => preview()?.complete && preview().naturalWidth > 0, "crop preview from the panel-only protocol");
+    result.cropId = preview().src.match(/([0-9a-f]+)\.png$/)[1];
+    const cropSize = [preview().naturalWidth, preview().naturalHeight];
+    assert(document.body.textContent.includes("Nothing has been processed yet"), "Capture notice missing");
+    assert(document.querySelector(".glance-crop-meta").textContent.includes(`${cropSize[0]} × ${cropSize[1]} px`), "Region size not shown");
+    assert(await shot("08-screen-region") === 1, "Capturing contacted a provider");
+    result.steps.push("Capture region produced a crop preview over the panel-only protocol; nothing was processed");
+
+    await click("Extract text");
+    await until(() => source().value.includes("Notifications"), "recognized text", 20000);
+    assert(document.querySelector(".glance-section-head span").textContent.startsWith("Screen text"), "Screen origin not shown");
+    await shot("09-screen-text");
+    set(select("Action"), "summarize");
+    await click("Summarize");
+    await until(() => receipt()?.state === "completed", "local screen result", 20000);
+    document.querySelector(".glance-receipt").open = true;
+    const screenLocal = receipt();
+    assert(screenLocal.used.some((item) => item.kind === "screen_text") && screenLocal.external.length === 0, "Local screen receipt is wrong");
+    assert(document.querySelector(".glance-receipt").textContent.includes("Recognition"), "Receipt lacks the recognition record");
+    assert(await shot("10-screen-local-result") === 1, "Local screen processing reached the provider");
+    result.steps.push("contained OCR filled the source as screen text; local processing kept it on device with a screen receipt");
+
+    set(select("Process with"), select("Process with").options[1].value);
+    set(source(), "");
+    const send = [...document.querySelectorAll(".glance-crop .glance-choice")].find((item) => item.textContent.includes("Send this image"))?.querySelector("input");
+    assert(send && !send.disabled, "Image option unavailable for an image-capable provider");
+    send.click();
+    set(select("Action"), "explain");
+    await click("Review request");
+    await until(() => document.querySelector(".glance-review-image")?.naturalWidth > 0, "image in the review");
+    const review = document.querySelector(".glance-review").textContent;
+    assert(review.includes("Screen image") && review.includes("The rest of the screen is never sent"), "Review does not disclose the image");
+    assert(review.includes("Estimated usage"), "Review lacks the usage estimate");
+    document.querySelector(".glance-review").scrollIntoView({ block: "end" });
+    assert(await shot("11-image-review") === 1, "The image left before Send once");
+    await click("Send once");
+    await until(() => receipt()?.state === "completed", "remote image result", 20000);
+    document.querySelector(".glance-receipt").open = true;
+    const remoteImage = receipt();
+    assert(remoteImage.used.some((item) => item.kind === "screen_image") && remoteImage.external[0]?.transmission === "sent", "Image receipt is wrong");
+    document.querySelector(".glance-receipt").scrollIntoView({ block: "end" });
+    assert(await shot("12-image-result") === 2, "Expected exactly one image request");
+    const images = JSON.parse(root.dataset.remoteImages);
+    assert(images.length === 1 && images[0][0] === cropSize[0] && images[0][1] === cropSize[1],
+      `The provider received ${JSON.stringify(images)}, not only the ${cropSize} crop`);
+    result.steps.push("one confirmed image request carried exactly the crop, never the larger frame; the receipt records it");
     result.pass = true;
   } catch (error) {
     result.error = String(error?.message ?? JSON.stringify(error));

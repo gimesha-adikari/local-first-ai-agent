@@ -1,6 +1,6 @@
 {
   "identifier": "panel",
-  "description": "Ephemeral text preview, contextual processing and explicit clipboard or memory actions.",
+  "description": "Ephemeral text preview, contextual processing, explicit clipboard, screen-region capture and local text recognition, and explicit memory actions.",
   "windows": [
     "panel"
   ],
@@ -12,6 +12,10 @@
     "allow-glance-copy",
     "allow-glance-remember",
     "allow-glance-dismiss",
-    "allow-glance-open-main"
+    "allow-glance-open-main",
+    "allow-glance-capture",
+    "allow-glance-capture-clear",
+    "allow-glance-ocr",
+    "allow-glance-estimate"
   ]
 }

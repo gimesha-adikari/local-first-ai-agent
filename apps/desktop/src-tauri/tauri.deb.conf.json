@@ -6,8 +6,8 @@
     "icon": ["icons/icon.png"],
     "linux": {
       "deb": {
-        "depends": ["bubblewrap", "poppler-utils", "util-linux"],
-        "recommends": ["gnome-keyring | kwalletmanager"],
+        "depends": ["bubblewrap", "poppler-utils", "util-linux", "libpipewire-0.3-0t64 | libpipewire-0.3-0", "tesseract-ocr", "tesseract-ocr-eng"],
+        "recommends": ["gnome-keyring | kwalletmanager", "xdg-desktop-portal", "tesseract-ocr-spa", "tesseract-ocr-fra", "tesseract-ocr-deu", "tesseract-ocr-por", "tesseract-ocr-rus", "tesseract-ocr-ara", "tesseract-ocr-hin", "tesseract-ocr-chi-sim", "tesseract-ocr-jpn", "tesseract-ocr-kor"],
         "desktopTemplate": "legacy-launcher.desktop.hbs",
         "preInstallScript": "deb-preinst",
         "files": {

@@ -8,7 +8,7 @@ use std::{
 use agent_core::inference::{Cancellation, ErrorCode, InferenceError, Result};
 use engine::chat::{
     ChatEvent, ChatEventSink,
-    glance::{Answer, Input, MAX_TEXT_BYTES, Origin, PanelState},
+    glance::{Answer, Input, MAX_TEXT_BYTES, PanelState},
 };
 use gtk::prelude::*;
 use tauri::{
@@ -16,6 +16,10 @@ use tauri::{
 };
 
 use crate::commands::Desktop;
+
+#[path = "panel_screen.rs"]
+pub mod screen;
+pub use screen::crop_protocol;
 
 const LABEL: &str = "panel";
 
@@ -62,6 +66,10 @@ struct Contents {
     operation: Option<Cancellation>,
     answer: Option<Answer>,
     remembered: bool,
+    /// The confirmed screen crop (encoded, wiped on drop).
+    screen: Option<screen::ScreenCrop>,
+    /// Text in this session was recognized from the crop.
+    screen_text: bool,
 }
 
 impl Glance {
@@ -313,13 +321,31 @@ pub async fn glance_state(
     window: WebviewWindow,
     pane: State<'_, Panel>,
     desktop: State<'_, Desktop>,
-) -> Result<PanelState> {
+) -> Result<HostState> {
     let glance = current(&window, &pane)?;
     let state = desktop.engine.glance_state().await?;
     if glance.closed.is_cancelled() {
         return Err(closed());
     }
-    Ok(state)
+    Ok(HostState {
+        engine: state,
+        ocr: screen::ocr_state(),
+    })
+}
+
+#[derive(serde::Serialize)]
+pub struct HostState {
+    #[serde(flatten)]
+    engine: PanelState,
+    ocr: screen::OcrState,
+}
+
+/// A result with the screen facts that apply to it.
+#[derive(serde::Serialize)]
+pub struct PanelAnswer {
+    #[serde(flatten)]
+    answer: Answer,
+    screen: Option<screen::ScreenReceipt>,
 }
 
 #[tauri::command]
@@ -400,10 +426,10 @@ pub async fn glance_run(
     desktop: State<'_, Desktop>,
     input: Input,
     deltas: Channel<String>,
-) -> Result<Answer> {
+) -> Result<PanelAnswer> {
     let glimpse = current(&window, &pane)?;
     let cancellation = Cancellation::default();
-    let origin = {
+    let (origin, attachment, screen_receipt) = {
         let mut data = glimpse.data()?;
         if glimpse.closed.is_cancelled() {
             return Err(closed());
@@ -411,14 +437,12 @@ pub async fn glance_run(
         if data.reading || data.operation.is_some() {
             return Err(busy());
         }
+        let attachment = screen::attachment(&data, &input)?;
+        let receipt = screen::receipt(&data, attachment.is_some());
         data.answer = None;
         data.remembered = false;
         data.operation = Some(cancellation.clone());
-        match &data.clipboard {
-            Some(captured) if captured == &input.text => Origin::Clipboard,
-            Some(_) => Origin::EditedClipboard,
-            None => Origin::Manual,
-        }
+        (screen::origin(&data, input.text()), attachment, receipt)
     };
     let events = Arc::new(Deltas {
         owner: Arc::clone(&glimpse),
@@ -427,17 +451,19 @@ pub async fn glance_run(
     });
     let result = desktop
         .engine
-        .run_glance(input, origin, cancellation, events)
+        .run_glance(input, origin, attachment, cancellation, events)
         .await;
     let mut data = glimpse.data()?;
     data.operation = None;
     if glimpse.closed.is_cancelled() {
         return Err(closed());
     }
-    if let Ok(answer) = &result {
-        data.answer = Some(answer.clone());
-    }
-    result
+    let answer = result?;
+    data.answer = Some(answer.clone());
+    Ok(PanelAnswer {
+        answer,
+        screen: screen_receipt,
+    })
 }
 
 #[tauri::command]
@@ -449,17 +475,25 @@ pub fn glance_stop(window: WebviewWindow, pane: State<'_, Panel>) -> Result<()> 
 }
 
 #[tauri::command]
-pub fn glance_copy(window: WebviewWindow, pane: State<'_, Panel>) -> Result<()> {
+/// Copy the response, or the given text (for example recognized screen
+/// text), after an explicit Copy click. Nothing else writes the clipboard.
+pub fn glance_copy(
+    window: WebviewWindow,
+    pane: State<'_, Panel>,
+    text: Option<String>,
+) -> Result<()> {
     let glance = current(&window, &pane)?;
-    let text = glance
-        .data()?
-        .answer
-        .as_ref()
-        .map(|answer| answer.text.clone())
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| {
-            InferenceError::new(ErrorCode::InvalidConfig, "There is no response to copy.")
-        })?;
+    let text = match text {
+        Some(text) => Some(text)
+            .filter(|text| !text.trim().is_empty() && text.len() <= 65_536 && !text.contains('\0')),
+        None => glance
+            .data()?
+            .answer
+            .as_ref()
+            .map(|answer| answer.text.clone())
+            .filter(|text| !text.is_empty()),
+    }
+    .ok_or_else(|| InferenceError::new(ErrorCode::InvalidConfig, "There is no text to copy."))?;
     window
         .run_on_main_thread(move || {
             if !glance.closed.is_cancelled() {

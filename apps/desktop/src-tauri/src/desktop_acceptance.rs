@@ -557,6 +557,54 @@ fn task05_integration_desktop_fixture() {
 
 /// Completion requests that reached any loopback provider fixture.
 static COMPLETIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Dimensions of every image a loopback provider received, decoded from
+/// the request body (the panel must never send more than the crop).
+static RECEIVED_IMAGES: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
+
+fn base64_decode(text: &str) -> Vec<u8> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    let (mut buffer, mut bits) = (0u32, 0);
+    for byte in text.bytes().filter_map(value) {
+        buffer = (buffer << 6) | u32::from(byte);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    out
+}
+
+fn record_images(body: &[u8]) {
+    let Ok(json) = serde_json::from_slice::<Value>(body) else {
+        return;
+    };
+    for message in json["messages"].as_array().into_iter().flatten() {
+        for part in message["content"].as_array().into_iter().flatten() {
+            if let Some(url) = part["image_url"]["url"].as_str()
+                && let Some(data) = url.strip_prefix("data:image/png;base64,")
+            {
+                let bytes = base64_decode(data);
+                let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+                if let Ok(reader) = decoder.read_info() {
+                    let info = reader.info();
+                    RECEIVED_IMAGES
+                        .lock()
+                        .unwrap()
+                        .push((info.width, info.height));
+                }
+            }
+        }
+    }
+}
 
 /// A loopback OpenAI-compatible server. `/models` lists how many requests
 /// arrived before it, so the WebView script can prove local-only mode sent
@@ -610,6 +658,7 @@ fn openai_fixture() -> u16 {
             }
             if !text.starts_with("GET /v1/models ") {
                 COMPLETIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                record_images(&request[head.min(request.len())..]);
             }
             let response = if text.starts_with("GET /v1/models ") {
                 let auth = if text.contains("\r\nAuthorization: Bearer sk-synthetic-dialog-123\r\n")
@@ -814,9 +863,11 @@ fn watch_panel(panel: tauri::WebviewWindow, main: tauri::WebviewWindow) {
         if !stage.is_empty() && stage != captured {
             glance_screenshot(panel.app_handle(), &stage);
             let seen = COMPLETIONS.load(std::sync::atomic::Ordering::SeqCst);
+            let images = json!(*RECEIVED_IMAGES.lock().unwrap()).to_string();
             panel
                 .eval(format!(
-                    "document.documentElement.dataset.remoteSeen = '{seen}'; document.documentElement.dataset.glanceShot = {};",
+                    "document.documentElement.dataset.remoteSeen = '{seen}'; document.documentElement.dataset.remoteImages = {}; document.documentElement.dataset.glanceShot = {};",
+                    json!(images),
                     json!(stage)
                 ))
                 .unwrap();
@@ -931,8 +982,50 @@ fn glance_panel_desktop_fixture() {
     run_desktop(builder, || InferenceWorker::spawn(|| Fixture));
 }
 
+/// A synthetic "screen": the English OCR sample placed on a larger white
+/// canvas, with the region covering only the sample.
+fn synthetic_screen() -> (agent_core::screen::Frame, agent_core::screen::Region) {
+    let sample = include_bytes!("../../../../crates/tools/tests/fixtures/ocr-latin-eng-14.png");
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&sample[..]))
+        .read_info()
+        .unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    let channels = info.color_type.samples();
+    let (width, height) = (info.width, info.height);
+    let (canvas_w, canvas_h) = (width * 3, height * 4);
+    let (left, top) = (40u32, 60u32);
+    let mut canvas = vec![255u8; (canvas_w * canvas_h * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let source = ((y * width + x) as usize) * channels;
+            let target = (((y + top) * canvas_w + x + left) * 4) as usize;
+            canvas[target..target + 3].copy_from_slice(&pixels[source..source + 3]);
+        }
+    }
+    let frame = agent_core::screen::Frame::from_raw(
+        &canvas,
+        canvas_w,
+        canvas_h,
+        (canvas_w * 4) as usize,
+        0,
+        agent_core::screen::PixelFormat::Rgba,
+    )
+    .unwrap();
+    (
+        frame,
+        agent_core::screen::Region {
+            x: left,
+            y: top,
+            width,
+            height,
+        },
+    )
+}
+
 /// A scripted local model and one synthetic knowledge document.
 fn prepare_glance_profile(app: &tauri::AppHandle) {
+    *crate::panel::screen::FIXTURE.lock().unwrap() = Some(synthetic_screen());
     let desktop = app.state::<crate::commands::Desktop>();
     let settings = ModelSettings::default();
     let model = {

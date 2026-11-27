@@ -2,6 +2,7 @@
 
 mod agent;
 mod bundled_model;
+mod capture;
 mod chat_context;
 mod commands;
 mod credentials;
@@ -10,6 +11,7 @@ mod desktop_acceptance;
 mod knowledge;
 mod panel;
 mod platform;
+mod portal_bus;
 mod providers;
 mod semantic;
 mod summon;
@@ -83,6 +85,7 @@ fn run_desktop_instance(
     instance: Option<summon::Instance>,
 ) {
     builder
+        .register_uri_scheme_protocol("glance-crop", panel::crop_protocol)
         .setup(move |app| {
             let path = app
                 .path()
@@ -120,6 +123,10 @@ fn run_desktop_instance(
             panel::glance_remember,
             panel::glance_dismiss,
             panel::glance_open_main,
+            panel::screen::glance_capture,
+            panel::screen::glance_capture_clear,
+            panel::screen::glance_ocr,
+            panel::screen::glance_estimate,
             bootstrap,
             list_conversations,
             get_conversation,
