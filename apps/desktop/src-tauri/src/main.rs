@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod attachments;
 mod bundled_model;
 mod capture;
 mod chat_context;
@@ -63,6 +64,7 @@ fn run_desktop_instance(
 ) {
     builder
         .register_uri_scheme_protocol("glance-crop", panel::crop_protocol)
+        .register_uri_scheme_protocol("attachment-preview", attachments::preview_protocol)
         .setup(move |app| {
             let path = app
                 .path()
@@ -199,6 +201,12 @@ fn run_desktop_instance(
             research::web_research_delete_key,
             research::chat_web_research,
             research::web_research_open,
+            attachments::attachment_choose,
+            attachments::attachment_list,
+            attachments::attachment_cancel,
+            attachments::attachment_remove,
+            attachments::attachment_set_retention,
+            attachments::chat_attachment_evidence,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");

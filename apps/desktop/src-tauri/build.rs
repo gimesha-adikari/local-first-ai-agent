@@ -99,6 +99,12 @@ fn main() {
         "web_research_delete_key",
         "chat_web_research",
         "web_research_open",
+        "attachment_choose",
+        "attachment_list",
+        "attachment_cancel",
+        "attachment_remove",
+        "attachment_set_retention",
+        "chat_attachment_evidence",
     ]);
     let attributes = tauri_build::Attributes::new().app_manifest(app_manifest);
     tauri_build::try_build(attributes).expect("failed to configure the Tauri application");

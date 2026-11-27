@@ -204,6 +204,8 @@ export type ChatOptions = {
   knowledge?: { mode: RetrievalMode; documentIds: number[]; grounding?: "auto" | "documents" } | null;
   /** One explicitly authorized web research request (Stage 04-C). */
   research?: ReturnType<typeof import("./research").researchOptions>;
+  /** Attached files for this message and any per-message sharing (Stage 04-D). */
+  attachments?: ReturnType<typeof import("./attachments").attachmentRequest>;
 };
 
 /** Sampling defaults of the backend (agent-core GenerationRequest). */

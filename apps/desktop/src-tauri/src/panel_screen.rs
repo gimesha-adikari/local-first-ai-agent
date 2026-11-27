@@ -240,6 +240,16 @@ pub(super) fn ocr_state() -> OcrState {
     }
 }
 
+/// The installed recognizer and the default languages for this locale, for
+/// text in attached images (Stage 04-D). Nothing is installed automatically.
+pub(crate) fn recognizer() -> Option<(Tesseract, Vec<String>)> {
+    let state = ocr_state();
+    if !state.available || state.defaults.is_empty() {
+        return None;
+    }
+    tesseract().map(|tesseract| (tesseract, state.defaults))
+}
+
 /// The desktop fixture's synthetic frame and region (test builds only).
 #[cfg(test)]
 pub(crate) static FIXTURE: std::sync::Mutex<Option<(Frame, agent_core::screen::Region)>> =

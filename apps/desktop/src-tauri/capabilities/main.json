@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "Access saved conversations, the local inference worker, explicitly authorized local agent tools, the local knowledge library, provider configuration and status, and explicitly authorized web research. Credentials are entered natively and never pass through this window.",
+  "description": "Access saved conversations, the local inference worker, explicitly authorized local agent tools, the local knowledge library, provider configuration and status, explicitly authorized web research, and files the user attaches to a conversation through the native picker. Credentials are entered natively and never pass through this window.",
   "windows": [
     "main"
   ],
@@ -92,6 +92,12 @@
     "allow-web-research-delete-key",
     "allow-chat-web-research",
     "allow-web-research-open",
+    "allow-attachment-choose",
+    "allow-attachment-list",
+    "allow-attachment-cancel",
+    "allow-attachment-remove",
+    "allow-attachment-set-retention",
+    "allow-chat-attachment-evidence",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

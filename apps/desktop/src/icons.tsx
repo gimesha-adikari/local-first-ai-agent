@@ -71,3 +71,4 @@ export const ImageIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="5" widt
 export const ScanTextIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 8.5V6a1.5 1.5 0 0 1 1.5-1.5h2.5M15.5 4.5H18A1.5 1.5 0 0 1 19.5 6v2.5M19.5 15.5V18a1.5 1.5 0 0 1-1.5 1.5h-2.5M8.5 19.5H6A1.5 1.5 0 0 1 4.5 18v-2.5" /><path d="M8.5 9.5h7M8.5 12h7M8.5 14.5h4" /></Icon>;
 export const GlobeIcon = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="8.5" /><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5S9.6 5.8 12 3.5z" /></Icon>;
 export const ExternalIcon = (p: IconProps) => <Icon {...p}><path d="M13.5 4.5h6v6M19.5 4.5l-8 8" /><path d="M18 14v4a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V7.5A1.5 1.5 0 0 1 6 6h4" /></Icon>;
+export const PaperclipIcon = (p: IconProps) => <Icon {...p}><path d="m19 11.5-7.1 7.1a4.5 4.5 0 0 1-6.4-6.4l7.4-7.4a3 3 0 0 1 4.2 4.2l-7.3 7.3a1.5 1.5 0 0 1-2.1-2.1l6.6-6.6" /></Icon>;

@@ -44,6 +44,11 @@ import {
 } from "./providers";
 import { Onboarding, RemoteDisclosure } from "./RemoteViews";
 import { ResearchBar, SearchToggle } from "./ResearchControl";
+import { AttachButton, AttachmentTray } from "./AttachmentControl";
+import {
+  attachmentRequest, emptyShare, preparing, readyAttachments, sendProblem, sharePlan,
+  type AttachmentView, type Chosen, type RemoteTarget, type ShareDraft,
+} from "./attachments";
 import {
   emptyResearch, researchOptions, researchPlan,
   type ResearchDraft, type ResearchStage, type WebResearchView,
@@ -148,6 +153,14 @@ export default function App() {
   const [researchStages, setResearchStages] = useState<ReadonlyMap<number, ResearchStage>>(() => new Map());
   const [researching, setResearching] = useState(false);
   const [providersBusy, setProvidersBusy] = useState(false);
+  // Attachments of the open draft (no conversation yet) or conversation.
+  const [attachments, setAttachments] = useState<AttachmentView[]>([]);
+  const [pausedAttachments, setPausedAttachments] = useState<ReadonlySet<string>>(() => new Set());
+  const [share, setShare] = useState<ShareDraft>(emptyShare);
+  const [attaching, setAttaching] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [rejectedFiles, setRejectedFiles] = useState<Chosen["rejected"]>([]);
+  const attachmentScope = useRef<number | null>(null);
   const viewRef = useRef<View>({ kind: "empty" });
   const agent = useAgent({ onTurnSettled: (identity) => settleTurn(identity) });
   viewRef.current = view;
@@ -164,6 +177,67 @@ export default function App() {
     if (!initialized) return;
     void invoke<boolean>("memory_retrieval_enabled").then(setMemoryEnabled).catch(() => setMemoryEnabled(false));
   }, [initialized]);
+
+  const scopeId = view.kind === "conversation" ? view.id : null;
+
+  async function refreshAttachments(scope: number | null) {
+    try {
+      const list = await invoke<AttachmentView[]>("attachment_list", { conversationId: scope });
+      if (attachmentScope.current === scope) setAttachments(list);
+    } catch (failure) {
+      if (attachmentScope.current === scope) setAttachmentError(errorMessage(failure));
+    }
+  }
+
+  // Each draft or conversation shows only its own attachments.
+  useEffect(() => {
+    attachmentScope.current = scopeId;
+    setAttachments([]);
+    setPausedAttachments(new Set());
+    setShare(emptyShare);
+    setAttachmentError(null);
+    setRejectedFiles([]);
+    if (initialized) void refreshAttachments(scopeId);
+  }, [scopeId, initialized]);
+
+  const attachmentsPreparing = attachments.some(preparing);
+  useEffect(() => {
+    if (!attachmentsPreparing) return;
+    const timer = window.setInterval(() => void refreshAttachments(attachmentScope.current), 400);
+    return () => window.clearInterval(timer);
+  }, [attachmentsPreparing]);
+
+  async function attachFiles() {
+    const scope = attachmentScope.current;
+    setAttaching(true);
+    setAttachmentError(null);
+    setRejectedFiles([]);
+    try {
+      const chosen = await invoke<Chosen>("attachment_choose", { conversationId: scope, retention: "temporary" });
+      if (attachmentScope.current !== scope) return;
+      setRejectedFiles(chosen.rejected);
+      if (chosen.attachments.length) setShare((current) => ({ ...current, confirmed: false }));
+      await refreshAttachments(scope);
+    } catch (failure) {
+      setAttachmentError(errorMessage(failure));
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  async function changeAttachment(action: "cancel" | "remove" | "keep" | "temporary", id: string) {
+    const scope = attachmentScope.current;
+    setAttachmentError(null);
+    try {
+      if (action === "cancel") await invoke("attachment_cancel", { conversationId: scope, id });
+      else if (action === "remove") await invoke("attachment_remove", { conversationId: scope, id });
+      else await invoke("attachment_set_retention", { conversationId: scope, id, retention: action === "keep" ? "conversation" : "temporary" });
+      if (action === "remove") setShare((current) => ({ confirmed: false, images: current.images.filter((item) => item !== id) }));
+    } catch (failure) {
+      setAttachmentError(errorMessage(failure));
+    }
+    await refreshAttachments(scope);
+  }
 
   async function changeMemoryEnabled(value: boolean) {
     await invoke("memory_set_retrieval_enabled", { enabled: value });
@@ -317,6 +391,17 @@ export default function App() {
     ? "Web search can't be combined with selected documents yet. Turn off Knowledge or Search."
     : research.enabled ? plan.problem : null;
   const researchReady = research.enabled && plan.canSend && !researchProblem;
+  const includedAttachment = (id: string) => !pausedAttachments.has(id);
+  const readyForNext = mode === "chat" ? readyAttachments(attachments, includedAttachment) : [];
+  const remoteTarget: RemoteTarget = remote && remoteReady
+    ? { id: remote.id, name: remote.settings.name, imageInput: remote.settings.imageInput } : null;
+  const attachmentPlan = sharePlan(readyForNext, remoteTarget, share);
+  const attachmentProblem = mode !== "chat" ? null
+    : sendProblem(attachments, includedAttachment)
+      ?? (readyForNext.length && research.enabled ? "Web search can't be combined with attachments yet. Turn off Search, or pause the attachments."
+        : readyForNext.length && selection.enabled ? "Library documents can't be combined with attachments yet. Turn off Knowledge, or pause the attachments."
+          : attachmentPlan.needed && !attachmentPlan.canSend ? `Review what will be sent to ${remoteTarget?.name ?? "the provider"} and confirm it below the attachments.`
+            : null);
   const activeReference = snapshot?.models.find((model) => model.id === snapshot.activeModelId) ?? null;
   const supportsThinking = !remote && !!modelInfo?.supportsThinking;
   const supportsAgent = !!modelInfo?.supportsAgent;
@@ -532,12 +617,17 @@ export default function App() {
     });
     const researchRequest = wantsResearch ? researchOptions(research, webResearch) : undefined;
     if (researchRequest) options.research = researchRequest;
+    const attachmentOption = kind === "continue" ? undefined : attachmentRequest(readyForNext, remoteTarget, share);
+    if (attachmentOption) options.attachments = attachmentOption;
     setResearching(!!researchRequest);
     const generation = ++request.current;
     follow.current = true;
     const count = knowledgeRequest?.documentIds.length ?? 0;
     if (researchRequest) {
       setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: "Preparing web research…" });
+    } else if (attachmentOption) {
+      const n = attachmentOption.ids.length;
+      setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: `Reading ${n} ${n === 1 ? "attachment" : "attachments"}…` });
     } else if (knowledgeRequest || (memoryEnabled && kind !== "continue")) {
       setPendingChat({
         conversationId: id, prompt: kind === "send" ? content : null,
@@ -568,6 +658,8 @@ export default function App() {
         if (event.user && kind === "send") setDraft((current) => (current === content ? "" : current));
         // Search applies to one message; the next one is ordinary Chat again.
         if (researchRequest) setResearch((current) => ({ ...emptyResearch, mode: current.mode }));
+        // Sharing is authorized for one message at a time.
+        if (attachmentOption?.share) setShare(emptyShare);
         setOutputOverride("");
         setPendingChat(null);
       }
@@ -1040,12 +1132,13 @@ export default function App() {
       documentName: (id) => names.get(id) ?? null,
       liveCoverage: (id) => liveCoverage.get(id) ?? null,
       researchStage: (id) => researchStages.get(id) ?? null,
+      attachmentAvailable: (id) => attachments.some((item) => item.id === id && item.phase === "ready"),
     };
-  }, [knowledge.sourceRevision, knowledge.documents, liveCoverage, researchStages]);
+  }, [knowledge.sourceRevision, knowledge.documents, liveCoverage, researchStages, attachments]);
 
   const canSend = !busy && !!draft.trim() && (mode === "agent"
     ? agentAvailable && validTimeout(Number(taskTimeout))
-    : !!snapshot && !Number.isNaN(parsedOverride) && (research.enabled
+    : !!snapshot && !Number.isNaN(parsedOverride) && !attachmentProblem && (research.enabled
       ? researchReady
       : chatReady && !knowledgeBlocked));
 
@@ -1058,12 +1151,15 @@ export default function App() {
         : `An Agent turn is running in “${shorten(activeTitle ?? "another conversation", 40)}”.`)
         : modelAction ? statusText
           : leaseText ? leaseText
+          : attachmentProblem ? attachmentProblem
           : mode === "chat" && research.enabled ? "Web research uses the internet, even when the answer is written on this device"
           : mode === "chat" && remote ? (remoteReady ? disclosure(remote)
             : `${remote.settings.name} isn't ready: ${readinessCopy(remote).label}. Open Providers in Settings.`)
           : !modelReady ? (bundled === "checking" && !snapshot.models.length ? "Checking the built-in assistant…"
             : phase === "loading" ? "Loading model…" : "Load a local model, or select a provider in Settings, to start")
-            : mode === "agent" ? (agentUnavailable ?? "Agent uses only tools and files you allow · Local only")
+            : mode === "agent" ? (agentUnavailable ?? (attachments.length
+              ? "Agent doesn't read Chat attachments. Switch to Chat to ask about them."
+              : "Agent uses only tools and files you allow · Local only"))
               : knowledgeBlocked ? `${readiness.blocked!.title}. ${readiness.blocked!.detail}`
               : `Local inference · ${snapshot.preferences.enterToSend ? "Enter to send, Shift+Enter for a new line" : "Use the send button to send"}`;
 
@@ -1336,6 +1432,24 @@ export default function App() {
             researchControl={(
               <SearchToggle draft={research} disabled={!!agent.activeApproval || !snapshot}
                 onChange={(next) => { setResearch(next); setChatNotice(null); }} />
+            )}
+            attachmentControl={(
+              <AttachButton disabled={!!agent.activeApproval || !snapshot || generating} busy={attaching}
+                count={attachments.length} onAttach={() => void attachFiles()} />
+            )}
+            attachmentTray={(
+              <AttachmentTray views={attachments} included={includedAttachment} disabled={generating}
+                error={attachmentError} rejected={rejectedFiles} plan={attachmentPlan} share={share}
+                remoteName={remoteTarget?.name ?? null} onShareChange={setShare}
+                onToggle={(id) => setPausedAttachments((current) => {
+                  const next = new Set(current);
+                  if (next.has(id)) next.delete(id); else next.add(id);
+                  return next;
+                })}
+                onCancel={(id) => void changeAttachment("cancel", id)}
+                onRemove={(id) => void changeAttachment("remove", id)}
+                onRetention={(id, keep) => void changeAttachment(keep ? "keep" : "temporary", id)}
+                onDismissError={() => { setAttachmentError(null); setRejectedFiles([]); }} />
             )}
             researchPanel={research.enabled ? (
               <ResearchBar draft={research} onChange={setResearch} plan={{ ...plan, problem: researchProblem }} view={webResearch}

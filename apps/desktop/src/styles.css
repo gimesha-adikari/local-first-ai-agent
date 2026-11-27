@@ -1221,3 +1221,48 @@ button.citation-chip:hover { background: var(--accent); color: var(--on-accent);
 .web-discovered ul { list-style: none; margin: 6px 0 0; padding: 0 0 0 19px; display: grid; gap: 6px; }
 .web-discovered li p { margin: 2px 0 0; }
 .plain-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+
+/* ---------------------------------------------------------- attachments */
+.attachment-tray {
+  display: grid; gap: 8px; padding: 8px; margin: 0 0 2px -4px;
+  border-radius: var(--radius); background: var(--surface-sunken); border: 1px solid var(--border);
+  font-size: 13px;
+}
+.attachment-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px; }
+.attachment-card {
+  display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: start; gap: 8px;
+  padding: 6px 4px 6px 6px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border);
+  transition: opacity 120ms var(--ease);
+}
+.attachment-card.is-paused { opacity: 0.6; }
+.attachment-card.is-problem { border-color: color-mix(in srgb, var(--danger, #c0392b) 45%, var(--border)); }
+.attachment-thumb {
+  display: grid; place-items: center; width: 40px; height: 40px; overflow: hidden;
+  border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--text-secondary);
+}
+.attachment-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.attachment-body { min-width: 0; display: grid; gap: 1px; }
+.attachment-name { margin: 0; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-status { margin: 0; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; color: var(--text-secondary); font-size: 12px; }
+.attachment-status.error-text { color: var(--danger, #c0392b); }
+.attachment-note { margin: 0; color: var(--text-tertiary); font-size: 11.5px; }
+.attachment-actions { display: flex; gap: 10px; margin-top: 2px; }
+.attachment-actions .link-button { font-size: 12px; display: inline-flex; align-items: center; gap: 3px; }
+.attachment-keep.is-on { color: var(--accent); }
+.attachment-errors { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.attachment-errors .error-text { margin: 0; }
+.attachment-share { display: grid; gap: 5px; padding-top: 6px; border-top: 1px solid var(--border); }
+.attachment-share-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.attachment-share-list .check-row { margin-top: 3px; font-size: 12.5px; }
+.attachment-footnote { font-size: 11.5px; }
+.attach-pill[disabled] { opacity: 0.5; }
+.user-turn { flex-wrap: wrap; }
+.user-attachments {
+  list-style: none; margin: 4px 0 0; padding: 0; width: 100%;
+  display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px;
+}
+.user-attachments li {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 260px; padding: 2px 8px;
+  border-radius: 999px; background: var(--surface-sunken); border: 1px solid var(--border);
+  color: var(--text-secondary); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

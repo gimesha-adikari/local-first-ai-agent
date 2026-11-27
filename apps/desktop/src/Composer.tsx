@@ -22,7 +22,11 @@ export default function Composer({
   timeout, onTimeoutChange,
   scopes, scopeRemaining, scopeAction, scopeError, onGrant, onRevoke, onManageAccess, grantDisabled,
   lockMenus = false, placeholder, status, knowledgeControl = null, researchControl = null, researchPanel = null,
+  attachmentControl = null, attachmentTray = null,
 }: {
+  /** Chat-only attach button and the attachments of the open thread. */
+  attachmentControl?: ReactNode;
+  attachmentTray?: ReactNode;
   /** Chat-only knowledge selection control. */
   knowledgeControl?: ReactNode;
   /** Chat-only web research toggle and its disclosure panel. */
@@ -121,6 +125,7 @@ export default function Composer({
           </ul>
         )}
         {mode === "chat" && researchPanel}
+        {mode === "chat" && attachmentTray}
         <label className="sr-only" htmlFor="composer-input">{mode === "agent" ? "Describe a task" : "Message"}</label>
         <textarea id="composer-input" ref={textarea} rows={1} maxLength={mode === "agent" ? 8192 : 65536}
           value={draft} disabled={inputDisabled} placeholder={placeholder} aria-describedby={statusId}
@@ -144,6 +149,8 @@ export default function Composer({
               )}
             </Menu>
           )}
+
+          {mode === "chat" && attachmentControl}
 
           <Menu label={`Mode: ${mode === "agent" ? "Agent" : "Chat"}`} placement="above" className="composer-pill-menu" disabled={lockMenus}
             trigger={<>{mode === "agent" ? <AgentIcon size={14} /> : <ChatIcon size={14} />}<span>{mode === "agent" ? "Agent" : "Chat"}</span><ChevronDownIcon size={13} /></>}>
