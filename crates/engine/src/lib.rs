@@ -41,6 +41,7 @@ pub mod models;
 pub mod network;
 pub mod policy;
 pub mod providers;
+pub mod research;
 pub mod semantic;
 pub mod usage;
 
@@ -122,6 +123,7 @@ pub struct Engine {
     boundary: Arc<NetworkBoundary>,
     credentials: Arc<dyn CredentialSource>,
     downloads: downloads::Downloads,
+    research_results: research::TransientResults,
 }
 
 #[derive(Serialize)]
@@ -190,7 +192,13 @@ impl Engine {
             boundary,
             credentials,
             downloads: downloads::Downloads::default(),
+            research_results: research::TransientResults::default(),
         };
+        if let Ok(settings) =
+            crate::database(&engine.database).and_then(|db| db.web_research_settings())
+        {
+            research::register(&engine.policy, &settings);
+        }
         engine.restore_providers().map_err(|_| {
             agent_core::agent::AgentError::new(
                 agent_core::agent::AgentErrorCode::StorageFailed,
@@ -289,7 +297,9 @@ impl Engine {
 
     pub fn delete_conversation(&self, id: ConversationId) -> Result<()> {
         let _operation = self.reserve()?;
-        database(&self.database)?.delete(id)
+        database(&self.database)?.delete(id)?;
+        self.research_results.clear();
+        Ok(())
     }
 
     pub fn save_preferences(&self, preferences: &Preferences) -> Result<()> {
@@ -329,3 +339,6 @@ mod tests;
 
 #[cfg(test)]
 mod remote_tests;
+
+#[cfg(test)]
+mod research_tests;

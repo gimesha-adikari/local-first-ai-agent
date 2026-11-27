@@ -19,6 +19,8 @@ pub mod agent;
 pub mod knowledge;
 
 pub mod provider;
+/// Web research contracts: search results, public page evidence and records.
+pub mod research;
 /// One captured screen frame: conversion, regions and settling.
 pub mod screen;
 

@@ -268,7 +268,7 @@ fn schema_twelve_profiles_upgrade_local_only_and_keep_their_models() {
         .unwrap();
         db.connection
             .execute_batch(
-                "DROP TABLE model_downloads;
+                "DROP TABLE web_research_settings; DROP TABLE model_downloads;
          ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
          DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
                  ALTER TABLE models DROP COLUMN artifact_key; PRAGMA user_version = 12;",

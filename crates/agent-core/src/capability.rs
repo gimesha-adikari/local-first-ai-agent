@@ -33,6 +33,10 @@ pub const RETRIEVE: CapabilityId = CapabilityId::new("core.retrieve/1");
 pub const DISCOVER: CapabilityId = CapabilityId::new("core.provider-discovery/1");
 
 pub const DOWNLOAD_MODEL: CapabilityId = CapabilityId::new("core.model-download/1");
+/// Explicitly authorized web search through a configured search provider.
+pub const WEB_SEARCH: CapabilityId = CapabilityId::new("core.web-search/1");
+/// Retrieval of one disclosed public webpage for a research request.
+pub const WEB_PAGE: CapabilityId = CapabilityId::new("core.web-page/1");
 
 #[derive(Debug, Clone)]
 pub struct CapabilityRegistry(BTreeSet<CapabilityId>);

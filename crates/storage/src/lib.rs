@@ -26,13 +26,14 @@ pub mod model_downloads;
 pub mod models;
 pub mod profile;
 pub mod providers;
+pub mod research;
 pub mod semantic;
 pub use continuation::ContinuationPlan;
 pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 const MODEL_COLUMNS: &str = "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic', artifact_key";
 const NEW_TITLE: &str = "New conversation";
 
@@ -172,6 +173,11 @@ impl SqliteStore {
         if version < 16 {
             transaction
                 .execute_batch(include_str!("../migrations/016_model_downloads.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 17 {
+            transaction
+                .execute_batch(include_str!("../migrations/017_web_research.sql"))
                 .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)

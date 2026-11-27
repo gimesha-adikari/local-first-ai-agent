@@ -9,6 +9,7 @@ mod address;
 pub(crate) mod artifact;
 pub mod endpoint;
 mod http;
+pub(crate) mod page;
 mod transport;
 
 use std::{
@@ -35,15 +36,29 @@ use crate::{
     policy::{Connectivity, Denial, GrantId, Operation, Policy, Session},
 };
 
+/// How a bound credential is presented. Each provider documents exactly one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialHeader {
+    /// `Authorization: Bearer <key>`, as OpenAI-compatible servers expect.
+    Bearer,
+    /// `X-Subscription-Token: <key>`, the Brave Search API header.
+    SubscriptionToken,
+}
+
 /// A provider credential bound to one provider and one canonical origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialBinding {
     key: CredentialKey,
+    header: CredentialHeader,
 }
 
 impl CredentialBinding {
     pub fn key(&self) -> &CredentialKey {
         &self.key
+    }
+
+    pub fn header(&self) -> CredentialHeader {
+        self.header
     }
 }
 
@@ -76,12 +91,19 @@ impl Destination {
 
     /// Bind a credential stored for `provider` at this destination's exact
     /// origin. The transport attaches it only to connections to that origin.
-    pub fn with_credential(mut self, provider: &str) -> Self {
+    pub fn with_credential(self, provider: &str) -> Self {
+        self.with_credential_header(provider, CredentialHeader::Bearer)
+    }
+
+    /// Bind a credential presented in `header`. The binding is to this exact
+    /// origin, so the key can never reach a different server.
+    pub fn with_credential_header(mut self, provider: &str, header: CredentialHeader) -> Self {
         self.credential = Some(CredentialBinding {
             key: CredentialKey {
                 provider: provider.to_owned(),
                 origin: self.endpoint.origin(),
             },
+            header,
         });
         self
     }
@@ -163,11 +185,20 @@ pub struct RequestBinding {
     body_sha256: [u8; 32],
     body_len: usize,
     artifact: Option<artifact::Binding>,
+    page: Option<page::Binding>,
 }
 
 impl RequestBinding {
     pub(crate) fn artifact_epoch(&self) -> Option<u64> {
         self.artifact.as_ref().map(|artifact| artifact.epoch)
+    }
+
+    pub(crate) fn page_epoch(&self) -> Option<u64> {
+        self.page.as_ref().map(|page| page.epoch)
+    }
+
+    pub(crate) fn is_bodiless_get(&self) -> bool {
+        self.method == Method::Get && self.body_len == 0
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -194,6 +225,7 @@ pub struct Outbound {
     content_type: Option<&'static str>,
     provider_retention: Retention,
     artifact_target: Option<artifact::Target>,
+    page_target: Option<page::Target>,
 }
 
 impl Outbound {
@@ -216,6 +248,7 @@ impl Outbound {
             body_sha256: sha256(&body),
             body_len: body.len(),
             artifact: None,
+            page: None,
         };
         Self {
             operation: Arc::new(Operation::new(
@@ -233,7 +266,17 @@ impl Outbound {
             body,
             provider_retention,
             artifact_target: None,
+            page_target: None,
         }
+    }
+
+    /// Send a non-empty body with this media type instead of JSON. The body
+    /// digest stays bound by the operation.
+    pub fn with_content_type(mut self, content_type: &'static str) -> Self {
+        if !self.body.is_empty() {
+            self.content_type = Some(content_type);
+        }
+        self
     }
 
     pub fn operation(&self) -> &Operation {
@@ -263,10 +306,12 @@ impl Outbound {
             destination: destination.id().to_owned(),
             origin: destination.endpoint().origin(),
             method: binding.method.as_str().to_owned(),
-            route: binding.artifact.as_ref().map_or_else(
-                || binding.route.as_str().to_owned(),
-                |artifact| format!("artifact/{}", artifact.key),
-            ),
+            route: match (&binding.artifact, &self.page_target) {
+                (Some(artifact), _) => format!("artifact/{}", artifact.key),
+                // The path only: a page's query string can be personal.
+                (None, Some(target)) => target.recorded_path(),
+                (None, None) => binding.route.as_str().to_owned(),
+            },
             body_sha256: hex(&binding.body_sha256),
             body_bytes: binding.body_len as u64,
             credential: false,
@@ -438,6 +483,8 @@ pub struct NetworkBoundary {
     credentials: Arc<dyn CredentialSource>,
     config: Arc<transport::Config>,
     worker: Mutex<Option<Arc<transport::Worker>>>,
+    #[cfg(test)]
+    page_fixture: Mutex<Option<u16>>,
 }
 
 impl NetworkBoundary {
@@ -451,6 +498,8 @@ impl NetworkBoundary {
             credentials,
             config: Arc::new(transport::Config::new(config)),
             worker: Mutex::new(None),
+            #[cfg(test)]
+            page_fixture: Mutex::new(None),
         }
     }
 
@@ -488,15 +537,21 @@ impl NetworkBoundary {
         share: GrantId,
     ) -> Result<Streaming, Box<Failed>> {
         let mut record = request.record();
-        match (&request.artifact_target, &request.binding().artifact) {
-            (None, None) => {}
-            (Some(target), Some(binding)) if target.matches(binding) => {}
-            _ => {
-                return Err(Box::new(Failed {
-                    failure: Failure::Denied(Denial::Scope),
-                    record,
-                }));
-            }
+        let artifact = match (&request.artifact_target, &request.binding().artifact) {
+            (None, None) => true,
+            (Some(target), Some(binding)) => target.matches(binding),
+            _ => false,
+        };
+        let page = match (&request.page_target, &request.binding().page) {
+            (None, None) => true,
+            (Some(target), Some(binding)) => target.matches(binding),
+            _ => false,
+        };
+        if !artifact || !page {
+            return Err(Box::new(Failed {
+                failure: Failure::Denied(Denial::Scope),
+                record,
+            }));
         }
         if let Err(denial) = self.policy.admit(request.operation(), process, share) {
             return Err(Box::new(Failed {

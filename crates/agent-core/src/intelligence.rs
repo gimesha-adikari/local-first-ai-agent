@@ -28,6 +28,8 @@ pub enum SourceKind {
     Knowledge,
     Memory,
     AssistantPrefix,
+    /// Evidence from a public webpage or search result for a research turn.
+    Web,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

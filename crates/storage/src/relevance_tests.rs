@@ -274,6 +274,7 @@ fn follow_ups_use_only_the_previous_document_question() {
                 coverage: Some(coverage(ChatIntent::Question)),
                 memory_enabled: Some(false),
                 fitted: None,
+                research: None,
             },
         )
         .unwrap();
@@ -299,6 +300,7 @@ fn follow_ups_use_only_the_previous_document_question() {
                 coverage: Some(coverage(ChatIntent::General)),
                 memory_enabled: Some(true),
                 fitted: None,
+                research: None,
             },
         )
         .unwrap();
@@ -362,6 +364,7 @@ fn ordinary_routing_coverage_persists_and_refinements_reach_their_question() {
                     coverage: Some(coverage(ChatIntent::Question)),
                     memory_enabled: Some(false),
                     fitted: None,
+                    research: None,
                 },
             )
             .unwrap();

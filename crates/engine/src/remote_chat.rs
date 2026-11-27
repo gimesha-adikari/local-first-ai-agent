@@ -47,6 +47,11 @@ pub(super) struct RemoteTurn {
     /// Images for providers that accept image input, already authorized for
     /// this request. Each is also a required candidate source.
     pub images: Vec<(ImageInput, (u32, u32))>,
+    /// Transport records of research requests made for this turn.
+    pub external: Vec<agent_core::intelligence::EgressRecord>,
+    /// The user separately authorized sending web evidence to this provider
+    /// for this request.
+    pub web: bool,
 }
 
 fn denied(message: impl Into<String>) -> InferenceError {
@@ -151,6 +156,8 @@ impl ChatRuntime {
             max_tokens,
             cancellation,
             images: attached,
+            external,
+            web,
         } = remote;
         let (saved, destination) = target;
         let settings = saved.settings.clone();
@@ -161,6 +168,9 @@ impl ChatRuntime {
         let mut allowed = settings.sharing.allowed_classes();
         if ephemeral {
             allowed.extend([CLIPBOARD_TEXT, SCREEN_TEXT, SCREEN_IMAGE]);
+        }
+        if web {
+            allowed.push(agent_core::classification::PUBLIC_WEB);
         }
         let allowed = DataClasses::new(allowed);
 
@@ -214,6 +224,9 @@ impl ChatRuntime {
             agent_core::classification::MODEL_OUTPUT,
         )
         .ephemeral(ephemeral);
+        for record in external {
+            session.record_external(record);
+        }
         let output = max_tokens
             .unwrap_or(settings.max_output_tokens)
             .clamp(1, settings.max_output_tokens);
@@ -272,7 +285,13 @@ impl ChatRuntime {
         let outbound = Outbound::new(
             session.policy_session(),
             GENERATE,
-            if ephemeral { "glance" } else { "chat" },
+            if ephemeral {
+                "glance"
+            } else if web {
+                "web-research"
+            } else {
+                "chat"
+            },
             destination.locality(),
             destination,
             Method::Post,

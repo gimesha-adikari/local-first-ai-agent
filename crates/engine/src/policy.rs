@@ -13,12 +13,12 @@ use std::{
 use agent_core::{
     capability::{
         AGENT_DECISION, CapabilityId, CapabilityRegistry, DISCOVER, DOWNLOAD_MODEL, EMBED,
-        GENERATE, IMPORT, Locality, RETRIEVE, Retention,
+        GENERATE, IMPORT, Locality, RETRIEVE, Retention, WEB_PAGE, WEB_SEARCH,
     },
     classification::{
         AGENT_CONTEXT, CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY,
-        MODEL_ARTIFACT, MODEL_OUTPUT, PDF_EXCERPT, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT,
-        Sensitivity, TEXT_EXCERPT, USER_INPUT,
+        MODEL_ARTIFACT, MODEL_OUTPUT, PDF_EXCERPT, PUBLIC_WEB, QUERY, SCREEN_IMAGE, SCREEN_TEXT,
+        SYSTEM_TEXT, Sensitivity, TEXT_EXCERPT, USER_INPUT,
     },
     inference::Cancellation,
 };
@@ -222,6 +222,8 @@ impl Default for Policy {
                 RETRIEVE,
                 DISCOVER,
                 DOWNLOAD_MODEL,
+                WEB_SEARCH,
+                WEB_PAGE,
             ]),
             DataClasses::default(),
             crate::network::artifact::destinations(),
@@ -386,12 +388,68 @@ impl Policy {
         {
             return Err(Denial::Scope);
         }
+        let page_epoch = operation
+            .request
+            .as_ref()
+            .and_then(RequestBinding::page_epoch);
+        let public_page = operation.capability == WEB_PAGE;
+        if public_page {
+            // A dynamic public destination: never registered, so every
+            // property that registration would fix is checked here.
+            let labels_ok = operation.labels.contains(PUBLIC_WEB)
+                && operation
+                    .labels
+                    .ids()
+                    .all(|id| id == PUBLIC_WEB.id || id == USER_INPUT.id);
+            if page_epoch != Some(self.restriction_epoch())
+                || !labels_ok
+                || operation.purpose != "web-page"
+                || !operation
+                    .request
+                    .as_ref()
+                    .is_some_and(RequestBinding::is_bodiless_get)
+                || !operation.destination.as_ref().is_some_and(|target| {
+                    target.id() == crate::network::page::DESTINATION
+                        && target.credential().is_none()
+                        && target.locality() == Locality::ThirdParty
+                        && target.endpoint().scheme() == crate::network::Scheme::Https
+                        && public_scope(target.scope())
+                })
+            {
+                return Err(Denial::Scope);
+            }
+        } else if page_epoch.is_some()
+            || operation
+                .destination
+                .as_ref()
+                .is_some_and(|target| target.id().starts_with("web/"))
+        {
+            return Err(Denial::Scope);
+        }
+        if operation.capability == WEB_SEARCH
+            && (operation.purpose != "web-search"
+                || !operation
+                    .labels
+                    .ids()
+                    .all(|id| id == USER_INPUT.id || id == QUERY.id)
+                || !operation
+                    .destination
+                    .as_ref()
+                    .is_some_and(|target| target.id().starts_with("search/")))
+        {
+            return Err(Denial::Scope);
+        }
         match (
             &operation.destination,
             &operation.request,
             operation.connectivity,
         ) {
             (None, None, Connectivity::Offline) => Ok(()),
+            (Some(_), Some(request), Connectivity::ThroughBoundary)
+                if public_page && request.is_valid() =>
+            {
+                Ok(())
+            }
             (Some(target), Some(request), Connectivity::ThroughBoundary)
                 if request.is_valid()
                     && self
@@ -425,6 +483,8 @@ impl Policy {
             QUERY,
             MODEL_OUTPUT,
             SYSTEM_TEXT,
+            // Admitted for Chat research answers (Stage 04-C).
+            PUBLIC_WEB,
         ];
         if labels.ids().all(|id| {
             allowed.iter().any(|class| {
@@ -621,6 +681,16 @@ impl Policy {
         }
         check_liveness(grant, now)?;
         Ok(handoff())
+    }
+}
+
+/// Public pages connect only to globally routable addresses. Transport tests
+/// route them to a loopback fixture instead.
+fn public_scope(scope: &crate::network::NetworkScope) -> bool {
+    match scope {
+        crate::network::NetworkScope::Public => true,
+        crate::network::NetworkScope::Loopback => cfg!(test),
+        crate::network::NetworkScope::Pinned(_) => false,
     }
 }
 

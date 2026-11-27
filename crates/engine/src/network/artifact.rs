@@ -268,6 +268,7 @@ impl NetworkBoundary {
                     epoch: consent.epoch,
                     target_sha256: target.sha256(),
                 }),
+                page: None,
             };
             let outbound = Outbound {
                 operation: Operation::new(
@@ -286,6 +287,7 @@ impl NetworkBoundary {
                 content_type: None,
                 provider_retention: Retention::ProviderDeclared,
                 artifact_target: Some(target),
+                page_target: None,
             };
             let process = self
                 .policy

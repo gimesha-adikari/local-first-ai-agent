@@ -99,6 +99,12 @@ impl Job {
             limits.idle = limits.head;
             limits.chunk = 64 * 1024;
         }
+        if self.request.page_target.is_some() {
+            limits.max_body = limits.max_body.min(super::page::MAX_BODY);
+            limits.total = limits.total.min(super::page::TOTAL);
+            limits.head = limits.head.min(super::page::HEAD);
+            limits.idle = limits.idle.min(super::page::HEAD);
+        }
         limits
     }
 
@@ -463,6 +469,8 @@ async fn run(
     let path = format!("{}{}", endpoint.base_path(), binding.route.as_str());
     let request = if let Some(target) = artifact {
         http::encode_artifact(&endpoint.authority(), target)
+    } else if let Some(target) = &job.request.page_target {
+        http::encode_page(&endpoint.authority(), &target.path)
     } else {
         http::encode_request(
             binding.method.as_str(),
@@ -470,7 +478,9 @@ async fn run(
             &path,
             job.request.content_type,
             &job.request.body,
-            credential.as_ref(),
+            credential
+                .as_ref()
+                .zip(destination.credential().map(|binding| binding.header())),
         )
     };
     drop(credential);

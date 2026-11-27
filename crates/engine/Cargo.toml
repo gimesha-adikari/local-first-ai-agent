@@ -10,6 +10,8 @@ publish = false
 agent-core = { path = "../agent-core" }
 futures-channel = { version = "0.3.34", features = ["sink"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
+encoding_rs = "0.8.44"
+html5ever = "0.40.1"
 httparse = "1.10.1"
 inference = { path = "../inference", features = ["llama"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }

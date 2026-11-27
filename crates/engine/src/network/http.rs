@@ -15,7 +15,7 @@ pub(super) fn encode_request(
     path: &str,
     content_type: Option<&str>,
     body: &[u8],
-    credential: Option<&Secret>,
+    credential: Option<(&Secret, super::CredentialHeader)>,
 ) -> Zeroizing<Vec<u8>> {
     let mut head = Zeroizing::new(Vec::with_capacity(512 + body.len()));
     let mut line = |text: &str| {
@@ -34,13 +34,26 @@ pub(super) fn encode_request(
     if method != "GET" || !body.is_empty() {
         line(&format!("Content-Length: {}", body.len()));
     }
-    if let Some(secret) = credential {
-        head.extend_from_slice(b"Authorization: Bearer ");
+    if let Some((secret, header)) = credential {
+        head.extend_from_slice(match header {
+            super::CredentialHeader::Bearer => b"Authorization: Bearer ".as_slice(),
+            super::CredentialHeader::SubscriptionToken => b"X-Subscription-Token: ".as_slice(),
+        });
         head.extend_from_slice(secret.expose().as_bytes());
         head.extend_from_slice(b"\r\n");
     }
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(body);
+    head
+}
+
+/// Public page requests carry only fixed, non-identifying headers: no
+/// cookies, referrer, credentials, language or client hints.
+pub(super) fn encode_page(authority: &str, path: &str) -> Zeroizing<Vec<u8>> {
+    use std::io::Write as _;
+
+    let mut head = Zeroizing::new(Vec::with_capacity(256 + path.len()));
+    write!(head, "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: {USER_AGENT}\r\nAccept: text/html, application/xhtml+xml;q=0.9, text/plain;q=0.8\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n").expect("write to memory");
     head
 }
 
@@ -464,7 +477,7 @@ mod tests {
             "/v1/chat/completions",
             Some("application/json"),
             b"{}",
-            Some(&secret),
+            Some((&secret, crate::network::CredentialHeader::Bearer)),
         );
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(
@@ -474,5 +487,35 @@ mod tests {
         assert!(text.contains("Authorization: Bearer sk-fixture\r\n"));
         assert!(text.contains("Connection: close\r\n"));
         assert!(text.ends_with("\r\n\r\n{}"));
+        let brave = encode_request(
+            "POST",
+            "api.search.brave.com",
+            "/res/v1/web/search",
+            Some("application/json"),
+            b"{}",
+            Some((&secret, crate::network::CredentialHeader::SubscriptionToken)),
+        );
+        let text = std::str::from_utf8(&brave).unwrap();
+        assert!(text.contains("X-Subscription-Token: sk-fixture\r\n"));
+        assert!(!text.contains("Authorization"));
+        assert_eq!(text.matches("sk-fixture").count(), 1);
+    }
+
+    #[test]
+    fn page_requests_carry_no_identifying_headers() {
+        let bytes = encode_page("news.example.org", "/a?b=c");
+        let text = std::str::from_utf8(&bytes).unwrap().to_ascii_lowercase();
+        assert!(text.starts_with("get /a?b=c http/1.1\r\nhost: news.example.org\r\n"));
+        for header in [
+            "cookie",
+            "referer",
+            "authorization",
+            "accept-language",
+            "x-subscription-token",
+            "origin:",
+        ] {
+            assert!(!text.contains(header), "{header}");
+        }
+        assert!(text.ends_with("\r\n\r\n"));
     }
 }

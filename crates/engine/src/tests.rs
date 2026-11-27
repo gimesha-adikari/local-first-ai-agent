@@ -79,18 +79,18 @@ impl Platform for QueuedChat {
 /// What the scripted provider saw for one generation.
 #[derive(Clone, Debug)]
 pub(crate) struct Seen {
-    prompt: String,
-    system: String,
-    history_turns: usize,
-    evidence: Option<Vec<String>>,
-    memories: Vec<String>,
+    pub(crate) prompt: String,
+    pub(crate) system: String,
+    pub(crate) history_turns: usize,
+    pub(crate) evidence: Option<Vec<String>>,
+    pub(crate) memories: Vec<String>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct Script(Arc<Mutex<Vec<Seen>>>);
 
 impl Script {
-    fn seen(&self) -> Vec<Seen> {
+    pub(crate) fn seen(&self) -> Vec<Seen> {
         self.0.lock().unwrap().clone()
     }
 }
@@ -157,6 +157,12 @@ impl InferenceProvider for Scripted {
                 ErrorCode::GenerationFailed,
                 "Scripted failure.",
             ));
+        } else if request.prompt.contains("cite") {
+            // Valid, out-of-range and malformed markers for citation checks.
+            emit(TextDelta {
+                text: "Opened in 2026 [S1]. Also [S7] and [S2, S9].".into(),
+            })?;
+            FinishReason::EndOfGeneration
         } else if request.prompt == "Truncate this answer" {
             emit(TextDelta {
                 text: "Prefix".into(),
@@ -198,7 +204,7 @@ impl ChatEventSink for Recorder {
 }
 
 impl Recorder {
-    fn kinds(&self) -> Vec<String> {
+    pub(crate) fn kinds(&self) -> Vec<String> {
         self.0
             .lock()
             .unwrap()
@@ -1085,6 +1091,7 @@ impl ChatEventSink for PanickingSink {
             ChatEvent::Started { .. } => "started",
             ChatEvent::Delta { .. } => "delta",
             ChatEvent::Knowledge { .. } => "knowledge",
+            ChatEvent::Research { .. } => "research",
         };
         if kind == self.kind {
             self.invoked

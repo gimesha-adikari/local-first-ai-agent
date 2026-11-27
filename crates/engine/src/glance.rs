@@ -574,6 +574,8 @@ impl ChatRuntime {
                         images: attachment
                             .map(|image| vec![(image.image, image.size)])
                             .unwrap_or_default(),
+                        external: Vec::new(),
+                        web: false,
                     },
                     target,
                     events,
@@ -600,6 +602,7 @@ impl ChatRuntime {
                         sources,
                         coverage: None,
                         candidates,
+                        external: Vec::new(),
                     },
                 )
                 .await

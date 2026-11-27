@@ -138,6 +138,11 @@ pub(crate) fn consent(
     if operation.purpose() == "glance" {
         allowed.extend([CLIPBOARD_TEXT, SCREEN_TEXT, SCREEN_IMAGE]);
     }
+    // Public web evidence is admitted only for a research answer whose
+    // sharing the user authorized for that one request.
+    if operation.purpose() == "web-research" {
+        allowed.push(agent_core::classification::PUBLIC_WEB);
+    }
     let registry = DataClasses::new(allowed.iter().copied());
     if operation
         .labels()

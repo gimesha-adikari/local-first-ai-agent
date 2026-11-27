@@ -57,6 +57,14 @@ pub const MODEL_ARTIFACT: DataClass = DataClass {
     id: "core.model-artifact/1",
     sensitivity: Sensitivity::Public,
 };
+/// Untrusted public web material: search results, public page URLs found
+/// through search, and text extracted from public webpages. It is public in
+/// origin but never trusted as instructions, and it does not declassify any
+/// personal input it is combined with.
+pub const PUBLIC_WEB: DataClass = DataClass {
+    id: "core.public-web/1",
+    sensitivity: Sensitivity::Public,
+};
 pub const SECRET: DataClass = DataClass {
     id: "core.secret/1",
     sensitivity: Sensitivity::Secret,
@@ -91,6 +99,7 @@ impl Default for DataClasses {
             SYSTEM_TEXT,
             PROVIDER_CONTROL,
             MODEL_ARTIFACT,
+            PUBLIC_WEB,
             SECRET,
         ])
     }

@@ -50,6 +50,8 @@ use crate::{
 pub mod glance;
 #[path = "remote_chat.rs"]
 mod remote;
+#[path = "research_turn.rs"]
+mod research_turn;
 
 /// Events streamed to the surface that started a Chat turn.
 #[derive(Serialize)]
@@ -65,6 +67,11 @@ pub enum ChatEvent {
     Delta {
         id: MessageId,
         text: String,
+    },
+    /// Progress of a web research turn. Details are fetched separately.
+    Research {
+        id: MessageId,
+        stage: agent_core::research::ResearchStage,
     },
 }
 
@@ -90,6 +97,9 @@ pub struct ChatOptions {
     enable_thinking: bool,
     max_tokens: Option<u32>,
     knowledge: Option<KnowledgeSelection>,
+    /// An explicitly authorized web research request for this message.
+    #[serde(default)]
+    research: Option<crate::research::ResearchOptions>,
 }
 
 #[cfg(test)]
@@ -449,6 +459,8 @@ struct StreamContext {
     sources: Vec<KnowledgeHit>,
     coverage: Option<KnowledgeCoverage>,
     candidates: Candidates,
+    /// Transport records of research requests made for this turn.
+    external: Vec<agent_core::intelligence::EgressRecord>,
 }
 
 /// Everything a detached Chat turn needs, shared with the engine.
@@ -461,6 +473,7 @@ struct ChatRuntime {
     semantic: Arc<SemanticState>,
     boundary: Arc<NetworkBoundary>,
     glance_receipt: Option<glance::ReceiptSlot>,
+    research_results: crate::research::TransientResults,
 }
 
 impl Engine {
@@ -516,6 +529,7 @@ impl Engine {
             semantic: Arc::clone(&self.semantic),
             boundary: Arc::clone(&self.boundary),
             glance_receipt: None,
+            research_results: self.research_results.clone(),
         }
     }
 
@@ -612,7 +626,7 @@ impl ChatRuntime {
         &self,
         id: ConversationId,
         action: TurnAction,
-        options: ChatOptions,
+        mut options: ChatOptions,
         events: ChatEvents,
         cancellation: Cancellation,
         model_id: Option<ModelId>,
@@ -622,6 +636,20 @@ impl ChatRuntime {
             TurnAction::Regenerate => database(&self.database)?.chat_regeneration_prompt(id)?,
         };
         GenerationRequest::new(&question).validate()?;
+        if let Some(research) = options.research.take() {
+            return self
+                .run_research(
+                    id,
+                    action,
+                    question,
+                    research,
+                    options,
+                    events,
+                    cancellation,
+                    model_id,
+                )
+                .await;
+        }
         let strict = options
             .knowledge
             .as_ref()
@@ -866,6 +894,7 @@ impl ChatRuntime {
                             coverage: coverage.clone(),
                             memory_enabled: Some(memory_enabled),
                             fitted: None,
+                            research: None,
                         },
                     )?,
                     // Ordinary Chat with documents selected keeps its routing
@@ -987,6 +1016,8 @@ impl ChatRuntime {
                         max_tokens: options.max_tokens,
                         cancellation,
                         images: Vec::new(),
+                        external: Vec::new(),
+                        web: false,
                     },
                     target,
                     events,
@@ -1012,6 +1043,7 @@ impl ChatRuntime {
                 sources,
                 coverage,
                 candidates,
+                external: Vec::new(),
             },
         )
         .await
@@ -1105,13 +1137,16 @@ impl ChatRuntime {
             sources,
             coverage,
             candidates,
+            external,
         } = context;
         let mut assistant = turn.assistant;
         let message_id = assistant.id;
-        let session = Arc::new(Mutex::new(Some(
-            ChatSession::new(candidates, cancellation.clone(), MODEL_OUTPUT)
-                .ephemeral(self.glance_receipt.is_some()),
-        )));
+        let mut chat_session = ChatSession::new(candidates, cancellation.clone(), MODEL_OUTPUT)
+            .ephemeral(self.glance_receipt.is_some());
+        for record in external {
+            chat_session.record_external(record);
+        }
+        let session = Arc::new(Mutex::new(Some(chat_session)));
         let store = Arc::clone(&self.database);
         let context = assistant.context.clone();
         let fitted = Arc::clone(&session);
@@ -1320,6 +1355,7 @@ impl ChatRuntime {
                 sources: Vec::new(),
                 coverage: None,
                 candidates,
+                external: Vec::new(),
             },
         )
         .await
