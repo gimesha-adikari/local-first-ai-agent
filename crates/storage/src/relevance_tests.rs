@@ -275,6 +275,7 @@ fn follow_ups_use_only_the_previous_document_question() {
                 memory_enabled: Some(false),
                 fitted: None,
                 research: None,
+                attachments: None,
             },
         )
         .unwrap();
@@ -301,6 +302,7 @@ fn follow_ups_use_only_the_previous_document_question() {
                 memory_enabled: Some(true),
                 fitted: None,
                 research: None,
+                attachments: None,
             },
         )
         .unwrap();
@@ -365,6 +367,7 @@ fn ordinary_routing_coverage_persists_and_refinements_reach_their_question() {
                     memory_enabled: Some(false),
                     fitted: None,
                     research: None,
+                    attachments: None,
                 },
             )
             .unwrap();

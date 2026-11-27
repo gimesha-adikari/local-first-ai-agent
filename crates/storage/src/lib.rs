@@ -16,6 +16,7 @@ use agent_core::{
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 mod agent;
+pub mod attachments;
 pub mod chat_context;
 mod continuation;
 mod conversation;
@@ -33,7 +34,7 @@ pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 const MODEL_COLUMNS: &str = "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic', artifact_key";
 const NEW_TITLE: &str = "New conversation";
 
@@ -178,6 +179,11 @@ impl SqliteStore {
         if version < 17 {
             transaction
                 .execute_batch(include_str!("../migrations/017_web_research.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 18 {
+            transaction
+                .execute_batch(include_str!("../migrations/018_chat_attachments.sql"))
                 .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -405,6 +411,7 @@ impl SqliteStore {
             chat_context::record_evidence(&transaction, message_id, candidates, usage.sources)?;
         }
         chat_context::mark_citations(&transaction, message_id, content)?;
+        attachments::mark_citations(&transaction, message_id, content)?;
         touch_conversation(&transaction, conversation, unix_ms()?)?;
         transaction.commit().map_err(sql_error)
     }

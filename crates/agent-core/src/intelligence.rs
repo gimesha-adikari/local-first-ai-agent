@@ -30,6 +30,11 @@ pub enum SourceKind {
     AssistantPrefix,
     /// Evidence from a public webpage or search result for a research turn.
     Web,
+    /// A passage of text from a file attached to the conversation.
+    Attachment,
+    /// A validated image attached to the conversation, sent to a provider
+    /// that accepts image input.
+    AttachmentImage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

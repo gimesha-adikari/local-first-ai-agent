@@ -8,6 +8,8 @@ pub fn status() -> &'static str {
 pub mod inference;
 pub mod intelligence;
 
+/// Conversation attachments: limits, retention and per-attempt records.
+pub mod attachment;
 pub mod capability;
 pub mod chat;
 pub mod chat_context;
