@@ -792,3 +792,73 @@ fn stop_cancels_research_in_flight() {
         .unwrap();
     assert_eq!(message.state, GenerationState::Cancelled);
 }
+
+/// Opt-in live compatibility check through the real boundary, resolver and
+/// system trust store. It uses no real credential and contacts no service the
+/// owner configured: Brave Search with a synthetic invalid key, and the IANA
+/// example page. Run with AGENT_LIVE_WEB=1.
+#[test]
+#[ignore = "contacts api.search.brave.com and example.com; set AGENT_LIVE_WEB=1"]
+fn live_compatibility_without_credentials() {
+    if std::env::var_os("AGENT_LIVE_WEB").is_none() {
+        return;
+    }
+    let script = Script::default();
+    let provider = script.clone();
+    let worker = InferenceWorker::spawn(move || Scripted(provider)).unwrap();
+    let vault = Arc::new(Vault::default());
+    let engine = Engine::with_network(
+        Arc::new(Threads),
+        Arc::new(worker),
+        SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap(),
+        ":memory:".into(),
+        Arc::clone(&vault) as Arc<dyn CredentialSource>,
+        BoundaryConfig::default(),
+    )
+    .unwrap();
+    engine
+        .intelligence_policy()
+        .register_destination(providers::brave_destination())
+        .unwrap();
+    vault.0.lock().unwrap().insert(
+        engine.brave_credential_key().unwrap(),
+        "synthetic-invalid-key".into(),
+    );
+    engine
+        .set_intelligence_settings(IntelligenceSettings {
+            local_only: false,
+            active_provider: None,
+        })
+        .unwrap();
+    let consent = crate::network::page::ResearchConsent::new(
+        engine.intelligence_policy(),
+        agent_core::inference::Cancellation::default(),
+        8,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let mut records = Vec::new();
+    let error = futures_executor::block_on(engine.network().search(
+        &consent,
+        SearchProviderKind::Brave,
+        &agent_core::research::SearchQuery::new("compatibility check").unwrap(),
+        &mut records,
+    ))
+    .unwrap_err();
+    eprintln!("brave: {:?} {}", error.code, error.message);
+    assert_eq!(error.code, ErrorCode::ProviderAuthentication);
+    assert_eq!(records.len(), 1);
+    assert!(records[0].credential);
+
+    let page = futures_executor::block_on(engine.network().fetch_page(
+        &consent,
+        crate::network::page::PublicUrl::parse("https://example.com/").unwrap(),
+        &agent_core::classification::Labels::from_source(agent_core::classification::PUBLIC_WEB),
+        |_| {},
+    ))
+    .unwrap_or_else(|error| panic!("{error:?}"));
+    let extracted = crate::research::extract::page(&page.body, &page.content_type);
+    eprintln!("page: {:?} {:?}", extracted.title, extracted.blocks.first());
+    assert_eq!(extracted.title.as_deref(), Some("Example Domain"));
+    assert!(!extracted.blocks.is_empty());
+}

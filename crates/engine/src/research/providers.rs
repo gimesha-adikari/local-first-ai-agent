@@ -197,6 +197,15 @@ pub(crate) fn error(provider: SearchProviderKind, status: u16, body: &[u8]) -> I
                 .map(|code| clean_text(code, 40))
         })
         .filter(|code| code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+    // Brave reports a missing or invalid key as HTTP 422 with an error code
+    // such as SUBSCRIPTION_TOKEN_INVALID, so its code refines the status.
+    let reason = detail.as_deref().unwrap_or_default().to_ascii_uppercase();
+    let status = match provider {
+        SearchProviderKind::Brave if reason.contains("TOKEN") || reason.contains("AUTH") => 401,
+        SearchProviderKind::Brave if reason.contains("QUOTA") || reason.contains("USAGE") => 402,
+        SearchProviderKind::Brave if reason.contains("RATE_LIMIT") => 429,
+        _ => status,
+    };
     let suffix = detail.map(|code| format!(" ({code})")).unwrap_or_default();
     let name = provider.label();
     let (code, message) = match (provider, status) {
@@ -316,6 +325,19 @@ mod tests {
             error(SearchProviderKind::Brave, 402, b"").code,
             ErrorCode::BudgetExceeded
         );
+        // Observed live: Brave answers an invalid or missing key with HTTP 422.
+        let live = error(
+            SearchProviderKind::Brave,
+            422,
+            br#"{"error":{"code":"SUBSCRIPTION_TOKEN_INVALID","detail":"The provided subscription token is invalid.","meta":{"component":"authentication"},"status":422},"type":"ErrorResponse"}"#,
+        );
+        assert_eq!(live.code, ErrorCode::ProviderAuthentication);
+        let validation = error(
+            SearchProviderKind::Brave,
+            422,
+            br#"{"error":{"code":"VALIDATION"}}"#,
+        );
+        assert_eq!(validation.code, ErrorCode::ProviderRejected);
         assert!(
             error(SearchProviderKind::Searxng, 403, b"")
                 .message
