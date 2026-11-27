@@ -2,7 +2,7 @@
 //! exists only inside `crate::capture`; the session keeps the confirmed crop
 //! (encoded PNG, wiped on drop) and any recognized text until it ends.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use agent_core::{
     capability::ImageInput,
@@ -114,9 +114,27 @@ pub(crate) fn encode_for_test(crop: &Frame) -> Vec<u8> {
     encode(crop).unwrap().to_vec()
 }
 
-fn tesseract() -> Option<&'static Tesseract> {
-    static TESSERACT: OnceLock<Option<Tesseract>> = OnceLock::new();
-    TESSERACT.get_or_init(Tesseract::discover).as_ref()
+/// The discovered installation. A missing one is looked up again on the
+/// next use, so installing Tesseract takes effect without a restart.
+fn tesseract() -> Option<Tesseract> {
+    static TESSERACT: Mutex<Option<Tesseract>> = Mutex::new(None);
+    let mut found = TESSERACT.lock().ok()?;
+    if found.is_none() {
+        *found = Tesseract::discover();
+    }
+    found.clone()
+}
+
+/// Recommended optional language data (Blueprint G6): broad coverage with
+/// measured synthetic quality within the regression thresholds. English is
+/// the required base. None of these is installed automatically.
+pub(super) const RECOMMENDED_LANGUAGES: [&str; 10] = [
+    "spa", "fra", "deu", "por", "rus", "ara", "hin", "chi_sim", "jpn", "kor",
+];
+
+/// The Debian or Ubuntu package that provides a language's data.
+fn package(language: &str) -> String {
+    format!("tesseract-ocr-{}", language.replace('_', "-"))
 }
 
 #[derive(Serialize)]
@@ -126,6 +144,28 @@ pub(super) struct OcrState {
     engine: Option<String>,
     languages: Vec<String>,
     defaults: Vec<String>,
+    /// What to install when recognition is unavailable or English is missing.
+    guidance: Option<String>,
+    /// Packages of recommended languages that are not installed.
+    missing_recommended: Vec<String>,
+}
+
+fn guidance(installed: &[String]) -> Option<String> {
+    if installed.is_empty() {
+        Some("Local text recognition needs Tesseract with English data. Install it with “sudo apt install tesseract-ocr tesseract-ocr-eng”, then reopen this panel.".to_owned())
+    } else if !installed.iter().any(|language| language == "eng") {
+        Some("English recognition data is missing. Install it with “sudo apt install tesseract-ocr-eng”, then reopen this panel.".to_owned())
+    } else {
+        None
+    }
+}
+
+fn missing_recommended(installed: &[String]) -> Vec<String> {
+    RECOMMENDED_LANGUAGES
+        .iter()
+        .filter(|language| !installed.iter().any(|have| have == *language))
+        .map(|language| package(language))
+        .collect()
 }
 
 /// Locale code to Tesseract language data name.
@@ -168,6 +208,8 @@ pub(super) fn ocr_state() -> OcrState {
             engine: None,
             languages: Vec::new(),
             defaults: Vec::new(),
+            guidance: guidance(&[]),
+            missing_recommended: missing_recommended(&[]),
         };
     };
     let languages = tesseract.languages();
@@ -191,6 +233,8 @@ pub(super) fn ocr_state() -> OcrState {
     OcrState {
         available: !languages.is_empty(),
         engine: Some(tesseract.engine().to_owned()),
+        guidance: guidance(&languages),
+        missing_recommended: missing_recommended(&languages),
         languages,
         defaults,
     }
@@ -341,7 +385,7 @@ pub async fn glance_ocr(
     let tesseract = tesseract().ok_or_else(|| {
         InferenceError::new(
             ErrorCode::UnsupportedCapability,
-            "Local text recognition needs Tesseract and its English data.",
+            "Local text recognition needs Tesseract with English data (sudo apt install tesseract-ocr tesseract-ocr-eng).",
         )
     })?;
     let cancellation = Cancellation::default();
@@ -661,5 +705,27 @@ mod tests {
         }
         assert_eq!(locale_language("C"), None);
         assert_eq!(locale_language(""), None);
+    }
+
+    #[test]
+    fn missing_language_data_gets_install_guidance_and_nothing_is_installed() {
+        let have = |codes: &[&str]| codes.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>();
+        assert!(
+            guidance(&[])
+                .unwrap()
+                .contains("tesseract-ocr tesseract-ocr-eng")
+        );
+        assert!(
+            guidance(&have(&["fra"]))
+                .unwrap()
+                .contains("English recognition data is missing")
+        );
+        assert_eq!(guidance(&have(&["eng"])), None);
+        assert_eq!(package("chi_sim"), "tesseract-ocr-chi-sim");
+        let missing = missing_recommended(&have(&["eng", "spa", "chi_sim"]));
+        assert_eq!(missing.len(), 8);
+        assert!(missing.contains(&"tesseract-ocr-jpn".to_owned()));
+        assert!(!missing.contains(&"tesseract-ocr-spa".to_owned()));
+        assert!(!missing.contains(&"tesseract-ocr-chi-sim".to_owned()));
     }
 }

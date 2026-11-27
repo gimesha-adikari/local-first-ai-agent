@@ -171,6 +171,11 @@ npm --prefix apps/desktop run tauri -- build \
   --config src-tauri/tauri.deb.conf.json --bundles deb -- --locked
 ```
 
+The package depends on Tesseract with English data and the PipeWire client
+library for contextual screen-region text recognition. Other OCR languages
+are optional `tesseract-ocr-*` packages; the recommended set is listed in
+`/usr/share/doc/local-first-ai-agent/README.ocr-languages`.
+
 ### Providers
 
 Settings → Providers configures OpenAI-compatible cloud services and servers
