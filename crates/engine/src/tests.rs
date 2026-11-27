@@ -1163,3 +1163,133 @@ fn adapter_discovery_and_receipt_follow_fitted_knowledge_and_memory() {
     assert!(!metadata.contains("synthetic-private-memory"));
     assert!(!metadata.contains("Which backend port"));
 }
+
+fn glance(
+    h: &Harness,
+    input: Value,
+    cancellation: Cancellation,
+) -> Result<crate::chat::glance::Answer> {
+    futures_executor::block_on(h.engine.run_glance(
+        serde_json::from_value(input).unwrap(),
+        crate::chat::glance::Origin::EditedClipboard,
+        cancellation,
+        Arc::new(Recorder::default()),
+    ))
+}
+
+#[test]
+fn local_glance_uses_selected_context_without_persisting_or_history() {
+    let h = harness();
+    h.load();
+    {
+        let mut db = h.engine.store().lock().unwrap();
+        db.set_memory_enabled(true).unwrap();
+        db.create_memory("Synthetic orchard memory: rainwater tanks hold 400 litres.")
+            .unwrap();
+    }
+    let document = h.document(
+        "orchard.md",
+        "The orchard rainwater tanks refill in spring.\n",
+    );
+    let id = h.conversation();
+    h.send(id, "SYNTHETIC_CHAT_HISTORY", json!({})).0.unwrap();
+    let before = h.engine.store().lock().unwrap().dump_text_for_tests();
+
+    let answer = glance(
+        &h,
+        json!({"text": "Synthetic orchard rainwater tanks note.", "recipe": "summarize",
+            "share": false, "memory": true, "documents": [document]}),
+        Cancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(answer.text, "Hello there.");
+    assert!(answer.error.is_none());
+    let seen = h.script.seen().pop().unwrap();
+    assert!(seen.prompt.contains("quoted_context"));
+    assert!(
+        seen.prompt
+            .contains("Synthetic orchard rainwater tanks note.")
+    );
+    assert_eq!(seen.history_turns, 0);
+    assert!(
+        seen.evidence
+            .is_some_and(|e| e[0].contains("refill in spring"))
+    );
+    assert_eq!(seen.memories.len(), 1);
+    let receipt = serde_json::to_value(answer.receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["state"], "completed");
+    assert_eq!(receipt["application_retention"], "session");
+    assert_eq!(receipt["external"], json!([]));
+    let kinds: Vec<&str> = receipt["used"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["kind"].as_str().unwrap())
+        .collect();
+    for kind in ["clipboard", "knowledge", "memory"] {
+        assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
+    }
+    // Neither the source, its answer nor a receipt row reached the database.
+    let after = h.engine.store().lock().unwrap().dump_text_for_tests();
+    assert_eq!(before, after);
+    assert!(h.engine.get_conversation(id).unwrap().messages.len() == 2);
+
+    // Remember is the only write, and it records the origin.
+    h.engine.remember_glance(&answer).unwrap();
+    let memories = h
+        .engine
+        .store()
+        .lock()
+        .unwrap()
+        .list_memories("", None, 10)
+        .unwrap();
+    assert_eq!(memories[0].content, "Hello there.");
+    let provenance = memories[0].provenance.as_ref().unwrap();
+    assert_eq!(provenance["source"], "contextual_panel");
+    assert!(
+        memories[0]
+            .labels()
+            .contains(agent_core::classification::CLIPBOARD_TEXT)
+    );
+}
+
+#[test]
+fn local_glance_stops_holds_the_chat_gate_and_refuses_to_remember_partial_output() {
+    let h = Arc::new(harness());
+    h.load();
+    let cancellation = Cancellation::default();
+    let runner = Arc::clone(&h);
+    let token = cancellation.clone();
+    let turn = thread::spawn(move || {
+        glance(
+            &runner,
+            json!({"text": "Please wait on this synthetic text.", "recipe": "explain",
+                "share": false, "memory": false, "documents": []}),
+            token,
+        )
+    });
+    let started = Instant::now();
+    while h.engine.inference_status().unwrap().phase != Phase::Generating {
+        assert!(started.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The panel shares the Chat worker: Chat waits rather than interleaving.
+    let id = h.conversation();
+    assert_eq!(
+        h.send(id, "Hello", json!({})).0.unwrap_err().code,
+        ErrorCode::Busy
+    );
+    cancellation.cancel();
+    let answer = turn.join().unwrap().unwrap();
+    assert_eq!(answer.text, "Partial");
+    assert!(answer.error.is_some());
+    let receipt = answer.receipt.as_ref().unwrap();
+    assert_eq!(serde_json::to_value(receipt).unwrap()["state"], "cancelled");
+    assert_eq!(
+        h.engine.remember_glance(&answer).unwrap_err().code,
+        ErrorCode::InvalidConfig
+    );
+    // The gate is released for the next request.
+    h.send(id, "Hello", json!({})).0.unwrap();
+    assert!(h.engine.get_conversation(id).unwrap().messages.len() == 2);
+}

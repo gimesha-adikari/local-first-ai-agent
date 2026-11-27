@@ -45,6 +45,8 @@ use crate::{
     semantic::SemanticState,
 };
 
+#[path = "glance.rs"]
+pub mod glance;
 #[path = "remote_chat.rs"]
 mod remote;
 
@@ -227,10 +229,11 @@ struct Transcript {
 }
 
 impl Transcript {
-    fn push(&mut self, text: &str, db: &Mutex<SqliteStore>, id: MessageId) -> Result<()> {
+    fn push(&mut self, text: &str, db: &Mutex<SqliteStore>, id: Option<MessageId>) -> Result<()> {
         self.text.push_str(text);
-        if self.checkpoint_at.elapsed() >= Duration::from_millis(500)
-            || self.text.len() - self.checkpoint_bytes >= 4096
+        if let Some(id) = id
+            && (self.checkpoint_at.elapsed() >= Duration::from_millis(500)
+                || self.text.len() - self.checkpoint_bytes >= 4096)
         {
             database(db)?.checkpoint(id, &self.text)?;
             self.checkpoint_bytes = self.text.len();
@@ -358,6 +361,7 @@ struct ChatRuntime {
     database: Arc<Mutex<SqliteStore>>,
     semantic: Arc<SemanticState>,
     boundary: Arc<NetworkBoundary>,
+    glance_receipt: Option<glance::ReceiptSlot>,
 }
 
 impl Engine {
@@ -412,6 +416,7 @@ impl Engine {
             database: Arc::clone(&self.database),
             semantic: Arc::clone(&self.semantic),
             boundary: Arc::clone(&self.boundary),
+            glance_receipt: None,
         }
     }
 
@@ -482,6 +487,21 @@ impl Engine {
 }
 
 impl ChatRuntime {
+    fn finish_turn(
+        &self,
+        id: MessageId,
+        content: &str,
+        state: GenerationState,
+        stats: Option<&GenerationStats>,
+        receipt: &agent_core::intelligence::Receipt,
+    ) -> Result<()> {
+        if let Some(slot) = &self.glance_receipt {
+            *slot.lock().map_err(|_| session_error())? = Some(receipt.clone());
+            return Ok(());
+        }
+        database(&self.database)?.finish_intelligence_chat(id, content, state, stats, receipt)
+    }
+
     async fn blocking<T: Send + 'static>(
         &self,
         task: impl FnOnce() -> T + Send + 'static,
@@ -932,20 +952,23 @@ impl ChatRuntime {
         } = context;
         let mut assistant = turn.assistant;
         let message_id = assistant.id;
-        let session = Arc::new(Mutex::new(Some(ChatSession::new(
-            candidates,
-            cancellation.clone(),
-            MODEL_OUTPUT,
-        ))));
+        let session = Arc::new(Mutex::new(Some(
+            ChatSession::new(candidates, cancellation.clone(), MODEL_OUTPUT)
+                .ephemeral(self.glance_receipt.is_some()),
+        )));
         let store = Arc::clone(&self.database);
         let context = assistant.context.clone();
         let fitted = Arc::clone(&session);
+        let ephemeral = self.glance_receipt.is_some();
         request.context_observer = Some(ContextObserver::new(move |usage, excluded_history| {
             let mut session = session_lock(&fitted)?;
             let labels = session
                 .as_mut()
                 .ok_or_else(session_error)?
                 .fitted(usage, excluded_history)?;
+            if ephemeral {
+                return Ok(());
+            }
             database(&store)?.checkpoint_intelligence_context(
                 message_id,
                 labels,
@@ -984,7 +1007,11 @@ impl ChatRuntime {
                         {
                             return Err(session_error());
                         }
-                        transcript_lock(&buffer)?.push(&delta.text, &db, message_id)?;
+                        transcript_lock(&buffer)?.push(
+                            &delta.text,
+                            &db,
+                            (!ephemeral).then_some(message_id),
+                        )?;
                         deliver(
                             &deltas,
                             ChatEvent::Delta {
@@ -1050,21 +1077,19 @@ impl ChatRuntime {
                     },
                     None,
                 );
-                database(&self.database)?
-                    .finish_intelligence_chat(message_id, &content, persisted, stats, &receipt)?;
+                self.finish_turn(message_id, &content, persisted, stats, &receipt)?;
                 return Err(error);
             }
         };
         assistant.content = content;
         assistant.state = GenerationState::from_output(generated.reason, &assistant.content);
-        let mut db = database(&self.database)?;
         let terminal = if generated.reason == agent_core::inference::FinishReason::Cancelled {
             SessionState::Cancelled
         } else {
             SessionState::Completed
         };
         let receipt = session.receipt(terminal, invocation_stats.as_ref());
-        db.finish_intelligence_chat(
+        self.finish_turn(
             message_id,
             &assistant.content,
             assistant.state,
@@ -1073,7 +1098,9 @@ impl ChatRuntime {
         )?;
         assistant.labels = receipt.output_labels;
         if assistant.context.is_some() {
-            assistant.context = db.chat_attempt_context(message_id)?.map(Box::new);
+            assistant.context = database(&self.database)?
+                .chat_attempt_context(message_id)?
+                .map(Box::new);
         }
         assistant.stats = Some(generated);
         Ok(assistant)

@@ -16,8 +16,8 @@ use agent_core::{
         Locality, RETRIEVE, Retention,
     },
     classification::{
-        AGENT_CONTEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY, MODEL_OUTPUT,
-        PDF_EXCERPT, QUERY, SYSTEM_TEXT, Sensitivity, TEXT_EXCERPT, USER_INPUT,
+        AGENT_CONTEXT, CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY,
+        MODEL_OUTPUT, PDF_EXCERPT, QUERY, SYSTEM_TEXT, Sensitivity, TEXT_EXCERPT, USER_INPUT,
     },
     inference::Cancellation,
 };
@@ -144,6 +144,10 @@ impl Operation {
             request,
             retention,
         }
+    }
+
+    pub(crate) fn purpose(&self) -> &'static str {
+        self.purpose
     }
 
     pub fn destination(&self) -> Option<&Destination> {
@@ -375,6 +379,7 @@ impl Policy {
         // rules require a separate, explicit change before admitting it.
         let allowed = [
             USER_INPUT,
+            CLIPBOARD_TEXT,
             HISTORY,
             MEMORY,
             LIBRARY,
@@ -418,6 +423,10 @@ impl Policy {
             (Permission::Process, GENERATE, "chat", Retention::SavedLocally)
             | (Permission::Retain, GENERATE, "chat", Retention::SavedLocally) => {
                 Ok("builtin.chat/1")
+            }
+            (Permission::Process, GENERATE, "glance", Retention::Session) => Ok("builtin.glance/1"),
+            (Permission::Retain, GENERATE, "glance-remember", Retention::SavedLocally) => {
+                Ok("explicit.glance-remember/1")
             }
             (Permission::Retain, AGENT_DECISION, "agent-answer", Retention::SavedLocally)
             | (Permission::Process, AGENT_DECISION, "agent", Retention::Session) => {

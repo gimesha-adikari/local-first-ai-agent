@@ -42,6 +42,7 @@ impl Candidates {
 pub(crate) struct ChatSession {
     session: Session,
     started: Instant,
+    ephemeral: bool,
     candidates: Candidates,
     decoded: Option<Decoded>,
     provider: Option<ProviderRecord>,
@@ -66,6 +67,7 @@ impl ChatSession {
         Self {
             session: Session::new(cancellation),
             started: Instant::now(),
+            ephemeral: false,
             candidates,
             decoded: None,
             provider: None,
@@ -74,6 +76,11 @@ impl ChatSession {
             external: Vec::new(),
             remote_usage: None,
         }
+    }
+
+    pub fn ephemeral(mut self, enabled: bool) -> Self {
+        self.ephemeral = enabled;
+        self
     }
 
     /// The policy session that remote operations of this turn bind to.
@@ -86,6 +93,9 @@ impl ChatSession {
     pub fn authorize_remote(&mut self, policy: &Policy, offer: &Offer) -> Result<()> {
         if offer.capability != GENERATE || offer.locality == Locality::OnDevice {
             return Err(policy_error(Denial::Locality));
+        }
+        if self.ephemeral {
+            return Ok(());
         }
         let operation = Operation::local(
             &self.session,
@@ -125,6 +135,21 @@ impl ChatSession {
             offer.capability != GENERATE || offer.locality != Locality::OnDevice
         }) {
             return Err(policy_error(Denial::Locality));
+        }
+        if self.ephemeral {
+            let operation = Operation::local(
+                &self.session,
+                GENERATE,
+                "glance",
+                self.candidates.labels(self.output_class),
+                Retention::Session,
+            );
+            self.authorization = Some(
+                policy
+                    .authorize_local(Permission::Process, &operation)
+                    .map_err(policy_error)?,
+            );
+            return Ok(());
         }
         // Chat's accepted turn has already been written as a pending record.
         // Final output persistence is independently authorized here.
@@ -259,7 +284,11 @@ impl ChatSession {
             used,
             withheld,
             output_labels,
-            application_retention: Retention::SavedLocally,
+            application_retention: if self.ephemeral {
+                Retention::Session
+            } else {
+                Retention::SavedLocally
+            },
             usage_basis: self
                 .remote_usage
                 .as_ref()

@@ -9,7 +9,7 @@ use agent_core::{
     capability::{GENERATE, IMAGE, Usage},
     chat::{ChatHistory, GenerationState, Message, MessageRole, PromptMessage, fit_context},
     chat_context::{ChatContext, ContextUsage},
-    classification::{Classified, DataClasses, Labels, USER_INPUT},
+    classification::{CLIPBOARD_TEXT, Classified, DataClasses, Labels, USER_INPUT},
     inference::{
         Cancellation, ErrorCode, FinishReason, GenerationStats, InferenceError, OutputBudget,
         Result,
@@ -150,7 +150,12 @@ impl ChatRuntime {
         let offer = offer(&saved);
         let started = Instant::now();
         let message_id = turn.assistant.id;
-        let allowed = DataClasses::new(settings.sharing.allowed_classes());
+        let ephemeral = self.glance_receipt.is_some();
+        let mut allowed = settings.sharing.allowed_classes();
+        if ephemeral {
+            allowed.push(CLIPBOARD_TEXT);
+        }
+        let allowed = DataClasses::new(allowed);
 
         // Withhold what this provider may not receive before anything is
         // built. The current message must be shareable; documents the turn
@@ -200,7 +205,8 @@ impl ChatRuntime {
             candidates,
             cancellation.clone(),
             agent_core::classification::MODEL_OUTPUT,
-        );
+        )
+        .ephemeral(ephemeral);
         let output = max_tokens
             .unwrap_or(settings.max_output_tokens)
             .clamp(1, settings.max_output_tokens);
@@ -259,7 +265,7 @@ impl ChatRuntime {
         let outbound = Outbound::new(
             session.policy_session(),
             GENERATE,
-            "chat",
+            if ephemeral { "glance" } else { "chat" },
             destination.locality(),
             destination,
             Method::Post,
@@ -299,15 +305,17 @@ impl ChatRuntime {
         };
 
         // The fitted classes are committed before any byte is sent.
-        if let Err(error) = database(&self.database).and_then(|mut db| {
-            db.checkpoint_intelligence_context(
-                message_id,
-                &output_labels,
-                turn.assistant.context.as_deref(),
-                fitted.usage,
-                &sources,
-            )
-        }) {
+        if !ephemeral
+            && let Err(error) = database(&self.database).and_then(|mut db| {
+                db.checkpoint_intelligence_context(
+                    message_id,
+                    &output_labels,
+                    turn.assistant.context.as_deref(),
+                    fitted.usage,
+                    &sources,
+                )
+            })
+        {
             self.release(reservation, message_id);
             return self.fail_unsent(session, message_id, "", error);
         }
@@ -389,7 +397,7 @@ impl ChatRuntime {
                     basis,
                     charged_tokens,
                     charged_cost,
-                    message: Some(message_id),
+                    message: self.glance_receipt.is_none().then_some(message_id),
                 },
             )
         });
@@ -440,8 +448,7 @@ impl ChatRuntime {
                     (GenerationState::Failed, SessionState::Failed)
                 };
                 let receipt = session.receipt(session_state, None);
-                database(&self.database)?
-                    .finish_intelligence_chat(message_id, &content, state, None, &receipt)?;
+                self.finish_turn(message_id, &content, state, None, &receipt)?;
                 return Err(error);
             }
         };
@@ -473,8 +480,7 @@ impl ChatRuntime {
             SessionState::Completed
         };
         let receipt = session.receipt(terminal, Some(&stats));
-        let mut db = database(&self.database)?;
-        db.finish_intelligence_chat(
+        self.finish_turn(
             message_id,
             &assistant.content,
             assistant.state,
@@ -483,7 +489,9 @@ impl ChatRuntime {
         )?;
         assistant.labels = receipt.output_labels;
         if assistant.context.is_some() {
-            assistant.context = db.chat_attempt_context(message_id)?.map(Box::new);
+            assistant.context = database(&self.database)?
+                .chat_attempt_context(message_id)?
+                .map(Box::new);
         }
         assistant.stats = Some(stats);
         Ok(assistant)
@@ -576,7 +584,11 @@ impl ChatRuntime {
             match event {
                 openai::Event::Delta(text) => {
                     outcome.first_token.get_or_insert_with(|| started.elapsed());
-                    transcript_lock(transcript)?.push(&text, &self.database, message_id)?;
+                    transcript_lock(transcript)?.push(
+                        &text,
+                        &self.database,
+                        self.glance_receipt.is_none().then_some(message_id),
+                    )?;
                     deliver(
                         events,
                         ChatEvent::Delta {
@@ -604,7 +616,7 @@ impl ChatRuntime {
                     basis: LedgerBasis::None,
                     charged_tokens: 0,
                     charged_cost: Some(0),
-                    message: Some(message_id),
+                    message: self.glance_receipt.is_none().then_some(message_id),
                 },
             );
         }
@@ -624,8 +636,7 @@ impl ChatRuntime {
             (GenerationState::Failed, SessionState::Failed)
         };
         let receipt = session.receipt(session_state, None);
-        database(&self.database)?
-            .finish_intelligence_chat(message_id, content, state, None, &receipt)?;
+        self.finish_turn(message_id, content, state, None, &receipt)?;
         Err(error)
     }
 }

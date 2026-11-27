@@ -14,7 +14,7 @@ use agent_core::{
         DISCOVER, GENERATE, IMAGE, Languages, Locality, Offer, Resources, Retention, TEXT,
         UnitPrice, Usage,
     },
-    classification::{Classified, DataClasses, PROVIDER_CONTROL},
+    classification::{CLIPBOARD_TEXT, Classified, DataClasses, PROVIDER_CONTROL},
     inference::{Cancellation, ErrorCode, InferenceError, Result},
     provider::{IntelligenceSettings, ProviderId, ProviderRetention, ProviderSettings},
 };
@@ -129,7 +129,10 @@ pub(crate) fn consent(
     if settings.retention == ProviderRetention::Unknown {
         return Err(Denial::Scope);
     }
-    let allowed = settings.sharing.allowed_classes();
+    let mut allowed = settings.sharing.allowed_classes();
+    if operation.purpose() == "glance" {
+        allowed.push(CLIPBOARD_TEXT);
+    }
     let registry = DataClasses::new(allowed.iter().copied());
     if operation
         .labels()
