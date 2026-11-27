@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -173,6 +173,7 @@ struct Grant {
     operation: std::sync::Weak<()>,
     session: std::sync::Weak<AtomicBool>,
     permission: Permission,
+    remote: bool,
     until: Instant,
     revoked: bool,
     used: bool,
@@ -181,6 +182,7 @@ struct Grant {
 #[derive(Default)]
 struct Grants {
     sequence: GrantId,
+    restrictions_pending: usize,
     entries: BTreeMap<GrantId, Grant>,
 }
 
@@ -191,7 +193,17 @@ pub struct Policy {
     /// removing an entry invalidates every operation bound to the old value.
     destinations: RwLock<BTreeMap<Arc<str>, Destination>>,
     local_only: AtomicBool,
+    restriction_epoch: AtomicU64,
     grants: Mutex<Grants>,
+}
+
+pub(crate) struct PendingRestriction<'a>(&'a Policy);
+
+impl Drop for PendingRestriction<'_> {
+    fn drop(&mut self) {
+        let mut grants = self.0.grants.lock().unwrap_or_else(|err| err.into_inner());
+        grants.restrictions_pending -= 1;
+    }
 }
 
 impl Default for Policy {
@@ -228,6 +240,7 @@ impl Policy {
             classes,
             destinations: RwLock::new(known),
             local_only: AtomicBool::new(local_only),
+            restriction_epoch: AtomicU64::new(0),
             grants: Mutex::default(),
         }
     }
@@ -258,8 +271,40 @@ impl Policy {
 
     /// Local-only mode denies every operation whose locality is not on the
     /// device, before any resolution or connection.
-    pub fn set_local_only(&self, local_only: bool) {
+    pub(crate) fn set_local_only(&self, local_only: bool) {
+        let mut grants = self.grants.lock().unwrap_or_else(|err| err.into_inner());
+        self.apply_mode(&mut grants, local_only);
+    }
+
+    pub(crate) fn begin_restriction(&self) -> PendingRestriction<'_> {
+        let mut grants = self.grants.lock().unwrap_or_else(|err| err.into_inner());
+        grants.restrictions_pending += 1;
+        self.apply_mode(&mut grants, true);
+        PendingRestriction(self)
+    }
+
+    fn apply_mode(&self, grants: &mut Grants, local_only: bool) {
+        if local_only {
+            self.restriction_epoch.fetch_add(1, Ordering::AcqRel);
+            for grant in grants.entries.values_mut().filter(|grant| grant.remote) {
+                grant.revoked = true;
+            }
+        }
         self.local_only.store(local_only, Ordering::Release);
+    }
+
+    pub(crate) fn restriction_epoch(&self) -> u64 {
+        self.restriction_epoch.load(Ordering::Acquire)
+    }
+
+    /// An enable that raced with saving a permissive selection wins.
+    pub(crate) fn allow_remote_if_current(&self, epoch: u64) -> bool {
+        let grants = self.grants.lock().unwrap_or_else(|err| err.into_inner());
+        if grants.restrictions_pending != 0 || self.restriction_epoch() != epoch {
+            return false;
+        }
+        self.local_only.store(false, Ordering::Release);
+        true
     }
 
     pub fn is_local_only(&self) -> bool {
@@ -395,6 +440,7 @@ impl Policy {
         operation: &Operation,
         until: Instant,
     ) -> Result<GrantId, Denial> {
+        let mut grants = self.grants.lock().map_err(|_| Denial::Unavailable)?;
         self.check(operation)?;
         if permission == Permission::Share {
             self.check_share(operation)?;
@@ -402,7 +448,6 @@ impl Policy {
         if until <= Instant::now() {
             return Err(Denial::Expired);
         }
-        let mut grants = self.grants.lock().map_err(|_| Denial::Unavailable)?;
         grants
             .entries
             .retain(|_, grant| grant.operation.strong_count() != 0);
@@ -414,6 +459,7 @@ impl Policy {
                 operation: Arc::downgrade(&operation.key),
                 session: Arc::downgrade(&operation.session.key),
                 permission,
+                remote: operation.destination.is_some(),
                 until,
                 revoked: false,
                 used: false,
@@ -510,6 +556,17 @@ impl Policy {
         process: GrantId,
         share: GrantId,
     ) -> Result<(), Denial> {
+        self.with_live_grants(operation, process, share, || ())
+    }
+
+    /// Order a single non-blocking handoff with restriction and revocation.
+    pub(crate) fn with_live_grants<T>(
+        &self,
+        operation: &Operation,
+        process: GrantId,
+        share: GrantId,
+        handoff: impl FnOnce() -> T,
+    ) -> Result<T, Denial> {
         let grants = self.grants.lock().map_err(|_| Denial::Unavailable)?;
         self.check(operation)?;
         let now = Instant::now();
@@ -518,7 +575,8 @@ impl Policy {
         if !grant.used {
             return Err(Denial::Scope);
         }
-        check_liveness(grant, now)
+        check_liveness(grant, now)?;
+        Ok(handoff())
     }
 }
 

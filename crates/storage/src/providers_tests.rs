@@ -56,7 +56,8 @@ fn providers_keep_their_key_and_selection_follows_deletion() {
         })
         .is_err()
     );
-    db.delete_provider(saved.id).unwrap();
+    db.begin_provider_deletion(saved.id).unwrap();
+    db.finish_provider_deletion(saved.id).unwrap();
     assert_eq!(
         db.intelligence_settings().unwrap(),
         IntelligenceSettings {

@@ -8,13 +8,13 @@ use agent_core::{
     provider::{IntelligenceSettings, ProviderId, ProviderSettings},
 };
 use engine::{
-    credentials::{CredentialError, CredentialStatus, Secret},
+    credentials::{CredentialStatus, Secret},
     providers::{ProviderTest, ProviderView},
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use crate::{commands::Desktop, credentials::SecretServiceStore};
+use crate::commands::Desktop;
 
 fn valid_id(id: ProviderId) -> Result<ProviderId> {
     if (1..=i64::from(u32::MAX)).contains(&id) {
@@ -25,15 +25,6 @@ fn valid_id(id: ProviderId) -> Result<ProviderId> {
             "Choose a valid provider.",
         ))
     }
-}
-
-fn credential_failure(error: CredentialError) -> InferenceError {
-    let code = if error == CredentialError::Missing {
-        ErrorCode::CredentialMissing
-    } else {
-        ErrorCode::CredentialUnavailable
-    };
-    InferenceError::new(code, error.message())
 }
 
 #[tauri::command]
@@ -77,9 +68,8 @@ pub async fn provider_enter_credential(
     id: ProviderId,
 ) -> Result<EntryOutcome> {
     let id = valid_id(id)?;
-    let key = state.engine.credential_key(id)?;
-    let name = state.engine.provider(id).await?.settings.name;
-    let entered = crate::credentials::prompt(&app, name.clone())
+    let edit = state.engine.edit_provider_credential(id)?;
+    let entered = crate::credentials::prompt(&app, edit.provider_name().to_owned())
         .await
         .map_err(|_| {
             InferenceError::new(
@@ -96,10 +86,7 @@ pub async fn provider_enter_credential(
             "API keys contain visible characters only, without spaces or line breaks.",
         )
     })?;
-    SecretServiceStore
-        .store(&key, &name, secret)
-        .await
-        .map_err(credential_failure)?;
+    edit.store(secret).await?;
     Ok(EntryOutcome::Stored)
 }
 
@@ -108,12 +95,12 @@ pub async fn provider_delete_credential(
     state: State<'_, Desktop>,
     id: ProviderId,
 ) -> Result<CredentialStatus> {
-    let key = state.engine.credential_key(valid_id(id)?)?;
-    use engine::credentials::CredentialSource;
-    match SecretServiceStore.delete(&key).await {
-        Ok(()) | Err(CredentialError::Missing) => Ok(CredentialStatus::Missing),
-        Err(error) => Err(credential_failure(error)),
-    }
+    state
+        .engine
+        .edit_provider_credential(valid_id(id)?)?
+        .delete()
+        .await?;
+    Ok(CredentialStatus::Missing)
 }
 
 #[tauri::command]
@@ -126,6 +113,9 @@ pub fn set_intelligence_settings(
     state: State<'_, Desktop>,
     settings: IntelligenceSettings,
 ) -> Result<()> {
+    if settings.local_only {
+        return state.engine.enable_local_only();
+    }
     if let Some(id) = settings.active_provider {
         valid_id(id)?;
     }

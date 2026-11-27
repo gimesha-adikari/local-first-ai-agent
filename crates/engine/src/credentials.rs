@@ -95,6 +95,9 @@ pub trait CredentialSource: Send + Sync + 'static {
     fn read(&self, key: &CredentialKey) -> CredentialFuture<Secret>;
     fn status(&self, key: &CredentialKey) -> CredentialFuture<CredentialStatus>;
     fn delete(&self, key: &CredentialKey) -> CredentialFuture<()>;
+    fn store(&self, _key: &CredentialKey, _name: &str, _secret: Secret) -> CredentialFuture<()> {
+        Box::pin(async { Err(CredentialError::Unavailable) })
+    }
 }
 
 /// Used when the host provides no secure storage: every provider that

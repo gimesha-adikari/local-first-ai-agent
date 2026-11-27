@@ -501,7 +501,8 @@ impl ChatRuntime {
         // The saved selection decides the target. A remote provider is used
         // only when local-only mode is off and it is explicitly selected;
         // there is no fallback in either direction.
-        let selection = database(&self.database)?.intelligence_settings()?;
+        let selection =
+            crate::providers::effective_settings(&*database(&self.database)?, &self.policy)?;
         let remote = crate::providers::remote_target(&self.database, selection)?;
         let local = match &remote {
             Some(_) => None,

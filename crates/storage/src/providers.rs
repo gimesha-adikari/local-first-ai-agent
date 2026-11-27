@@ -17,6 +17,8 @@ pub struct SavedProvider {
     pub key: String,
     pub settings: ProviderSettings,
     pub updated_at: i64,
+    pub deletion_pending: bool,
+    pub obsolete_credential_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -112,56 +114,59 @@ fn budget_exceeded(message: &str) -> InferenceError {
     InferenceError::new(ErrorCode::BudgetExceeded, message)
 }
 
-fn decode(id: ProviderId, key: String, settings: &str, updated_at: i64) -> Result<SavedProvider> {
+impl SavedProvider {
+    pub fn require_available(&self) -> Result<()> {
+        if self.deletion_pending {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "This provider is being removed. Retry removal in Providers.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedProvider> {
+    let settings: String = row.get(2)?;
     Ok(SavedProvider {
-        id,
-        key,
-        settings: serde_json::from_str(settings).map_err(|_| storage_error())?,
-        updated_at,
+        id: row.get(0)?,
+        key: row.get(1)?,
+        settings: serde_json::from_str(&settings).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        updated_at: row.get(3)?,
+        deletion_pending: row.get(4)?,
+        obsolete_credential_origin: row.get(5)?,
     })
 }
 
 impl SqliteStore {
     pub fn providers(&self) -> Result<Vec<SavedProvider>> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT id, key, settings, updated_at FROM providers ORDER BY id")
-            .map_err(sql_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get(3)?,
-                ))
-            })
+        self.connection
+            .prepare(
+                "SELECT id, key, settings, updated_at, deletion_pending, obsolete_credential_origin FROM providers ORDER BY id",
+            )
             .map_err(sql_error)?
-            .collect::<rusqlite::Result<Vec<(ProviderId, String, String, i64)>>>()
-            .map_err(sql_error)?;
-        rows.into_iter()
-            .map(|(id, key, settings, updated)| decode(id, key, &settings, updated))
-            .collect()
+            .query_map([], decode)
+            .map_err(sql_error)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(sql_error)
     }
 
     pub fn provider(&self, id: ProviderId) -> Result<SavedProvider> {
-        let row = self
-            .connection
+        self.connection
             .query_row(
-                "SELECT key, settings, updated_at FROM providers WHERE id = ?1",
+                "SELECT id, key, settings, updated_at, deletion_pending, obsolete_credential_origin FROM providers WHERE id = ?1",
                 [id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get(2)?,
-                    ))
-                },
+                decode,
             )
             .optional()
             .map_err(sql_error)?
-            .ok_or_else(not_found)?;
-        decode(id, row.0, &row.1, row.2)
+            .ok_or_else(not_found)
     }
 
     /// Insert or update validated settings. The engine canonicalizes the
@@ -171,6 +176,15 @@ impl SqliteStore {
         id: Option<ProviderId>,
         settings: &ProviderSettings,
     ) -> Result<SavedProvider> {
+        self.save_provider_with_key_cleanup(id, settings, None)
+    }
+
+    pub fn save_provider_with_key_cleanup(
+        &mut self,
+        id: Option<ProviderId>,
+        settings: &ProviderSettings,
+        obsolete_origin: Option<&str>,
+    ) -> Result<SavedProvider> {
         settings.validate()?;
         let encoded = serde_json::to_string(settings).map_err(|_| storage_error())?;
         let now = unix_ms()?;
@@ -179,8 +193,9 @@ impl SqliteStore {
             Some(id) => {
                 let changed = transaction
                     .execute(
-                        "UPDATE providers SET settings = ?1, updated_at = ?2 WHERE id = ?3",
-                        params![encoded, now, id],
+                        "UPDATE providers SET settings = ?1, updated_at = ?2, obsolete_credential_origin = ?4
+                         WHERE id = ?3 AND deletion_pending = 0 AND obsolete_credential_origin IS NULL",
+                        params![encoded, now, id, obsolete_origin],
                     )
                     .map_err(sql_error)?;
                 if changed == 0 {
@@ -222,10 +237,41 @@ impl SqliteStore {
         self.provider(id)
     }
 
-    pub fn delete_provider(&mut self, id: ProviderId) -> Result<()> {
+    /// Disable the provider durably before changing its registration or key.
+    pub fn finish_provider_key_cleanup(&mut self, id: ProviderId) -> Result<()> {
+        self.connection
+            .execute(
+                "UPDATE providers SET obsolete_credential_origin = NULL WHERE id = ?1",
+                [id],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub fn begin_provider_deletion(&mut self, id: ProviderId) -> Result<()> {
+        let transaction = self.connection.transaction().map_err(sql_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE providers SET deletion_pending = 1 WHERE id = ?1",
+                [id],
+            )
+            .map_err(sql_error)?;
+        if changed == 0 {
+            return Err(not_found());
+        }
+        transaction
+            .execute("UPDATE intelligence_settings SET active_provider = NULL WHERE active_provider = ?1", [id])
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)
+    }
+
+    pub fn finish_provider_deletion(&mut self, id: ProviderId) -> Result<()> {
         let changed = self
             .connection
-            .execute("DELETE FROM providers WHERE id = ?1", [id])
+            .execute(
+                "DELETE FROM providers WHERE id = ?1 AND deletion_pending = 1 AND obsolete_credential_origin IS NULL",
+                [id],
+            )
             .map_err(sql_error)?;
         if changed == 0 {
             return Err(not_found());
@@ -250,7 +296,7 @@ impl SqliteStore {
 
     pub fn save_intelligence_settings(&mut self, settings: IntelligenceSettings) -> Result<()> {
         if let Some(provider) = settings.active_provider {
-            self.provider(provider)?;
+            self.provider(provider)?.require_available()?;
         }
         self.connection
             .execute(

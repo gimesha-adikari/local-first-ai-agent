@@ -26,7 +26,7 @@ export type ProviderSettings = {
 };
 
 export type CredentialStatus = "stored" | "missing" | "locked" | "unavailable";
-export type Readiness = "ready" | "needs_credential" | "credential_unavailable" | "needs_retention" | "local_only";
+export type Readiness = "ready" | "deletion_pending" | "invalid_configuration" | "needs_credential" | "credential_unavailable" | "needs_retention" | "local_only";
 
 export type UsageSummary = {
   requests: number;
@@ -41,7 +41,7 @@ export type ProviderView = {
   id: number;
   settings: ProviderSettings;
   origin: string;
-  network: "public" | "loopback" | "local_network";
+  network: "unknown" | "public" | "loopback" | "local_network";
   encrypted: boolean;
   credential: CredentialStatus | null;
   period: string;
@@ -202,6 +202,10 @@ export function readinessCopy(view: ProviderView): ReadinessCopy {
   switch (view.readiness) {
     case "ready":
       return { tone: "ready", label: view.credential === "stored" ? "Ready · API key in keyring" : "Ready", detail: null };
+    case "deletion_pending":
+      return { tone: "warning", label: "Removal pending", detail: "This provider is disabled. Retry removal to finish deleting its key and configuration." };
+    case "invalid_configuration":
+      return { tone: "error", label: "Invalid provider configuration", detail: "Edit the provider address and API key settings, or remove this provider." };
     case "needs_credential":
       return { tone: "warning", label: "Needs an API key", detail: "Enter the key in the system dialog. It is stored in your keyring, never in the app." };
     case "credential_unavailable":

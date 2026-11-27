@@ -156,19 +156,27 @@ impl CredentialSource for SecretServiceStore {
     }
 
     fn delete(&self, key: &CredentialKey) -> CredentialFuture<()> {
-        bounded(TIMEOUT, delete(key.clone()))
+        let key = key.clone();
+        Box::pin(async move {
+            tokio::time::timeout(TIMEOUT, delete(key))
+                .await
+                .unwrap_or(Err(CredentialError::TimedOut))
+        })
     }
-}
 
-impl SecretServiceStore {
-    pub fn store(
+    fn store(
         &self,
         key: &CredentialKey,
         provider_name: &str,
         secret: Secret,
     ) -> CredentialFuture<()> {
         let label = format!("Local-first AI agent: {provider_name} API key");
-        bounded(STORE_TIMEOUT, store(key.clone(), label, secret))
+        let key = key.clone();
+        Box::pin(async move {
+            tokio::time::timeout(STORE_TIMEOUT, store(key, label, secret))
+                .await
+                .unwrap_or(Err(CredentialError::TimedOut))
+        })
     }
 }
 

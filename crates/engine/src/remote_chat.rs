@@ -340,7 +340,12 @@ impl ChatRuntime {
                 let result = self
                     .read_stream(&mut streaming, &transcript, &events, message_id, started)
                     .await;
-                (result, streaming.finish().await)
+                let (record, live) = streaming.finish_checked().await;
+                (
+                    result
+                        .and_then(|outcome| live.map(|()| outcome).map_err(|f| failure_error(&f))),
+                    record,
+                )
             }
         };
         let _ = self.policy.revoke(process);
@@ -523,6 +528,7 @@ impl ChatRuntime {
             }
             let parsed = parser.feed(&piece)?;
             self.apply(
+                streaming,
                 parsed,
                 &mut outcome,
                 transcript,
@@ -543,6 +549,7 @@ impl ChatRuntime {
             openai::complete_events(&whole)?
         };
         self.apply(
+            streaming,
             parsed,
             &mut outcome,
             transcript,
@@ -553,8 +560,10 @@ impl ChatRuntime {
         Ok(outcome)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply(
         &self,
+        streaming: &Streaming,
         parsed: Vec<openai::Event>,
         outcome: &mut Outcome,
         transcript: &std::sync::Mutex<Transcript>,
@@ -563,6 +572,7 @@ impl ChatRuntime {
         started: Instant,
     ) -> Result<()> {
         for event in parsed {
+            streaming.check_live().map_err(|f| failure_error(&f))?;
             match event {
                 openai::Event::Delta(text) => {
                     outcome.first_token.get_or_insert_with(|| started.elapsed());

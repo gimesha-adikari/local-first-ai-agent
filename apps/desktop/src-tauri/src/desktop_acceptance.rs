@@ -538,6 +538,20 @@ fn openai_fixture() -> u16 {
                     Ok(read) => request.extend_from_slice(&buffer[..read]),
                 }
             }
+            if request
+                .windows(b"HOLD_FOR_POLICY".len())
+                .any(|s| s == b"HOLD_FOR_POLICY")
+            {
+                let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"waiting\"}}]}\n\n";
+                stream.write_all(response).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(12)))
+                    .unwrap();
+                // Revocation must close the connection while the fixture is waiting.
+                assert_eq!(stream.read(&mut buffer).unwrap(), 0);
+                seen += 1;
+                continue;
+            }
             let response = if text.starts_with("GET /v1/models ") {
                 let auth = if text.contains("\r\nAuthorization: Bearer sk-synthetic-dialog-123\r\n")
                 {

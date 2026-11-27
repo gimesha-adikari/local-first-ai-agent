@@ -596,6 +596,7 @@ fn cancellation_expiry_and_revocation_interrupt_a_stalled_request_body() {
         Failure::Cancelled,
         Failure::Denied(Denial::Expired),
         Failure::Denied(Denial::Revoked),
+        Failure::Denied(Denial::Locality),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let destination = loopback(listener.local_addr().unwrap().port());
@@ -650,6 +651,7 @@ fn cancellation_expiry_and_revocation_interrupt_a_stalled_request_body() {
                 match expected {
                     Failure::Cancelled => cancel.cancel(),
                     Failure::Denied(Denial::Revoked) => assert!(policy.revoke(share).unwrap()),
+                    Failure::Denied(Denial::Locality) => policy.set_local_only(true),
                     _ => {}
                 }
                 wait.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -826,4 +828,98 @@ fn json_fixture_helper_frames_bodies() {
     assert_eq!(streaming.status, 201);
     assert_eq!(streaming.content_type.as_deref(), Some("application/json"));
     assert_eq!(body(streaming).0, b"{\"ok\":true}");
+}
+
+#[test]
+fn restriction_revokes_in_flight_and_queued_requests_across_reenable() {
+    let (entered, arrived) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let resume = Mutex::new(resume);
+    let server = Fixture::start(
+        None,
+        Arc::new(move |_, out| {
+            entered.send(()).unwrap();
+            resume
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
+        }),
+    );
+    let h = harness(
+        vec![loopback(server.port)],
+        none(),
+        resolver(&[]),
+        TrustAnchors::from_der([]),
+        Limits {
+            concurrency: 1,
+            ..fast_limits()
+        },
+    );
+    let first = h.request(loopback(server.port), b"first");
+    let a = h.grants(&first, future());
+    let second = h.request(loopback(server.port), b"second");
+    let b = h.grants(&second, future());
+    block_on(async {
+        let mut first = Box::pin(h.boundary.send(first, a.0, a.1));
+        assert!(
+            std::future::Future::poll(
+                first.as_mut(),
+                &mut std::task::Context::from_waker(std::task::Waker::noop())
+            )
+            .is_pending()
+        );
+        arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut second = Box::pin(h.boundary.send(second, b.0, b.1));
+        assert!(
+            std::future::Future::poll(
+                second.as_mut(),
+                &mut std::task::Context::from_waker(std::task::Waker::noop())
+            )
+            .is_pending()
+        );
+        h.policy.set_local_only(true);
+        h.policy.set_local_only(false);
+        release.send(()).unwrap();
+        let first = first.await.err().unwrap();
+        let second = second.await.err().unwrap();
+        assert!(matches!(
+            first.failure,
+            Failure::Denied(Denial::Revoked | Denial::Locality)
+        ));
+        assert!(matches!(
+            second.failure,
+            Failure::Denied(Denial::Revoked | Denial::Locality)
+        ));
+        assert_eq!(first.record.transmission, Transmission::Sent);
+        assert_eq!(second.record.transmission, Transmission::Unsent);
+        assert_eq!(server.accepted(), 1);
+    });
+}
+
+#[test]
+fn restriction_discards_a_buffered_response_after_reenable() {
+    let server = Fixture::start(
+        None,
+        Arc::new(|_, out| {
+            let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nresponse");
+        }),
+    );
+    let h = harness(
+        vec![loopback(server.port)],
+        none(),
+        resolver(&[]),
+        TrustAnchors::from_der([]),
+        fast_limits(),
+    );
+    let request = h.request(loopback(server.port), b"prompt");
+    let mut response = h.send(request).unwrap();
+    h.policy.set_local_only(true);
+    h.policy.set_local_only(false);
+    assert_eq!(
+        block_on(response.next()).unwrap().unwrap_err(),
+        Failure::Denied(Denial::Revoked)
+    );
+    assert_eq!(block_on(response.finish()).transmission, Transmission::Sent);
 }

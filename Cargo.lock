@@ -998,6 +998,7 @@ dependencies = [
  "httparse",
  "inference",
  "rcgen",
+ "rusqlite",
  "rustls",
  "rustls-native-certs",
  "serde",

@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
     time::Instant,
@@ -17,6 +17,7 @@ use std::{
 
 use agent_core::intelligence::{EgressRecord, Transmission};
 use futures_channel::{mpsc, oneshot};
+use futures_util::SinkExt;
 use rustls::pki_types::ServerName;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
@@ -25,7 +26,8 @@ use tokio::{
 };
 
 use super::{
-    BoundaryConfig, Failed, Failure, Host, Limits, Outbound, Resolver, Scheme, Streaming,
+    BoundaryConfig, Failed, Failure, Host, Limits, Outbound, Resolver, ResponseAuthorization,
+    Scheme, Streaming,
     http::{self, Decoder, Framing},
     snapshot,
 };
@@ -155,6 +157,12 @@ impl Worker {
         let (head_tx, head_rx) = oneshot::channel();
         let (body_tx, body_rx) = mpsc::channel(job.config.limits.queue.max(1));
         let (done_tx, done_rx) = oneshot::channel::<()>();
+        let authorization = ResponseAuthorization {
+            policy: Arc::clone(&job.policy),
+            operation: Arc::clone(&job.request.operation),
+            process: job.process,
+            share: job.share,
+        };
         self.handle.spawn(async move {
             let limits = job.config.limits;
             let mut head_tx = Some(head_tx);
@@ -168,7 +176,7 @@ impl Worker {
                         let _ = head.send(Err(failure));
                     }
                     None => {
-                        let _ = body_tx.try_send(Err(failure));
+                        let _ = body_tx.send(Err(failure)).await;
                     }
                 }
             }
@@ -177,13 +185,25 @@ impl Worker {
             drop(done_tx);
         });
         match head_rx.await {
-            Ok(Ok((status, content_type))) => Ok(Streaming {
-                status,
-                content_type,
-                body: body_rx,
-                done: Some(done_rx),
-                record,
-            }),
+            Ok(Ok((status, content_type))) => {
+                if let Err(failure) = authorization.check() {
+                    drop(body_rx);
+                    let _ = done_rx.await;
+                    return Err(Box::new(Failed {
+                        failure,
+                        record: snapshot(&record),
+                    }));
+                }
+                Ok(Streaming {
+                    authorization,
+                    ended: false,
+                    status,
+                    content_type,
+                    body: body_rx,
+                    done: Some(done_rx),
+                    record,
+                })
+            }
             Ok(Err(failure)) => {
                 let _ = done_rx.await;
                 Err(Box::new(Failed {
@@ -212,10 +232,11 @@ impl Drop for Worker {
 
 type Head = (u16, Option<String>);
 
-/// Counts bytes accepted by the socket for writing.
+/// Record socket progress immediately, including when the outer timeout drops a pending write.
 struct Counted {
     inner: TcpStream,
-    written: Arc<AtomicU64>,
+    uploading: Arc<AtomicBool>,
+    record: Arc<Mutex<EgressRecord>>,
 }
 
 impl AsyncRead for Counted {
@@ -235,8 +256,12 @@ impl AsyncWrite for Counted {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(count)) = result {
-            self.written.fetch_add(count as u64, Ordering::AcqRel);
+        if matches!(result, Poll::Ready(Ok(count)) if count > 0)
+            && self.uploading.load(Ordering::Acquire)
+            && let Ok(mut record) = self.record.lock()
+            && record.transmission == Transmission::Unsent
+        {
+            record.transmission = Transmission::Unknown;
         }
         result
     }
@@ -386,10 +411,11 @@ async fn run(
     let addresses = resolve(job).await?;
     job.admitted()?;
     let tcp = connect(job, &addresses).await?;
-    let written = Arc::new(AtomicU64::new(0));
+    let uploading = Arc::new(AtomicBool::new(false));
     let counted = Counted {
         inner: tcp,
-        written: Arc::clone(&written),
+        uploading: Arc::clone(&uploading),
+        record: Arc::clone(&job.record),
     };
     let mut stream: Box<dyn Io> = match endpoint.scheme() {
         Scheme::Http => Box::new(counted),
@@ -442,49 +468,12 @@ async fn run(
     {
         hook();
     }
-    let baseline = written.load(Ordering::Acquire);
-    let transmitted = |written: &AtomicU64| {
-        if written.load(Ordering::Acquire) > baseline {
-            Transmission::Unknown
-        } else {
-            Transmission::Unsent
-        }
-    };
+    uploading.store(true, Ordering::Release);
     for slice in request.chunks(limits.chunk.max(1)) {
-        if let Err(failure) = job.live() {
-            job.set_transmission(transmitted(&written));
-            return Err(failure);
-        }
-        let write = guarded(
-            &limits,
-            after(limits.idle),
-            || job.live(),
-            stream.write_all(slice),
-        )
-        .await;
-        match write {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                job.set_transmission(transmitted(&written));
-                return Err(Failure::Io);
-            }
-            Err(failure) => {
-                job.set_transmission(transmitted(&written));
-                return Err(failure);
-            }
-        }
+        guarded_write(job, stream.write_all(slice)).await?;
     }
-    match guarded(&limits, after(limits.idle), || job.live(), stream.flush()).await {
-        Ok(Ok(())) => job.set_transmission(Transmission::Sent),
-        Ok(Err(_)) => {
-            job.set_transmission(transmitted(&written));
-            return Err(Failure::Io);
-        }
-        Err(failure) => {
-            job.set_transmission(transmitted(&written));
-            return Err(failure);
-        }
-    }
+    guarded_write(job, stream.flush()).await?;
+    job.set_transmission(Transmission::Sent);
     drop(request);
 
     let mut buffer = Vec::with_capacity(8 * 1024);
@@ -530,7 +519,6 @@ async fn run(
                 Vec::new()
             };
             let sent = std::mem::replace(&mut piece, rest);
-            use futures_util::SinkExt;
             if guarded(
                 &limits,
                 after(limits.idle),
@@ -552,6 +540,27 @@ async fn run(
             return Ok(());
         }
     }
+}
+
+/// A ready socket may wake before the next liveness tick. Order each
+/// non-blocking write/flush poll against the same lock used by restriction.
+async fn guarded_write(
+    job: &Job,
+    write: impl std::future::Future<Output = io::Result<()>>,
+) -> Result<(), Failure> {
+    let limits = &job.config.limits;
+    let mut write = std::pin::pin!(write);
+    let poll = std::future::poll_fn(|cx| {
+        match job
+            .policy
+            .with_live_grants(job.request.operation(), job.process, job.share, || {
+                write.as_mut().poll(cx)
+            }) {
+            Ok(poll) => poll.map(|result| result.map_err(|_| Failure::Io)),
+            Err(denial) => Poll::Ready(Err(denied(denial))),
+        }
+    });
+    guarded(limits, after(limits.idle), || job.live(), poll).await?
 }
 
 async fn read_some(

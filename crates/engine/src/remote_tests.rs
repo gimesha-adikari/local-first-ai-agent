@@ -39,6 +39,7 @@ use crate::{
 struct Vault {
     values: Mutex<HashMap<CredentialKey, String>>,
     deleted: Mutex<Vec<CredentialKey>>,
+    refuse_delete: std::sync::atomic::AtomicBool,
 }
 
 impl CredentialSource for Vault {
@@ -63,6 +64,12 @@ impl CredentialSource for Vault {
     }
 
     fn delete(&self, key: &CredentialKey) -> CredentialFuture<()> {
+        if self
+            .refuse_delete
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Box::pin(async { Err(CredentialError::Locked) });
+        }
         self.values.lock().unwrap().remove(key);
         self.deleted.lock().unwrap().push(key.clone());
         Box::pin(async { Ok(()) })
@@ -561,4 +568,281 @@ fn changing_the_origin_drops_the_old_credential() {
             .active_provider
             .is_none()
     );
+}
+
+#[test]
+fn busy_provider_deletion_preserves_registration_and_key() {
+    let r = remote(streaming(true), |_| {});
+    let key_name = r
+        .engine
+        .store()
+        .lock()
+        .unwrap()
+        .provider(r.provider)
+        .unwrap()
+        .key;
+    let saved = crate::providers::destination_id(&key_name);
+    let key = r.engine.credential_key(r.provider).unwrap();
+    let lease = r.engine.reserve().unwrap();
+    assert_eq!(
+        futures_executor::block_on(r.engine.delete_provider(r.provider))
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    assert!(
+        r.engine
+            .intelligence_policy()
+            .registered_destination(&saved)
+            .is_some()
+    );
+    assert!(r.vault.values.lock().unwrap().contains_key(&key));
+    assert!(
+        !r.engine
+            .store()
+            .lock()
+            .unwrap()
+            .provider(r.provider)
+            .unwrap()
+            .deletion_pending
+    );
+    r.engine.enable_local_only().unwrap();
+    assert!(r.engine.intelligence_settings().unwrap().local_only);
+    assert!(
+        r.engine
+            .store()
+            .lock()
+            .unwrap()
+            .intelligence_settings()
+            .unwrap()
+            .local_only
+    );
+    drop(lease);
+    futures_executor::block_on(r.engine.delete_provider(r.provider)).unwrap();
+    assert!(
+        r.engine
+            .intelligence_policy()
+            .registered_destination(&saved)
+            .is_none()
+    );
+    assert!(!r.vault.values.lock().unwrap().contains_key(&key));
+}
+
+#[test]
+fn keyring_failure_keeps_removal_pending_until_retry() {
+    use std::sync::atomic::Ordering;
+    let r = remote(streaming(true), |_| {});
+    let key = r.engine.credential_key(r.provider).unwrap();
+    r.vault.refuse_delete.store(true, Ordering::Release);
+    assert_eq!(
+        futures_executor::block_on(r.engine.delete_provider(r.provider))
+            .unwrap_err()
+            .code,
+        ErrorCode::CredentialUnavailable
+    );
+    assert!(r.vault.values.lock().unwrap().contains_key(&key));
+    assert!(
+        r.engine
+            .store()
+            .lock()
+            .unwrap()
+            .provider(r.provider)
+            .unwrap()
+            .deletion_pending
+    );
+    assert!(
+        r.engine
+            .intelligence_settings()
+            .unwrap()
+            .active_provider
+            .is_none()
+    );
+    assert!(r.engine.credential_key(r.provider).is_err());
+    assert!(futures_executor::block_on(r.engine.test_provider(r.provider)).is_err());
+    assert_eq!(r.server.accepted(), 0);
+    r.vault.refuse_delete.store(false, Ordering::Release);
+    futures_executor::block_on(r.engine.delete_provider(r.provider)).unwrap();
+    assert!(!r.vault.values.lock().unwrap().contains_key(&key));
+    assert!(
+        r.engine
+            .store()
+            .lock()
+            .unwrap()
+            .providers()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn local_only_is_durable_and_explicit_on_failed_write() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "agent-restriction-{}-{}.sqlite",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let open = || {
+        Engine::new(
+            Arc::new(Threads),
+            Arc::new(InferenceWorker::spawn(|| Scripted(Script::default())).unwrap()),
+            SqliteStore::open(&path).unwrap(),
+            path.clone(),
+        )
+        .unwrap()
+    };
+    let engine = open();
+    engine
+        .set_intelligence_settings(IntelligenceSettings {
+            local_only: false,
+            active_provider: None,
+        })
+        .unwrap();
+    engine.enable_local_only().unwrap();
+    drop(engine);
+    let engine = open();
+    assert!(engine.intelligence_settings().unwrap().local_only);
+    engine
+        .set_intelligence_settings(IntelligenceSettings {
+            local_only: false,
+            active_provider: None,
+        })
+        .unwrap();
+    drop(engine);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TRIGGER deny_restriction BEFORE UPDATE OF local_only ON intelligence_settings WHEN NEW.local_only = 1 BEGIN SELECT RAISE(ABORT, 'synthetic persistence failure'); END;").unwrap();
+    drop(db);
+    let engine = open();
+    let error = engine.enable_local_only().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Storage);
+    assert!(error.message.contains("Saving it failed"));
+    assert!(engine.intelligence_settings().unwrap().local_only);
+    assert!(engine.intelligence_policy().is_local_only());
+    assert!(
+        !engine
+            .store()
+            .lock()
+            .unwrap()
+            .intelligence_settings()
+            .unwrap()
+            .local_only
+    );
+    drop(engine);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn database_failures_are_recoverable_across_provider_deletion() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "agent-delete-{}-{}.sqlite",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let vault = Arc::new(Vault::default());
+    let open = || {
+        Engine::with_network(
+            Arc::new(Threads),
+            Arc::new(InferenceWorker::spawn(|| Scripted(Script::default())).unwrap()),
+            SqliteStore::open(&path).unwrap(),
+            path.clone(),
+            Arc::clone(&vault) as Arc<dyn CredentialSource>,
+            BoundaryConfig::default(),
+        )
+        .unwrap()
+    };
+    let sql = |statement| {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(statement)
+            .unwrap()
+    };
+    let engine = open();
+    let provider = futures_executor::block_on(engine.save_provider(None, provider_settings(34345)))
+        .unwrap()
+        .id;
+    let saved = engine.store().lock().unwrap().provider(provider).unwrap();
+    let key = engine.credential_key(provider).unwrap();
+    let dest = crate::providers::destination_id(&saved.key);
+    vault.values.lock().unwrap().insert(key.clone(), KEY.into());
+    drop(engine);
+
+    sql(
+        "CREATE TRIGGER fail_mark BEFORE UPDATE OF deletion_pending ON providers BEGIN SELECT RAISE(ABORT, 'synthetic marker failure'); END;",
+    );
+    let engine = open();
+    assert_eq!(
+        futures_executor::block_on(engine.delete_provider(provider))
+            .unwrap_err()
+            .code,
+        ErrorCode::Storage
+    );
+    assert!(
+        !engine
+            .store()
+            .lock()
+            .unwrap()
+            .provider(provider)
+            .unwrap()
+            .deletion_pending
+    );
+    assert!(
+        engine
+            .intelligence_policy()
+            .registered_destination(&dest)
+            .is_some()
+    );
+    assert!(vault.values.lock().unwrap().contains_key(&key));
+    drop(engine);
+
+    sql(
+        "DROP TRIGGER fail_mark; CREATE TRIGGER fail_finish BEFORE DELETE ON providers BEGIN SELECT RAISE(ABORT, 'synthetic finalization failure'); END;",
+    );
+    let engine = open();
+    assert_eq!(
+        futures_executor::block_on(engine.delete_provider(provider))
+            .unwrap_err()
+            .code,
+        ErrorCode::Storage
+    );
+    assert!(
+        engine
+            .store()
+            .lock()
+            .unwrap()
+            .provider(provider)
+            .unwrap()
+            .deletion_pending
+    );
+    assert!(
+        engine
+            .intelligence_policy()
+            .registered_destination(&dest)
+            .is_none()
+    );
+    assert!(!vault.values.lock().unwrap().contains_key(&key));
+    drop(engine);
+
+    sql("DROP TRIGGER fail_finish;");
+    let engine = open();
+    assert!(
+        engine
+            .intelligence_policy()
+            .registered_destination(&dest)
+            .is_none()
+    );
+    futures_executor::block_on(engine.delete_provider(provider)).unwrap();
+    assert!(
+        engine
+            .store()
+            .lock()
+            .unwrap()
+            .providers()
+            .unwrap()
+            .is_empty()
+    );
+    drop(engine);
+    std::fs::remove_file(path).unwrap();
 }

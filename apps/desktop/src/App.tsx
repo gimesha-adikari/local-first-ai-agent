@@ -136,6 +136,7 @@ export default function App() {
   const [pendingChat, setPendingChat] = useState<PendingChat | null>(null);
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
   const [providers, setProviders] = useState<ProviderView[]>([]);
+  const providerRefresh = useRef(0);
   const [providersBusy, setProvidersBusy] = useState(false);
   const viewRef = useRef<View>({ kind: "empty" });
   const agent = useAgent({ onTurnSettled: (identity) => settleTurn(identity) });
@@ -900,16 +901,16 @@ export default function App() {
 
   /** Models and Settings share one categorized dialog; "models" opens its Models category. */
   async function refreshProviders() {
+    const sequence = ++providerRefresh.current;
     setProvidersBusy(true);
     try {
-      const [list, intelligence] = await Promise.all([
-        listProviders(),
-        invoke<IntelligenceSettings>("intelligence_settings"),
-      ]);
-      setProviders(list);
+      const intelligence = await invoke<IntelligenceSettings>("intelligence_settings");
+      if (sequence !== providerRefresh.current) return;
       setSnapshot((current) => current && { ...current, intelligence });
+      const list = await listProviders();
+      if (sequence === providerRefresh.current) setProviders(list);
     } finally {
-      setProvidersBusy(false);
+      if (sequence === providerRefresh.current) setProvidersBusy(false);
     }
   }
 

@@ -26,3 +26,4 @@ zeroize = "1.9.2"
 [dev-dependencies]
 futures-executor = "0.3.34"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }

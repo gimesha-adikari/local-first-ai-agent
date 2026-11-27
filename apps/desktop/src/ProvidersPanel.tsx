@@ -19,7 +19,23 @@ export function ProvidersPanel({ providers, intelligence, busy, onChanged }: {
   const [working, setWorking] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "error" | "accent" | "warning"; title: string; detail?: string } | null>(null);
   const [tests, setTests] = useState<Record<number, ProviderTest>>({});
-  const locked = busy || working !== null;
+  const [restrictionError, setRestrictionError] = useState<string | null>(null);
+  const [restricting, setRestricting] = useState(false);
+  const locked = busy || working !== null || restricting;
+
+  async function restrictConnections() {
+    if (restricting) return;
+    setRestricting(true);
+    setRestrictionError(null);
+    try {
+      await saveIntelligence({ ...intelligence, localOnly: true });
+    } catch (failure) {
+      setRestrictionError(errorMessage(failure));
+    } finally {
+      await onChanged().catch(() => undefined);
+      setRestricting(false);
+    }
+  }
 
   async function run(label: string, action: () => Promise<void>) {
     if (working) return;
@@ -44,11 +60,16 @@ export function ProvidersPanel({ providers, intelligence, busy, onChanged }: {
     <div className="settings-stack">
       <section className="settings-section">
         <h4>Connections</h4>
-        <Switch label="Local-only mode" checked={intelligence.localOnly} disabled={locked}
+        <Switch label="Local-only mode" checked={intelligence.localOnly} disabled={restricting || (intelligence.localOnly && locked)}
           description={intelligence.localOnly
             ? "No outbound connections. Chat uses your local model; providers stay off."
             : "Providers you configure can be reached, only through the app's network boundary."}
-          onChange={(localOnly) => void run("mode", () => saveIntelligence({ ...intelligence, localOnly }))} />
+          onChange={(localOnly) => localOnly ? void restrictConnections() : void run("mode", () => saveIntelligence({ ...intelligence, localOnly }))} />
+        {restrictionError && <Callout tone="error" role="alert" title="Local-only setting"
+          actions={<button type="button" className="link-button" disabled={restricting}
+            onClick={() => void restrictConnections()}>Retry saving Local-only</button>}>
+          {restrictionError}
+        </Callout>}
         <fieldset className="provider-choice" disabled={locked || intelligence.localOnly}>
           <legend>Chat answers with</legend>
           <label className="provider-option">
@@ -197,8 +218,12 @@ function ProviderCard({ provider, test, working, disabled, onEdit, onKey, onRemo
           title={provider.readiness === "local_only" ? "Turn off local-only mode to connect" : undefined} onClick={onTest}>
           {spinning("test") ? <Spinner size={13} /> : <RefreshIcon size={14} />}Test connection
         </button>
-        <button type="button" className="ghost-button small" disabled={disabled} onClick={onEdit}><EditIcon size={14} />Edit</button>
-        {confirming ? (
+        <button type="button" className="ghost-button small" disabled={disabled || provider.readiness === "deletion_pending"} onClick={onEdit}><EditIcon size={14} />Edit</button>
+        {provider.readiness === "deletion_pending" ? (
+          <button type="button" className="ghost-button small danger-text" disabled={disabled} onClick={onDelete}>
+            <TrashIcon size={14} />Retry removal
+          </button>
+        ) : confirming ? (
           <>
             <button type="button" className="ghost-button small danger-text" disabled={disabled}
               onClick={() => { setConfirming(false); onDelete(); }}>Remove provider and key</button>

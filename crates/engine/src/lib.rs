@@ -248,7 +248,7 @@ impl Engine {
             models: db.recent_models()?,
             active_model_id: self.active_model(),
             inference: self.worker.status()?,
-            intelligence: db.intelligence_settings()?,
+            intelligence: providers::effective_settings(&db, &self.policy)?,
         })
     }
 

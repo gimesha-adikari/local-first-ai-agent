@@ -183,7 +183,7 @@ fn hex(bytes: &[u8]) -> String {
 /// An immutable labelled request. The body cannot be read or changed after
 /// construction; the policy operation binds its digest.
 pub struct Outbound {
-    operation: Operation,
+    operation: Arc<Operation>,
     body: Vec<u8>,
     content_type: Option<&'static str>,
     provider_retention: Retention,
@@ -210,7 +210,7 @@ impl Outbound {
             body_len: body.len(),
         };
         Self {
-            operation: Operation::new(
+            operation: Arc::new(Operation::new(
                 session,
                 capability,
                 purpose,
@@ -220,7 +220,7 @@ impl Outbound {
                 Some(destination),
                 Some(request),
                 provider_retention,
-            ),
+            )),
             content_type: (!body.is_empty()).then_some("application/json"),
             body,
             provider_retention,
@@ -538,6 +538,8 @@ impl NetworkBoundary {
 /// while the operation and its grants stay live. Dropping it aborts the
 /// exchange.
 pub struct Streaming {
+    authorization: ResponseAuthorization,
+    ended: bool,
     pub status: u16,
     pub content_type: Option<String>,
     body: futures_channel::mpsc::Receiver<Result<Vec<u8>, Failure>>,
@@ -545,20 +547,55 @@ pub struct Streaming {
     record: Arc<Mutex<EgressRecord>>,
 }
 
+struct ResponseAuthorization {
+    policy: Arc<Policy>,
+    operation: Arc<Operation>,
+    process: GrantId,
+    share: GrantId,
+}
+
+impl ResponseAuthorization {
+    fn check(&self) -> Result<(), Failure> {
+        self.policy
+            .accept_response(&self.operation, self.process, self.share)
+            .map_err(Failure::from_denial)
+    }
+}
+
 impl Streaming {
     /// The next body piece, `None` at the end of the body.
     pub async fn next(&mut self) -> Option<Result<Vec<u8>, Failure>> {
         use futures_util::StreamExt;
-        self.body.next().await
+        if self.ended {
+            return None;
+        }
+        let piece = self.body.next().await;
+        // A worker can finish and queue the entire response before the adapter
+        // polls. Check on the receiving side, including end-of-stream.
+        if let Err(failure) = self.check_live() {
+            self.body.close();
+            self.ended = true;
+            return Some(Err(failure));
+        }
+        self.ended = !matches!(piece, Some(Ok(_)));
+        piece
     }
 
-    /// Abort any remaining transfer and return the final transport record.
-    pub async fn finish(mut self) -> EgressRecord {
+    pub(crate) fn check_live(&self) -> Result<(), Failure> {
+        self.authorization.check()
+    }
+
+    pub(crate) async fn finish_checked(mut self) -> (EgressRecord, Result<(), Failure>) {
         self.body.close();
         if let Some(done) = self.done.take() {
             let _ = done.await;
         }
-        snapshot(&self.record)
+        (snapshot(&self.record), self.check_live())
+    }
+
+    /// Abort any remaining transfer and return the final transport record.
+    pub async fn finish(self) -> EgressRecord {
+        self.finish_checked().await.0
     }
 }
 

@@ -75,7 +75,21 @@ void (async () => {
     assert(listed.usage.reportedTokens === 24 && listed.usage.reservedTokens === 0, "Usage was not reconciled");
     result.steps.push("cloud-only Chat completed without a local model");
 
+    let firstDelta;
+    const waiting = new Promise((resolve) => { firstDelta = resolve; });
+    const holdChannel = `__CHANNEL__:${ipc.transformCallback((event) => {
+      if (event.message?.kind === "delta") firstDelta();
+    })}`;
+    const held = failure(ipc.invoke("send_message", { id: thread.id, content: "HOLD_FOR_POLICY", events: holdChannel }));
+    await waiting;
+    const busyDelete = await failure(ipc.invoke("provider_delete", { id: view.id }));
+    assert(busyDelete.code === "busy", "Deletion was admitted during a turn");
     await ipc.invoke("set_intelligence_settings", { settings: { localOnly: true, activeProvider: view.id } });
+    assert((await ipc.invoke("intelligence_settings")).localOnly && (await ipc.invoke("bootstrap")).intelligence.localOnly, "Effective mode differs across commands");
+    assert((await ipc.invoke("provider_list"))[0].readiness === "local_only", "Provider readiness did not update");
+    const stopped = await held;
+    assert(["policy_denied", "cancelled"].includes(stopped.code), "Remote turn did not terminate on restriction");
+    result.steps.push("in-flight Chat revoked from main-window IPC, mode and readiness agree");
     const again = await failure(ipc.invoke("send_message", { id: thread.id, content: "Stay local", events: channel([]) }));
     assert(again.code === "no_model", "Switching back to local-only did not stop remote Chat");
     await ipc.invoke("provider_delete", { id: view.id });

@@ -22,8 +22,8 @@ use serde::Serialize;
 use storage::providers::{SavedProvider, UsageSummary};
 
 use crate::{
-    Engine,
-    credentials::{CredentialError, CredentialKey, CredentialStatus},
+    Engine, OperationGuard,
+    credentials::{CredentialError, CredentialKey, CredentialSource, CredentialStatus, Secret},
     database,
     network::{Destination, Endpoint, Failure, Method, Outbound, Scheme},
     policy::{Denial, GrantId, Operation, Permission, Policy, Session},
@@ -40,26 +40,32 @@ fn endpoint_error(error: crate::network::EndpointError) -> InferenceError {
 
 /// Canonicalize the endpoint and derive the registered destination.
 pub(crate) fn destination(key: &str, settings: &ProviderSettings) -> Result<Destination> {
-    let endpoint = Endpoint::parse(&settings.endpoint).map_err(endpoint_error)?;
+    let endpoint = validated_endpoint(settings)?;
     let destination =
         Destination::new(&destination_id(key), endpoint, settings.locality.locality())
             .map_err(endpoint_error)?;
-    // A key on unencrypted HTTP could be read by anyone on the network path.
-    // Only this computer's loopback is exempt.
+    Ok(if settings.requires_key {
+        destination.with_credential(key)
+    } else {
+        destination
+    })
+}
+
+fn validated_endpoint(settings: &ProviderSettings) -> Result<Endpoint> {
+    let endpoint = Endpoint::parse(&settings.endpoint).map_err(endpoint_error)?;
+    let scope = endpoint
+        .scope_for(settings.locality.locality())
+        .map_err(endpoint_error)?;
     if settings.requires_key
-        && destination.endpoint().scheme() == Scheme::Http
-        && *destination.scope() != crate::network::NetworkScope::Loopback
+        && endpoint.scheme() == Scheme::Http
+        && scope != crate::network::NetworkScope::Loopback
     {
         return Err(InferenceError::new(
             ErrorCode::InvalidConfig,
             "Use https for a server on your network that needs an API key, so the key is never sent unencrypted.",
         ));
     }
-    Ok(if settings.requires_key {
-        destination.with_credential(key)
-    } else {
-        destination
-    })
+    Ok(endpoint)
 }
 
 /// What a configured provider offers for Chat. Built only from the user's
@@ -148,7 +154,7 @@ pub(crate) fn failure_error(failure: &Failure) -> InferenceError {
         Failure::Cancelled => (ErrorCode::Cancelled, "The request was cancelled.".into()),
         Failure::Denied(Denial::Locality) => (
             ErrorCode::PolicyDenied,
-            "Local-only mode is on, so nothing was sent.".into(),
+            "Local-only mode stopped this provider request.".into(),
         ),
         Failure::Denied(Denial::Revoked | Denial::Expired) => (
             ErrorCode::PolicyDenied,
@@ -211,6 +217,8 @@ pub enum Readiness {
     Ready,
     /// The user must add an API key.
     NeedsCredential,
+    DeletionPending,
+    InvalidConfiguration,
     /// Secure storage is unavailable or locked: fail closed.
     CredentialUnavailable,
     /// Provider retention is not disclosed.
@@ -246,6 +254,54 @@ pub struct ProviderTest {
     pub elapsed_ms: u64,
 }
 
+/// Holds the operation gate from native entry through the keyring mutation.
+pub struct ProviderCredentialEdit<'a> {
+    _operation: OperationGuard,
+    credentials: &'a dyn CredentialSource,
+    key: CredentialKey,
+    provider_name: String,
+}
+
+impl ProviderCredentialEdit<'_> {
+    pub fn provider_name(&self) -> &str {
+        &self.provider_name
+    }
+
+    pub async fn store(self, secret: Secret) -> Result<()> {
+        self.credentials
+            .store(&self.key, &self.provider_name, secret)
+            .await
+            .map_err(|error| failure_error(&Failure::Credential(error)))
+    }
+
+    pub async fn delete(self) -> Result<()> {
+        remove_key(self.credentials, &self.key).await
+    }
+}
+
+async fn remove_key(credentials: &dyn CredentialSource, key: &CredentialKey) -> Result<()> {
+    match credentials.delete(key).await {
+        Ok(()) | Err(CredentialError::Missing) => Ok(()),
+        Err(error) => Err(InferenceError::new(
+            ErrorCode::CredentialUnavailable,
+            format!("The API key could not be removed. {}", error.message()),
+        )),
+    }
+}
+
+fn credential_key(saved: &SavedProvider) -> Result<CredentialKey> {
+    saved.require_available()?;
+    destination(&saved.key, &saved.settings)?
+        .credential()
+        .map(|binding| binding.key().clone())
+        .ok_or_else(|| {
+            InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "This provider is configured without an API key.",
+            )
+        })
+}
+
 impl Engine {
     /// Register saved providers and apply the saved selection. Invalid
     /// rows stay listed but are never registered.
@@ -255,7 +311,9 @@ impl Engine {
             (db.providers()?, db.intelligence_settings()?)
         };
         for saved in providers {
-            if let Ok(destination) = destination(&saved.key, &saved.settings) {
+            if !saved.deletion_pending
+                && let Ok(destination) = destination(&saved.key, &saved.settings)
+            {
                 let _ = self.policy.register_destination(destination);
             }
         }
@@ -264,15 +322,55 @@ impl Engine {
     }
 
     pub fn intelligence_settings(&self) -> Result<IntelligenceSettings> {
-        database(&self.database)?.intelligence_settings()
+        effective_settings(&*database(&self.database)?, &self.policy)
     }
 
-    /// Change local-only mode or the active provider. Turning local-only
-    /// mode on denies in-flight remote work at its next liveness check.
+    /// Restriction is effective before waiting for storage. Preserve the selected
+    /// provider, including a selection changed by another Settings surface.
+    pub fn enable_local_only(&self) -> Result<()> {
+        let _pending = self.policy.begin_restriction();
+        let persist = || {
+            let mut db = database(&self.database)?;
+            let mut settings = db.intelligence_settings()?;
+            settings.local_only = true;
+            db.save_intelligence_settings(settings)
+        };
+        persist().map_err(|_| restriction_storage_error())
+    }
+
+    /// The unrestricted selection can change only while the engine is idle.
     pub fn set_intelligence_settings(&self, settings: IntelligenceSettings) -> Result<()> {
+        if settings.local_only {
+            self.enable_local_only()?;
+            let mut db = database(&self.database)?;
+            if db.intelligence_settings()?.active_provider == settings.active_provider {
+                return Ok(());
+            }
+            let _operation = self.reserve()?;
+            let mut selection = effective_settings(&db, &self.policy)?;
+            selection.active_provider = settings.active_provider;
+            return db.save_intelligence_settings(selection);
+        }
+        let epoch = self.policy.restriction_epoch();
         let _operation = self.reserve()?;
-        database(&self.database)?.save_intelligence_settings(settings)?;
-        self.policy.set_local_only(settings.local_only);
+        let mut db = database(&self.database)?;
+        let superseded = || {
+            InferenceError::new(
+                ErrorCode::PolicyDenied,
+                "Local-only mode was enabled while changing provider settings.",
+            )
+        };
+        if epoch != self.policy.restriction_epoch() {
+            return Err(superseded());
+        }
+        db.save_intelligence_settings(settings)?;
+        if !self.policy.allow_remote_if_current(epoch) {
+            let mut restricted = db.intelligence_settings()?;
+            restricted.local_only = true;
+            db.save_intelligence_settings(restricted)
+                .map_err(|_| restriction_storage_error())?;
+            return Err(superseded());
+        }
         Ok(())
     }
 
@@ -282,16 +380,18 @@ impl Engine {
 
     /// The non-secret secure-storage key for a provider's credential.
     pub fn credential_key(&self, id: ProviderId) -> Result<CredentialKey> {
+        credential_key(&self.saved_provider(id)?)
+    }
+
+    pub fn edit_provider_credential(&self, id: ProviderId) -> Result<ProviderCredentialEdit<'_>> {
+        let operation = self.reserve()?;
         let saved = self.saved_provider(id)?;
-        destination(&saved.key, &saved.settings)?
-            .credential()
-            .map(|binding| binding.key().clone())
-            .ok_or_else(|| {
-                InferenceError::new(
-                    ErrorCode::InvalidConfig,
-                    "This provider is configured without an API key.",
-                )
-            })
+        Ok(ProviderCredentialEdit {
+            key: credential_key(&saved)?,
+            provider_name: saved.settings.name,
+            credentials: self.credentials.as_ref(),
+            _operation: operation,
+        })
     }
 
     /// Validate, canonicalize and save a provider, then register its
@@ -302,62 +402,80 @@ impl Engine {
         id: Option<ProviderId>,
         mut settings: ProviderSettings,
     ) -> Result<ProviderView> {
+        let _operation = self.reserve()?;
         settings.validate()?;
-        let endpoint = Endpoint::parse(&settings.endpoint).map_err(endpoint_error)?;
-        endpoint
-            .scope_for(settings.locality.locality())
-            .map_err(endpoint_error)?;
+        let endpoint = validated_endpoint(&settings)?;
         settings.endpoint = endpoint.display();
         settings.name = settings.name.trim().to_owned();
         settings.model = settings.model.trim().to_owned();
         settings.retention_summary = settings.retention_summary.trim().to_owned();
-        let previous = id.map(|id| self.saved_provider(id)).transpose()?;
-        let saved = {
-            let _operation = self.reserve()?;
-            database(&self.database)?.save_provider(id, &settings)?
+        let obsolete_origin = if let Some(id) = id {
+            let previous = self.saved_provider(id)?;
+            previous.require_available()?;
+            self.clean_obsolete_key(&previous).await?;
+            destination(&previous.key, &previous.settings)
+                .ok()
+                .and_then(|old| {
+                    let binding = old.credential()?;
+                    (!settings.requires_key || binding.key().origin != endpoint.origin())
+                        .then(|| binding.key().origin.clone())
+                })
+        } else {
+            None
         };
-        let destination = destination(&saved.key, &saved.settings)?;
+        let saved = database(&self.database)?.save_provider_with_key_cleanup(
+            id,
+            &settings,
+            obsolete_origin.as_deref(),
+        )?;
         self.policy
-            .register_destination(destination.clone())
+            .register_destination(destination(&saved.key, &saved.settings)?)
             .map_err(crate::chat_session::policy_error)?;
-        if let Some(previous) = previous
-            && let Ok(old) = self::destination(&previous.key, &previous.settings)
-            && let Some(old) = old.credential()
-            && destination.credential().map(|binding| binding.key()) != Some(old.key())
-        {
-            let _ = self.credentials.delete(old.key()).await;
+        self.clean_obsolete_key(&saved).await.map_err(|error| InferenceError::new(
+            error.code,
+            format!("Provider settings were saved. Cleanup of the previous key is pending. Save again to retry. {}", error.message),
+        ))?;
+        self.provider_view(self.saved_provider(saved.id)?).await
+    }
+
+    async fn clean_obsolete_key(&self, saved: &SavedProvider) -> Result<()> {
+        if let Some(origin) = &saved.obsolete_credential_origin {
+            remove_key(
+                self.credentials.as_ref(),
+                &CredentialKey {
+                    provider: saved.key.clone(),
+                    origin: origin.clone(),
+                },
+            )
+            .await?;
+            database(&self.database)?.finish_provider_key_cleanup(saved.id)?;
         }
-        self.provider_view(saved).await
+        Ok(())
     }
 
     pub async fn delete_provider(&self, id: ProviderId) -> Result<()> {
+        let _operation = self.reserve()?;
         let saved = self.saved_provider(id)?;
-        let _ = self
-            .policy
-            .unregister_destination(&destination_id(&saved.key));
+        database(&self.database)?.begin_provider_deletion(id)?;
+        self.policy
+            .unregister_destination(&destination_id(&saved.key))
+            .map_err(crate::chat_session::policy_error)?;
+        self.clean_obsolete_key(&saved).await?;
         if let Ok(destination) = destination(&saved.key, &saved.settings)
             && let Some(binding) = destination.credential()
         {
-            match self.credentials.delete(binding.key()).await {
-                Ok(()) | Err(CredentialError::Missing) => {}
-                Err(error) => {
-                    return Err(InferenceError::new(
-                        ErrorCode::CredentialUnavailable,
-                        format!(
-                            "The provider's API key could not be removed from secure storage. {}",
-                            error.message()
-                        ),
-                    ));
-                }
-            }
+            remove_key(self.credentials.as_ref(), binding.key()).await?;
         }
-        let _operation = self.reserve()?;
-        database(&self.database)?.delete_provider(id)
+        database(&self.database)?.finish_provider_deletion(id)
     }
 
     async fn provider_view(&self, saved: SavedProvider) -> Result<ProviderView> {
-        let destination = destination(&saved.key, &saved.settings)?;
-        let credential = match destination.credential() {
+        let destination = destination(&saved.key, &saved.settings).ok();
+        let credential = match destination
+            .as_ref()
+            .and_then(Destination::credential)
+            .filter(|_| !saved.deletion_pending)
+        {
             Some(binding) => Some(
                 self.credentials
                     .status(binding.key())
@@ -371,10 +489,14 @@ impl Engine {
             let db = database(&self.database)?;
             (
                 db.usage_summary(saved.id, &period)?,
-                db.intelligence_settings()?,
+                effective_settings(&db, &self.policy)?,
             )
         };
-        let readiness = if intelligence.local_only {
+        let readiness = if saved.deletion_pending {
+            Readiness::DeletionPending
+        } else if destination.is_none() {
+            Readiness::InvalidConfiguration
+        } else if intelligence.local_only {
             Readiness::LocalOnly
         } else if saved.settings.retention == ProviderRetention::Unknown {
             Readiness::NeedsRetention
@@ -390,9 +512,16 @@ impl Engine {
         let offer = offer(&saved);
         Ok(ProviderView {
             id: saved.id,
-            origin: destination.endpoint().origin(),
-            network: destination.scope().label(),
-            encrypted: destination.endpoint().scheme() == Scheme::Https,
+            origin: destination
+                .as_ref()
+                .map(|d| d.endpoint().origin())
+                .unwrap_or_default(),
+            network: destination
+                .as_ref()
+                .map_or("unknown", |d| d.scope().label()),
+            encrypted: destination
+                .as_ref()
+                .is_some_and(|d| d.endpoint().scheme() == Scheme::Https),
             credential,
             period,
             usage,
@@ -420,7 +549,9 @@ impl Engine {
     /// List the provider's models through the network boundary. This is an
     /// explicit user action and sends no personal data.
     pub async fn test_provider(&self, id: ProviderId) -> Result<ProviderTest> {
+        let _operation = self.reserve()?;
         let saved = self.saved_provider(id)?;
+        saved.require_available()?;
         let destination = destination(&saved.key, &saved.settings)?;
         let session = Session::new(Cancellation::default());
         let request = Outbound::new(
@@ -461,8 +592,9 @@ impl Engine {
             body.extend(piece);
         }
         let status = streaming.status;
-        streaming.finish().await;
+        let (_, live) = streaming.finish_checked().await;
         session.close();
+        live.map_err(|f| failure_error(&f))?;
         if !(200..300).contains(&status) {
             return Err(openai::error_response(status, &body));
         }
@@ -477,6 +609,15 @@ impl Engine {
     }
 }
 
+pub(crate) fn effective_settings(
+    db: &storage::SqliteStore,
+    policy: &Policy,
+) -> Result<IntelligenceSettings> {
+    let mut settings = db.intelligence_settings()?;
+    settings.local_only = policy.is_local_only();
+    Ok(settings)
+}
+
 pub(crate) fn remote_target(
     db: &std::sync::Mutex<storage::SqliteStore>,
     settings: IntelligenceSettings,
@@ -485,6 +626,7 @@ pub(crate) fn remote_target(
         return Ok(None);
     };
     let saved = database(db)?.provider(id)?;
+    saved.require_available()?;
     let destination = destination(&saved.key, &saved.settings)?;
     Ok(Some((saved, destination)))
 }
@@ -501,4 +643,11 @@ pub fn locality_label(locality: Locality) -> &'static str {
         Locality::SelfHosted => "self-hosted",
         Locality::ThirdParty => "cloud",
     }
+}
+
+fn restriction_storage_error() -> InferenceError {
+    InferenceError::new(
+        ErrorCode::Storage,
+        "Local-only mode is active for this session. Saving it failed. Retry before restarting or the previous setting may return.",
+    )
 }
