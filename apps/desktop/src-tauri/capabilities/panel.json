@@ -1,0 +1,17 @@
+{
+  "identifier": "panel",
+  "description": "Ephemeral text preview, contextual processing and explicit clipboard or memory actions.",
+  "windows": [
+    "panel"
+  ],
+  "permissions": [
+    "allow-glance-state",
+    "allow-glance-clipboard",
+    "allow-glance-run",
+    "allow-glance-stop",
+    "allow-glance-copy",
+    "allow-glance-remember",
+    "allow-glance-dismiss",
+    "allow-glance-open-main"
+  ]
+}

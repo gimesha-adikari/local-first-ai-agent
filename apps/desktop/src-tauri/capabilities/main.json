@@ -5,6 +5,9 @@
     "main"
   ],
   "permissions": [
+    "allow-shortcut-status",
+    "allow-configure-shortcut",
+    "allow-glance-show",
     "allow-bootstrap",
     "allow-list-conversations",
     "allow-get-conversation",

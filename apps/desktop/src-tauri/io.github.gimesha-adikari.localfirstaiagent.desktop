@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=local-first-ai-agent
+Comment=Open the intelligence workspace
+Exec=local-first-ai-agent
+Icon=local-first-ai-agent
+Categories=Utility;
+Terminal=false
+StartupNotify=true
+Actions=Summon;
+
+[Desktop Action Summon]
+Name=Open contextual panel
+Exec=local-first-ai-agent --summon

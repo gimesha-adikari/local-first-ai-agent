@@ -1,5 +1,16 @@
 fn main() {
     let app_manifest = tauri_build::AppManifest::new().commands(&[
+        "shortcut_status",
+        "configure_shortcut",
+        "glance_show",
+        "glance_state",
+        "glance_clipboard",
+        "glance_run",
+        "glance_stop",
+        "glance_copy",
+        "glance_remember",
+        "glance_dismiss",
+        "glance_open_main",
         "bootstrap",
         "list_conversations",
         "get_conversation",

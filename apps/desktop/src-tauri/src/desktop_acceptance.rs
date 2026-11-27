@@ -44,6 +44,9 @@ impl InferenceProvider for Fixture {
         cancellation: &Cancellation,
         emit: &mut dyn FnMut(TextDelta) -> Result<()>,
     ) -> Result<GenerationStats> {
+        if request.prompt.contains("quoted_context") {
+            return glance_generation(request, cancellation, emit);
+        }
         if request.prompt != "Fixture Chat continuation" {
             return Err(InferenceError::new(
                 ErrorCode::GenerationFailed,
@@ -189,6 +192,56 @@ impl InferenceProvider for Fixture {
             },
         })
     }
+}
+
+/// A contextual panel request. `HOLD_LOCAL` streams once, then waits for Stop.
+fn glance_generation(
+    request: &GenerationRequest,
+    cancellation: &Cancellation,
+    emit: &mut dyn FnMut(TextDelta) -> Result<()>,
+) -> Result<GenerationStats> {
+    let context = request.context.as_ref();
+    if let Some(observer) = &request.context_observer {
+        observer.decoded(context.map_or_else(Default::default, |c| c.usage()), 0)?;
+    }
+    let reason = if request.prompt.contains("HOLD_LOCAL") {
+        emit(TextDelta {
+            text: "Holding the synthetic request".into(),
+        })?;
+        let started = Instant::now();
+        while !cancellation.is_cancelled() && started.elapsed() < Duration::from_secs(20) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        FinishReason::Cancelled
+    } else {
+        let memory = context.is_some_and(|c| !c.memories.is_empty());
+        let document = context.is_some_and(|c| c.evidence.is_some());
+        for piece in [
+            "Local fixture key points: ",
+            "the tanks collect rainwater",
+            if memory { "; memory supplied" } else { "" },
+            if document { "; document supplied" } else { "" },
+            ".",
+        ] {
+            if !piece.is_empty() {
+                emit(TextDelta { text: piece.into() })?;
+            }
+        }
+        FinishReason::EndOfGeneration
+    };
+    Ok(GenerationStats {
+        reason,
+        prompt_tokens: 12,
+        prompt_tokens_per_second: None,
+        generated_tokens: 5,
+        time_to_first_token_ms: Some(1),
+        elapsed_ms: 2,
+        tokens_per_second: 1.0,
+        excluded_turns: 0,
+        output_budget: None,
+        context_usage: context.map(|c| c.usage()),
+        assistant_replay: None,
+    })
 }
 
 fn isolated_profile() -> PathBuf {
@@ -502,6 +555,9 @@ fn task05_integration_desktop_fixture() {
     );
 }
 
+/// Completion requests that reached any loopback provider fixture.
+static COMPLETIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// A loopback OpenAI-compatible server. `/models` lists how many requests
 /// arrived before it, so the WebView script can prove local-only mode sent
 /// nothing.
@@ -551,6 +607,9 @@ fn openai_fixture() -> u16 {
                 assert_eq!(stream.read(&mut buffer).unwrap(), 0);
                 seen += 1;
                 continue;
+            }
+            if !text.starts_with("GET /v1/models ") {
+                COMPLETIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             let response = if text.starts_with("GET /v1/models ") {
                 let auth = if text.contains("\r\nAuthorization: Bearer sk-synthetic-dialog-123\r\n")
@@ -688,4 +747,205 @@ fn run_webview_fixture_with_worker(
             });
         });
     run_desktop(builder, worker);
+}
+
+/// Capture the isolated X display, with the panel's geometry beside it.
+fn glance_screenshot(app: &tauri::AppHandle, stage: &str) {
+    let (Some(directory), Some(display)) = (
+        std::env::var_os("AGENT_GLANCE_SCREENSHOTS"),
+        std::env::var_os("DISPLAY"),
+    ) else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let screen = std::env::var("AGENT_GLANCE_SCREEN").unwrap_or_else(|_| "1280x860".into());
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-f", "x11grab", "-draw_mouse", "0"])
+        .args(["-video_size", &screen, "-i"])
+        .arg(display)
+        .args(["-frames:v", "1", "-y"])
+        .arg(directory.join(format!("{stage}.png")))
+        .status()
+        .unwrap();
+    assert!(status.success(), "screenshot {stage} failed");
+    if let Some(panel) = app.get_webview_window("panel") {
+        let (position, size) = (panel.outer_position().unwrap(), panel.outer_size().unwrap());
+        let geometry =
+            json!({"x": position.x, "y": position.y, "width": size.width, "height": size.height});
+        std::fs::write(
+            directory.join(format!("{stage}.json")),
+            geometry.to_string(),
+        )
+        .unwrap();
+    }
+}
+
+fn eval_json(webview: &tauri::WebviewWindow, expression: &str) -> Option<Value> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    webview
+        .eval_with_callback(expression, move |raw| {
+            let _ = tx.send(raw);
+        })
+        .ok()?;
+    let raw = rx.recv_timeout(Duration::from_millis(500)).ok()?;
+    serde_json::from_str::<String>(&raw)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+/// Drives the panel's real DOM and IPC. Each screenshot stage waits for the
+/// host to capture it; the host also reports how many requests reached the
+/// loopback provider at that moment.
+fn watch_panel(panel: tauri::WebviewWindow, main: tauri::WebviewWindow) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut captured = String::new();
+    let outcome = loop {
+        if Instant::now() > deadline {
+            break json!({"pass": false, "error": "panel fixture timed out"});
+        }
+        thread::sleep(Duration::from_millis(100));
+        let Some(state) = eval_json(
+            &panel,
+            "JSON.stringify({stage: document.documentElement.dataset.glanceStage || '', result: document.documentElement.dataset.glanceResult || ''})",
+        ) else {
+            continue;
+        };
+        let stage = state["stage"].as_str().unwrap_or_default().to_owned();
+        if !stage.is_empty() && stage != captured {
+            glance_screenshot(panel.app_handle(), &stage);
+            let seen = COMPLETIONS.load(std::sync::atomic::Ordering::SeqCst);
+            panel
+                .eval(format!(
+                    "document.documentElement.dataset.remoteSeen = '{seen}'; document.documentElement.dataset.glanceShot = {};",
+                    json!(stage)
+                ))
+                .unwrap();
+            captured = stage;
+        }
+        if let Some(result) = state["result"]
+            .as_str()
+            .filter(|raw| !raw.is_empty())
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        {
+            break result;
+        }
+    };
+    // Escape dismisses the panel; its native session must be gone afterwards.
+    let _ = panel.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))");
+    let app = main.app_handle().clone();
+    let closed_by = Instant::now() + Duration::from_secs(5);
+    let closed = loop {
+        let state_cleared = app.state::<crate::panel::Panel>().is_closed();
+        if app.get_webview_window("panel").is_none() && state_cleared {
+            break true;
+        }
+        if Instant::now() > closed_by {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let clipboard = std::process::Command::new("xclip")
+        .args(["-o", "-selection", "clipboard"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let report = json!({"panel": outcome, "closed": closed, "clipboard": clipboard});
+    main.eval(format!("window.__glancePanelDone({report})"))
+        .unwrap();
+}
+
+#[test]
+#[ignore = "opens the native contextual panel in an isolated X11 profile with a loopback provider and an external clipboard owner"]
+fn glance_panel_desktop_fixture() {
+    let profile = isolated_profile();
+    let port = openai_fixture();
+    let main_script =
+        include_str!("glance_main_acceptance.js").replace("__PORT__", &port.to_string());
+    let panel_script = include_str!("glance_panel_acceptance.js");
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let panel_opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let builder = tauri::Builder::default()
+        .any_thread()
+        .on_page_load(move |webview, page| {
+            if page.event() != tauri::webview::PageLoadEvent::Finished {
+                return;
+            }
+            let app = webview.app_handle().clone();
+            match webview.label() {
+                "main" if !opened.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                    prepare_glance_profile(&app);
+                    webview.eval(&main_script).unwrap();
+                    let main = app.get_webview_window("main").unwrap();
+                    let result_path = profile.join("ipc-result.json");
+                    thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(180);
+                        while Instant::now() < deadline {
+                            if let Some(result) = eval_json(
+                                &main,
+                                "document.documentElement.dataset.glanceIpcResult || ''",
+                            ) {
+                                std::fs::write(&result_path, result.to_string()).unwrap();
+                                main.app_handle().exit(i32::from(result["pass"] != true));
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(200));
+                        }
+                        std::fs::write(
+                            &result_path,
+                            r#"{"pass":false,"error":"fixture timed out"}"#,
+                        )
+                        .unwrap();
+                        main.app_handle().exit(1);
+                    });
+                }
+                "panel" if !panel_opened.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                    webview.eval(panel_script).unwrap();
+                    let panel = app.get_webview_window("panel").unwrap();
+                    let main = app.get_webview_window("main").unwrap();
+                    thread::spawn(move || watch_panel(panel, main));
+                }
+                _ => {}
+            }
+        });
+    run_desktop(builder, || InferenceWorker::spawn(|| Fixture));
+}
+
+/// A scripted local model and one synthetic knowledge document.
+fn prepare_glance_profile(app: &tauri::AppHandle) {
+    let desktop = app.state::<crate::commands::Desktop>();
+    let settings = ModelSettings::default();
+    let model = {
+        let mut db = desktop.engine.store().lock().unwrap();
+        let model = db
+            .remember_model(
+                Path::new("/synthetic/fixture.gguf"),
+                "fixture.gguf",
+                settings,
+            )
+            .unwrap();
+        db.set_model_settings(model.id, settings, false).unwrap();
+        let mut chunks = Vec::new();
+        agent_core::knowledge::append_chunks(
+            &mut chunks,
+            "Synthetic orchard plan: the rainwater tanks collect water for dry weeks and refill each spring.\n",
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        db.save_knowledge(
+            &storage::knowledge::DocumentImport {
+                name: "Synthetic orchard plan.txt",
+                format: agent_core::knowledge::DocumentFormat::Txt,
+                fingerprint: &[7; 32],
+                file_bytes: 64,
+                pdf_coverage: None,
+                chunks: &chunks,
+            },
+            None,
+            |_| Ok(()),
+        )
+        .unwrap();
+        model
+    };
+    tauri::async_runtime::block_on(desktop.engine.load_model(model.id, settings)).unwrap();
 }
