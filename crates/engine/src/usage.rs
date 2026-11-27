@@ -35,6 +35,16 @@ pub fn estimate_text(text: &str) -> u64 {
     (text.len() as u64).div_ceil(2)
 }
 
+/// A conservative estimate for one image: 170 tokens per 512-pixel tile
+/// plus 85, after limiting the longer side to 2048 pixels. Providers that
+/// scale images down charge less; none documented here charge more.
+pub fn estimate_image(width: u32, height: u32) -> u64 {
+    let longest = width.max(height).max(1);
+    let scale = (2048.0 / f64::from(longest)).min(1.0);
+    let tiles = |side: u32| ((f64::from(side) * scale) / 512.0).ceil().max(1.0) as u64;
+    85 + 170 * tiles(width) * tiles(height)
+}
+
 /// Estimated prompt tokens, including per-message framing.
 pub fn estimate_messages(messages: &[PromptMessage<'_>]) -> u64 {
     messages

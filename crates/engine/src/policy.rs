@@ -17,7 +17,8 @@ use agent_core::{
     },
     classification::{
         AGENT_CONTEXT, CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY,
-        MODEL_OUTPUT, PDF_EXCERPT, QUERY, SYSTEM_TEXT, Sensitivity, TEXT_EXCERPT, USER_INPUT,
+        MODEL_OUTPUT, PDF_EXCERPT, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT, Sensitivity,
+        TEXT_EXCERPT, USER_INPUT,
     },
     inference::Cancellation,
 };
@@ -380,6 +381,8 @@ impl Policy {
         let allowed = [
             USER_INPUT,
             CLIPBOARD_TEXT,
+            SCREEN_IMAGE,
+            SCREEN_TEXT,
             HISTORY,
             MEMORY,
             LIBRARY,

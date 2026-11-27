@@ -14,7 +14,9 @@ use agent_core::{
         DISCOVER, GENERATE, IMAGE, Languages, Locality, Offer, Resources, Retention, TEXT,
         UnitPrice, Usage,
     },
-    classification::{CLIPBOARD_TEXT, Classified, DataClasses, PROVIDER_CONTROL},
+    classification::{
+        CLIPBOARD_TEXT, Classified, DataClasses, PROVIDER_CONTROL, SCREEN_IMAGE, SCREEN_TEXT,
+    },
     inference::{Cancellation, ErrorCode, InferenceError, Result},
     provider::{IntelligenceSettings, ProviderId, ProviderRetention, ProviderSettings},
 };
@@ -130,8 +132,11 @@ pub(crate) fn consent(
         return Err(Denial::Scope);
     }
     let mut allowed = settings.sharing.allowed_classes();
+    // The panel's content classes are admitted only for its own purpose,
+    // where every remote request carries a per-request confirmation of the
+    // exact text, and for images, the exact crop.
     if operation.purpose() == "glance" {
-        allowed.push(CLIPBOARD_TEXT);
+        allowed.extend([CLIPBOARD_TEXT, SCREEN_TEXT, SCREEN_IMAGE]);
     }
     let registry = DataClasses::new(allowed.iter().copied());
     if operation

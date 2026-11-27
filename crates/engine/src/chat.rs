@@ -835,6 +835,7 @@ impl ChatRuntime {
                         sources,
                         max_tokens: options.max_tokens,
                         cancellation,
+                        images: Vec::new(),
                     },
                     target,
                     events,

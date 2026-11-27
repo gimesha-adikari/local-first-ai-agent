@@ -1172,6 +1172,7 @@ fn glance(
     futures_executor::block_on(h.engine.run_glance(
         serde_json::from_value(input).unwrap(),
         crate::chat::glance::Origin::EditedClipboard,
+        None,
         cancellation,
         Arc::new(Recorder::default()),
     ))

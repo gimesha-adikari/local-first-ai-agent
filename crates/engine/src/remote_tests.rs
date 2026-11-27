@@ -872,6 +872,7 @@ fn glance_uses_the_gateway_without_chat_history_or_persisting_text() {
         futures_executor::block_on(fixture.engine.run_glance(
             serde_json::from_value::<Input>(input).unwrap(),
             Origin::Clipboard,
+            None,
             Default::default(),
             Arc::new(Recorder::default()),
         ))
@@ -917,4 +918,122 @@ fn glance_uses_the_gateway_without_chat_history_or_persisting_text() {
             .labels()
             .contains(agent_core::classification::CLIPBOARD_TEXT)
     );
+}
+
+#[test]
+fn screen_crops_reach_only_image_providers_with_confirmation_and_text_keeps_screen_labels() {
+    use crate::chat::glance::{Attachment, Input, Origin};
+    use agent_core::{
+        capability::ImageInput,
+        classification::{Labels, SCREEN_IMAGE, SCREEN_TEXT},
+    };
+    // A distinct synthetic crop: the request must carry exactly these bytes.
+    let crop = || {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(b"SYNTHETIC-CROP-0123456789");
+        Attachment {
+            image: ImageInput::new(png).unwrap(),
+            size: (320, 120),
+            labels: Labels::from_source(SCREEN_IMAGE),
+        }
+    };
+    let input = |fixture: &Remote, image: bool, share: bool| {
+        let state = serde_json::to_value(
+            futures_executor::block_on(fixture.engine.glance_state()).unwrap(),
+        )
+        .unwrap();
+        serde_json::from_value::<Input>(json!({
+            "text": "Synthetic recognized text", "recipe": "explain",
+            "provider": fixture.provider, "revision": state["providers"][0]["revision"],
+            "share": share, "documents": [], "memory": false, "image": image, "crop": "c1"
+        }))
+        .unwrap()
+    };
+    let run = |fixture: &Remote, input: Input, attachment: Option<Attachment>| {
+        futures_executor::block_on(fixture.engine.run_glance(
+            input,
+            Origin::Screen,
+            attachment,
+            Default::default(),
+            Arc::new(Recorder::default()),
+        ))
+    };
+
+    // A provider without image input refuses before sending: no silent switch.
+    let text_only = remote(streaming(true), |_| {});
+    let refused = run(&text_only, input(&text_only, true, true), Some(crop()));
+    assert_eq!(
+        refused.err().unwrap().code,
+        ErrorCode::UnsupportedCapability
+    );
+    assert_eq!(text_only.server.accepted(), 0);
+    // OCR text is sent with its screen labels after confirmation.
+    let answer = run(&text_only, input(&text_only, false, true), None).unwrap();
+    let receipt = answer.receipt.as_ref().unwrap();
+    assert!(receipt.output_labels.contains(SCREEN_TEXT));
+    assert!(receipt.output_labels.contains(SCREEN_IMAGE));
+    assert_eq!(
+        serde_json::to_value(receipt).unwrap()["used"][0]["kind"],
+        "screen_text"
+    );
+    let body = text_only.request_bodies().pop().unwrap().to_string();
+    assert!(body.contains("Synthetic recognized text") && !body.contains("image_url"));
+
+    let vision = remote(streaming(true), |settings| settings.image_input = true);
+    // No confirmation, no request.
+    let unconfirmed = run(&vision, input(&vision, true, false), Some(crop()));
+    assert_eq!(unconfirmed.err().unwrap().code, ErrorCode::PolicyDenied);
+    // An image flag without a host-supplied crop is refused.
+    let missing = run(&vision, input(&vision, true, true), None);
+    assert_eq!(missing.err().unwrap().code, ErrorCode::InvalidConfig);
+    assert_eq!(vision.server.accepted(), 0);
+    let estimate = vision
+        .engine
+        .estimate_glance(&input(&vision, true, true), Origin::Screen, Some(&crop()))
+        .unwrap();
+    let estimate = serde_json::to_value(estimate).unwrap();
+    assert_eq!(estimate["imageTokens"], 85 + 170);
+    assert!(
+        estimate["classes"]
+            .to_string()
+            .contains("core.screen-image/1")
+    );
+    let answer = run(&vision, input(&vision, true, true), Some(crop())).unwrap();
+    assert_eq!(answer.text, "Hi there");
+    let receipt = serde_json::to_value(answer.receipt.as_ref().unwrap()).unwrap();
+    assert!(receipt["used"].to_string().contains("screen_image"));
+    assert_eq!(receipt["external"][0]["transmission"], "sent");
+    let body = vision.request_bodies().pop().unwrap();
+    let parts = body["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    let images: Vec<_> = parts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|part| part["type"] == "image_url")
+        .collect();
+    assert_eq!(images.len(), 1);
+    let expected = {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(b"SYNTHETIC-CROP-0123456789");
+        crate::providers::openai::base64(&png)
+    };
+    assert_eq!(
+        images[0]["image_url"]["url"],
+        format!("data:image/png;base64,{expected}")
+    );
+    // Nothing from the panel request reached the database.
+    assert!(!vision.database_text().contains("Synthetic recognized text"));
+
+    // Local-only stops image and text requests before anything is sent.
+    vision
+        .engine
+        .set_intelligence_settings(agent_core::provider::IntelligenceSettings {
+            local_only: true,
+            active_provider: None,
+        })
+        .unwrap();
+    let before = vision.server.accepted();
+    let blocked = run(&vision, input(&vision, true, true), Some(crop()));
+    assert_eq!(blocked.err().unwrap().code, ErrorCode::PolicyDenied);
+    assert_eq!(vision.server.accepted(), before);
 }

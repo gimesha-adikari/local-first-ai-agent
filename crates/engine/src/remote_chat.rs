@@ -6,10 +6,13 @@
 use std::time::{Duration, Instant};
 
 use agent_core::{
+    capability::ImageInput,
     capability::{GENERATE, IMAGE, Usage},
     chat::{ChatHistory, GenerationState, Message, MessageRole, PromptMessage, fit_context},
     chat_context::{ChatContext, ContextUsage},
-    classification::{CLIPBOARD_TEXT, Classified, DataClasses, Labels, USER_INPUT},
+    classification::{
+        CLIPBOARD_TEXT, Classified, DataClasses, Labels, SCREEN_IMAGE, SCREEN_TEXT, USER_INPUT,
+    },
     inference::{
         Cancellation, ErrorCode, FinishReason, GenerationStats, InferenceError, OutputBudget,
         Result,
@@ -41,6 +44,9 @@ pub(super) struct RemoteTurn {
     pub sources: Vec<KnowledgeHit>,
     pub max_tokens: Option<u32>,
     pub cancellation: Cancellation,
+    /// Images for providers that accept image input, already authorized for
+    /// this request. Each is also a required candidate source.
+    pub images: Vec<(ImageInput, (u32, u32))>,
 }
 
 fn denied(message: impl Into<String>) -> InferenceError {
@@ -144,6 +150,7 @@ impl ChatRuntime {
             sources,
             max_tokens,
             cancellation,
+            images: attached,
         } = remote;
         let (saved, destination) = target;
         let settings = saved.settings.clone();
@@ -153,7 +160,7 @@ impl ChatRuntime {
         let ephemeral = self.glance_receipt.is_some();
         let mut allowed = settings.sharing.allowed_classes();
         if ephemeral {
-            allowed.push(CLIPBOARD_TEXT);
+            allowed.extend([CLIPBOARD_TEXT, SCREEN_TEXT, SCREEN_IMAGE]);
         }
         let allowed = DataClasses::new(allowed);
 
@@ -241,7 +248,7 @@ impl ChatRuntime {
                 content,
             })
             .collect();
-        let images: Vec<_> = Vec::new();
+        let images: Vec<&ImageInput> = attached.iter().map(|(image, _)| image).collect();
         if !images.is_empty() && !offer.accepts(IMAGE) {
             return self.fail_unsent(
                 session,
@@ -275,7 +282,12 @@ impl ChatRuntime {
         );
 
         // Reserve the most this request could use before admitting it.
-        let input_estimate = fitted.input_estimate;
+        let input_estimate = fitted.input_estimate.saturating_add(
+            attached
+                .iter()
+                .map(|(_, (width, height))| usage::estimate_image(*width, *height))
+                .sum::<u64>(),
+        );
         let reserved_tokens = input_estimate.saturating_add(output.into());
         let reserved_cost =
             usage::estimate_cost(settings.pricing.as_ref(), input_estimate, output.into());
