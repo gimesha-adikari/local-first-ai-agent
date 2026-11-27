@@ -821,7 +821,8 @@ fn schema_eleven_context_and_memory_reload_with_conservative_labels() {
     store
         .connection
         .execute_batch(
-            "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+            "DROP TABLE model_downloads;
+         ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
          DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts;
          ALTER TABLE messages DROP COLUMN classification;
@@ -878,7 +879,8 @@ fn schema_fourteen_memories_upgrade_without_provenance_and_panel_memories_keep_t
     store
         .connection
         .execute_batch(
-            "ALTER TABLE personal_memories DROP COLUMN provenance;
+            "DROP TABLE model_downloads;
+             ALTER TABLE personal_memories DROP COLUMN provenance;
              ALTER TABLE personal_memories DROP COLUMN classification;
              PRAGMA user_version=14;",
         )

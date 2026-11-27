@@ -10,7 +10,9 @@ mod database_keyring;
 mod database_startup;
 #[cfg(all(test, target_os = "linux"))]
 mod desktop_acceptance;
+mod downloads;
 mod knowledge;
+mod model_files;
 mod panel;
 mod platform;
 mod portal_bus;
@@ -71,7 +73,7 @@ fn run_desktop_instance(
             };
             let worker = Arc::new(spawn_worker()?);
             let engine = Arc::new(Engine::with_network(
-                Arc::new(platform::TauriPlatform),
+                Arc::new(platform::TauriPlatform(app.handle().clone())),
                 worker,
                 database,
                 path,
@@ -128,6 +130,12 @@ fn run_desktop_instance(
             stop_generation,
             choose_model,
             list_models,
+            downloads::model_catalog,
+            downloads::start_model_download,
+            downloads::cancel_model_download,
+            downloads::finish_model_installation,
+            downloads::remove_model_download,
+            downloads::use_downloaded_embedding,
             load_model,
             save_model_settings,
             reset_model_settings,

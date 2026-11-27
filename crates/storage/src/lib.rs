@@ -22,6 +22,7 @@ mod conversation;
 mod intelligence;
 pub mod knowledge;
 pub mod memory;
+pub mod model_downloads;
 pub mod models;
 pub mod profile;
 pub mod providers;
@@ -31,7 +32,7 @@ pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const MODEL_COLUMNS: &str = "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic', artifact_key";
 const NEW_TITLE: &str = "New conversation";
 
@@ -167,12 +168,18 @@ impl SqliteStore {
             transaction
                 .execute_batch(include_str!("../migrations/015_glance_memory.sql"))
                 .map_err(sql_error)?;
+        }
+        if version < 16 {
+            transaction
+                .execute_batch(include_str!("../migrations/016_model_downloads.sql"))
+                .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(sql_error)?;
         }
         agent::recover_interrupted(&transaction, None).map_err(|_| storage_error())?;
         providers::settle_interrupted(&transaction)?;
+        model_downloads::settle_interrupted(&transaction)?;
         chat_context::recover_citations(&transaction)?;
         transaction
             .execute(
@@ -1004,6 +1011,8 @@ fn touch_conversation(connection: &Connection, id: ConversationId, now: i64) -> 
 
 fn model_reference(row: &Row<'_>) -> rusqlite::Result<ModelReference> {
     Ok(ModelReference {
+        available: true,
+        managed: false,
         id: row.get(0)?,
         file_name: row.get(1)?,
         settings: json_column(row, 2)?,

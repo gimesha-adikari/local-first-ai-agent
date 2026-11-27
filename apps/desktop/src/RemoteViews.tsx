@@ -35,7 +35,7 @@ export function Onboarding({ onLocal, onProviders }: { onLocal: () => void; onPr
         <li>
           <button type="button" className="onboarding-option" onClick={onLocal}>
             <CpuIcon size={18} />
-            <span><strong>Local model</strong><small>Import a GGUF file from this computer. Private and offline. Curated files are verified by checksum.</small></span>
+            <span><strong>Local model</strong><small>Discover a verified download or import a GGUF file. Local inference runs offline.</small></span>
           </button>
         </li>
         <li>

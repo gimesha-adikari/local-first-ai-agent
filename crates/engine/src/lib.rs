@@ -32,6 +32,7 @@ use storage::SqliteStore;
 pub mod chat;
 mod chat_session;
 pub mod credentials;
+pub mod downloads;
 #[cfg(test)]
 mod fixture;
 pub mod knowledge;
@@ -63,6 +64,12 @@ pub trait Platform: Send + Sync + 'static {
     /// Memory currently available for a model, in bytes, if known. It sizes
     /// recommended context lengths.
     fn available_memory(&self) -> Option<u64>;
+    /// Notify the host of a library change, including background installation.
+    fn model_library_changed(&self) {}
+    /// Open the host's private, non-following artifact directory.
+    fn model_files(&self, _path: &Path) -> std::io::Result<Box<dyn downloads::ModelFiles>> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
 }
 
 /// Lock the conversation database, reporting a poisoned lock as a storage
@@ -114,6 +121,7 @@ pub struct Engine {
     imports: KnowledgeImports,
     boundary: Arc<NetworkBoundary>,
     credentials: Arc<dyn CredentialSource>,
+    downloads: downloads::Downloads,
 }
 
 #[derive(Serialize)]
@@ -181,6 +189,7 @@ impl Engine {
             imports: KnowledgeImports::default(),
             boundary,
             credentials,
+            downloads: downloads::Downloads::default(),
         };
         engine.restore_providers().map_err(|_| {
             agent_core::agent::AgentError::new(
@@ -241,11 +250,12 @@ impl Engine {
     }
 
     pub fn bootstrap(&self) -> Result<Bootstrap> {
+        let models = self.list_models()?;
         let db = database(&self.database)?;
         Ok(Bootstrap {
             preferences: db.preferences()?,
             database_path: self.database_path.to_string_lossy().into_owned(),
-            models: db.recent_models()?,
+            models,
             active_model_id: self.active_model(),
             inference: self.worker.status()?,
             intelligence: providers::effective_settings(&db, &self.policy)?,

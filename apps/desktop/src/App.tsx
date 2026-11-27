@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { defaultTaskTimeoutSeconds, validTimeout } from "./agent";
 import { LegacyRecord } from "./AgentView";
@@ -786,10 +787,15 @@ export default function App() {
   }
 
   /** Refresh the library from the host: deduplicated rows with their saved settings and modes. */
-  async function refreshModels() {
+  const refreshModels = useCallback(async () => {
     const models = await invoke<ModelReference[]>("list_models").catch(() => null);
     if (models) setSnapshot((current) => current && { ...current, models });
-  }
+  }, []);
+
+  useEffect(() => {
+    const subscription = listen("model-library-changed", () => void refreshModels());
+    return () => { void subscription.then((unlisten) => unlisten()).catch(() => undefined); };
+  }, [refreshModels]);
 
   /**
    * Return a model to automatic settings. With `reload`, the loaded model is
@@ -1051,10 +1057,10 @@ export default function App() {
       ) : bundled === "corrupted" ? (
         <Callout tone="error" role="alert" title="The built-in assistant couldn't be verified"
           actions={<button type="button" className="primary-button small" onClick={() => openModal("models")}>
-            {snapshot.models.length ? "Choose a model" : "Import a model"}
+            {snapshot.models.length ? "Choose a model" : "Discover models"}
           </button>}>
           Its model file is damaged or was changed, so it wasn't loaded. Reinstall the app to restore it
-          {snapshot.models.length ? ", or choose one of your models." : ", or import a GGUF model from this computer."}
+          {snapshot.models.length ? ", or choose one of your models." : ", or discover a model to use on this computer."}
         </Callout>
       ) : snapshot.models.length ? (
         <Callout tone="accent" title="Choose a model to begin"
@@ -1254,7 +1260,7 @@ export default function App() {
                 || conversation?.turns.at(-1)?.assistants.at(-1)?.message.state === "streaming")}
             stopping={agent.running ? agent.cancelling : stopping}
             enterToSend={snapshot?.preferences.enterToSend ?? true}
-            models={snapshot?.models ?? []} activeModelId={modelReady || phase === "generating" ? snapshot?.activeModelId ?? null : null}
+            models={(snapshot?.models ?? []).filter((model) => model.available !== false)} activeModelId={modelReady || phase === "generating" ? snapshot?.activeModelId ?? null : null}
             modelBusy={modelAction === "load" || modelAction === "switch" ? "Loading…" : modelAction === "unload" ? "Unloading…" : null}
             modelLocked={chatBusy || agentBusy}
             onSelectModel={selectModelFromComposer} onManageModels={() => openModal("models")}

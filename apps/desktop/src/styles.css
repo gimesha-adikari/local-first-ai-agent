@@ -743,11 +743,6 @@ button:disabled { cursor: default; }
 .library-text { display: grid; flex: 1; min-width: 0; }
 .library-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .library-text small { font-size: 12px; color: var(--text-tertiary); }
-.model-guidance { margin-top: auto; display: grid; gap: 8px; padding: 12px; border-radius: var(--radius-md); background: var(--surface-sunken); }
-.model-guidance h4 { margin: 0; font-size: 12.5px; font-weight: 600; }
-.model-guidance ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 12.5px; }
-.model-guidance li { display: grid; }
-.model-guidance li span { color: var(--text-secondary); }
 .models-detail { display: grid; gap: 14px; align-content: start; min-width: 0; }
 .detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .detail-heading h3 { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
@@ -1119,7 +1114,6 @@ button.citation-chip:hover { background: var(--accent); color: var(--on-accent);
   .settings-savebar { padding: 10px 16px; }
   .setting-row { flex-direction: column; gap: 8px; }
   /* Keep the selected model's details close to the library on narrow screens. */
-  .settings-panel .model-guidance { display: none; }
 }
 .knowledge-label { font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
 
@@ -1165,3 +1159,32 @@ button.citation-chip:hover { background: var(--accent); color: var(--on-accent);
 .onboarding-option strong { font-weight: 500; }
 .onboarding-option small { color: var(--text-secondary); font-size: 12.5px; }
 .settings-section h4 > svg { vertical-align: -2px; margin-right: 4px; }
+
+/* Model discovery and downloads */
+.model-manager { display: grid; gap: 16px; min-width: 0; }
+.model-manager-toolbar { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 10px; }
+.model-import > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--accent); padding: 7px 0; font-size: 13px; }
+.model-import > summary::-webkit-details-marker { display: none; }
+.model-import-actions, .catalog-row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.model-import-actions { margin-top: 4px; }
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 226px), 1fr)); gap: 12px; align-items: start; }
+.catalog-card { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.catalog-purpose { display: flex; align-items: center; gap: 8px; padding: 11px 14px; background: var(--accent-soft); color: var(--accent-strong); font-size: 12px; font-weight: 650; }
+.catalog-card-main { display: grid; gap: 8px; padding: 14px; }
+.catalog-card h4 { margin: 0; font-family: var(--font-serif, Georgia, serif); font-size: 19px; font-weight: 600; overflow-wrap: anywhere; }
+.catalog-card p, .catalog-row p { margin: 0; }
+.catalog-card-main > p:not(.hint) { font-size: 13px; }
+.catalog-meta { font-weight: 600; }
+.catalog-technical { margin: 0 14px 12px; font-size: 12px; }
+.catalog-technical summary { cursor: pointer; color: var(--accent); }
+.catalog-technical dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 8px; margin: 8px 0 0; }
+.catalog-technical dt { font-weight: 600; }
+.catalog-technical dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
+.catalog-card-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); }
+.catalog-rows { display: grid; gap: 10px; padding: 0; margin: 0; list-style: none; }
+.catalog-row { display: grid; gap: 9px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.catalog-row-title { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.catalog-row-title > span { color: var(--accent); font-weight: 600; }
+.catalog-row progress { width: 100%; height: 7px; border: 0; border-radius: 4px; accent-color: var(--accent); }
+.catalog-row progress::-webkit-progress-bar { background: var(--surface-sunken); border-radius: 4px; }
+.catalog-row progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }

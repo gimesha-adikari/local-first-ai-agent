@@ -12,8 +12,9 @@ import {
 } from "./icons";
 import { errorMessage } from "./inference";
 import { embeddingCopy } from "./knowledge";
-import { builtInModelName, capabilityGuidance, modelLabel, referenceProfile } from "./models";
+import { builtInModelName, capabilityGuidance, modelLabel, modelOrigin, referenceProfile } from "./models";
 import { Callout, Dialog, Segmented, Switch } from "./ui";
+import { ModelManager } from "./ModelManager";
 import { ProvidersPanel } from "./ProvidersPanel";
 import type { IntelligenceSettings, ProviderView } from "./providers";
 import type { KnowledgeController } from "./useKnowledge";
@@ -23,7 +24,7 @@ export type SettingsCategory = "general" | "chat" | "models" | "providers" | "kn
 const categories: { key: SettingsCategory; label: string; description: string; icon: ReactNode }[] = [
   { key: "general", label: "General", description: "Appearance, typing and the desktop shortcut.", icon: <GearIcon size={15} /> },
   { key: "chat", label: "Chat & Agent", description: "The loaded model's abilities, replies and file access.", icon: <ChatIcon size={15} /> },
-  { key: "models", label: "Models", description: "Your local models and their configuration. Everything runs on this computer's processor.", icon: <CubeIcon size={15} /> },
+  { key: "models", label: "Models", description: "Find local models, manage downloads and choose what runs on this computer.", icon: <CubeIcon size={15} /> },
   { key: "providers", label: "Providers", description: "Optional cloud and self-hosted intelligence, with what may be shared and monthly limits.", icon: <CloudIcon size={15} /> },
   { key: "knowledge", label: "Knowledge & Memory", description: "Semantic search, document context and saved memories.", icon: <BookIcon size={15} /> },
   { key: "privacy", label: "Privacy & Storage", description: "What is stored on this computer, and where.", icon: <ShieldIcon size={15} /> },
@@ -110,12 +111,19 @@ export function SettingsDialog({
           {category === "general" && <GeneralPanel preferences={preferences} disabled={saving} onChange={setPreferences} />}
           {category === "chat" && <ChatPanel snapshot={snapshot} onManageAccess={onManageAccess} onModels={() => onCategory("models")} />}
           {category === "models" && (
+            <ModelManager initialInstalled={snapshot.models.some((model) => model.available !== false)}
+              localOnly={snapshot.intelligence.localOnly}
+              operationsBusy={models.operationLocked || modelAction !== null || knowledge.holdsLease}
+              onSelectModel={models.onSelect} onImportChat={models.onImport}
+              onImportEmbedding={knowledge.chooseModel} onUnloadEmbedding={knowledge.unloadModel}
+              onEmbeddingChanged={knowledge.refreshEmbedding} embeddingNotice={knowledge.notice}>
             <ModelsPanel {...models} drafts={modelDrafts}
               onDraft={(id, draft) => setModelDrafts((drafts) => {
                 const next = { ...drafts };
                 if (draft) next[id] = draft; else delete next[id];
                 return next;
               })} />
+            </ModelManager>
           )}
           {category === "providers" && (
             <ProvidersPanel providers={providers.list} intelligence={providers.intelligence} busy={providers.busy}
@@ -240,7 +248,7 @@ function ChatPanel({ snapshot, onManageAccess, onModels }: { snapshot: Bootstrap
           <div>
             <strong>{info ? modelLabel(info.fileName) : "No model loaded"}</strong>
             <p className="hint">
-              {info && reference ? `${referenceProfile(reference)?.role ?? (reference.bundled ? "Built-in" : "Imported")} · ${
+              {info && reference ? `${referenceProfile(reference)?.role ?? modelOrigin(reference)} · ${
                 reference.automaticSettings ? "automatic" : "custom"} settings`
                 : "Load a model in Models to chat."}
             </p>
@@ -384,8 +392,8 @@ function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
         <h4>On this computer</h4>
         <ul className="privacy-list">
           <li>{snapshot.intelligence.localOnly
-            ? "Local-only mode is on: the app makes no outbound connections. Chat, Agent, Knowledge, Memory and the contextual panel, including screen capture and text recognition, run on this computer, and the app doesn't download models."
-            : "Local-only mode is off. Chat and the contextual panel send requests only to the provider you select, after showing what will be shared. Agent, Knowledge, Memory, screen capture and text recognition still run locally, and the app doesn't download models."}</li>
+            ? "Local-only mode is on: the app makes no outbound connections. Chat, Agent, Knowledge, Memory and the contextual panel, including screen capture and text recognition, run on this computer, and model downloads are blocked."
+            : "Local-only mode is off. Chat and the contextual panel send requests only to the provider you select, after showing what will be shared. Agent, Knowledge, Memory, screen capture and text recognition still run locally, and model downloads require your approval."}</li>
           <li>The contextual panel reads the clipboard or the screen only when you ask. Each screen capture asks your desktop for permission again, holds one frame in memory, and keeps only the region you confirm until the panel closes. Nothing from the panel is saved unless you choose Remember.</li>
           <li>Provider API keys are kept in your system keyring, never in the database or this window.</li>
           <li>Conversations, imported document text, semantic indexes and saved memories are encrypted on disk. Your system keyring unlocks the database.</li>

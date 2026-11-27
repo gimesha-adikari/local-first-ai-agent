@@ -9,18 +9,21 @@ deferred until v1.0.0. [v0.2.0 architecture](docs/architecture.md#local-knowledg
 
 ## Models
 
-| Model | How to get it | Chat | Thinking | Agent |
-| --- | --- | --- | --- | --- |
-| LFM2.5-1.2B-Instruct Q4_K_M | Included in the bundled Debian package | Yes | Disabled | Disabled |
-| Qwen3.5-4B | Optional local GGUF imported through **Models** | Yes | Yes | Yes |
-| BGE-small-en-v1.5 (F16 GGUF) | Optional local embedding model imported through **Models** for semantic Knowledge search | Not for Chat | No | No |
+| Model | Purpose | Download size |
+| --- | --- | --- |
+| LFM2.5-1.2B-Instruct Q4_K_M | Everyday Chat | 697 MiB |
+| Qwen3.5-4B UD-Q4_K_XL | Advanced Chat, Thinking and supported Agent tasks | 2.7 GiB |
+| BGE-small-en-v1.5 F16 | Semantic and hybrid Knowledge search in English | 64.2 MiB |
 
-LFM2.5 is the lightweight built-in assistant. The app verifies the
-bundled file by size and SHA-256 and loads it automatically in a fresh
-profile. Qwen3.5-4B takes more memory and CPU time. The verified build used
-the Unsloth `UD-Q4_K_XL` quantization. Use **Models → Import model…**,
-select an existing single-file GGUF, then load it. The app has no model
-download or automatic model switching. [Verified Qwen GGUF](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/blob/6727efff692673b7a2ebb4c6ba830ce4f5fb1309/Qwen3.5-4B-UD-Q4_K_XL.gguf)
+Open **Models → Discover** to see the exact file, license and estimated
+settings. Downloads require approval and are blocked in Local-only mode.
+Use **Downloads** to cancel, resume or discard a partial file. The app
+checks the full SHA-256 before making the model available in **Installed**.
+Load a Chat model or choose **Use for Knowledge** when you're ready to use it.
+
+**Models → Manual import** opens a native picker for an existing Chat GGUF
+or the supported BGE file. You can also configure a cloud or self-hosted
+provider and use Chat without any local models.
 
 ## Install on Linux
 

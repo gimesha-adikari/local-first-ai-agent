@@ -12,13 +12,13 @@ use std::{
 
 use agent_core::{
     capability::{
-        AGENT_DECISION, CapabilityId, CapabilityRegistry, DISCOVER, EMBED, GENERATE, IMPORT,
-        Locality, RETRIEVE, Retention,
+        AGENT_DECISION, CapabilityId, CapabilityRegistry, DISCOVER, DOWNLOAD_MODEL, EMBED,
+        GENERATE, IMPORT, Locality, RETRIEVE, Retention,
     },
     classification::{
         AGENT_CONTEXT, CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY,
-        MODEL_OUTPUT, PDF_EXCERPT, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT, Sensitivity,
-        TEXT_EXCERPT, USER_INPUT,
+        MODEL_ARTIFACT, MODEL_OUTPUT, PDF_EXCERPT, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT,
+        Sensitivity, TEXT_EXCERPT, USER_INPUT,
     },
     inference::Cancellation,
 };
@@ -214,9 +214,17 @@ impl Drop for PendingRestriction<'_> {
 impl Default for Policy {
     fn default() -> Self {
         Self::new(
-            CapabilityRegistry::new([GENERATE, AGENT_DECISION, EMBED, IMPORT, RETRIEVE, DISCOVER]),
+            CapabilityRegistry::new([
+                GENERATE,
+                AGENT_DECISION,
+                EMBED,
+                IMPORT,
+                RETRIEVE,
+                DISCOVER,
+                DOWNLOAD_MODEL,
+            ]),
             DataClasses::default(),
-            [],
+            crate::network::artifact::destinations(),
             true,
         )
     }
@@ -353,6 +361,30 @@ impl Policy {
             || (self.is_local_only() && operation.locality != Locality::OnDevice)
         {
             return Err(Denial::Locality);
+        }
+        let artifact_epoch = operation
+            .request
+            .as_ref()
+            .and_then(RequestBinding::artifact_epoch);
+        if operation.capability == DOWNLOAD_MODEL {
+            if artifact_epoch != Some(self.restriction_epoch())
+                || operation.labels != Labels::from_source(MODEL_ARTIFACT)
+                || operation.purpose != "model-download"
+                || !operation.destination.as_ref().is_some_and(|target| {
+                    target.id().starts_with("artifact/")
+                        && target.credential().is_none()
+                        && target.locality() == Locality::ThirdParty
+                })
+            {
+                return Err(Denial::Scope);
+            }
+        } else if artifact_epoch.is_some()
+            || operation
+                .destination
+                .as_ref()
+                .is_some_and(|target| target.id().starts_with("artifact/"))
+        {
+            return Err(Denial::Scope);
         }
         match (
             &operation.destination,

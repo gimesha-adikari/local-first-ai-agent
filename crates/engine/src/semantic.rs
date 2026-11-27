@@ -241,7 +241,7 @@ impl IndexJob {
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingModelStatus {
     supported: bool,
-    available: bool,
+    pub(crate) available: bool,
     name: &'static str,
     sha256: &'static str,
     preprocessing: u32,
@@ -288,6 +288,20 @@ impl Engine {
 
     /// Verify and load the selected embedding model, then remember it.
     pub async fn select_embedding_model(
+        &self,
+        lease: OperationGuard,
+        path: PathBuf,
+    ) -> AgentResult<EmbeddingModelStatus> {
+        self.check_manual_model_path(&path).map_err(|_| {
+            AgentError::new(
+                AgentErrorCode::EmbeddingIncompatible,
+                "Use Installed models to load files from the managed library.",
+            )
+        })?;
+        self.select_managed_embedding_model(lease, path).await
+    }
+
+    pub(crate) async fn select_managed_embedding_model(
         &self,
         lease: OperationGuard,
         path: PathBuf,

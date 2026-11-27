@@ -53,6 +53,10 @@ pub const PROVIDER_CONTROL: DataClass = DataClass {
     id: "core.provider-control/1",
     sensitivity: Sensitivity::Public,
 };
+pub const MODEL_ARTIFACT: DataClass = DataClass {
+    id: "core.model-artifact/1",
+    sensitivity: Sensitivity::Public,
+};
 pub const SECRET: DataClass = DataClass {
     id: "core.secret/1",
     sensitivity: Sensitivity::Secret,
@@ -86,6 +90,7 @@ impl Default for DataClasses {
             MODEL_OUTPUT,
             SYSTEM_TEXT,
             PROVIDER_CONTROL,
+            MODEL_ARTIFACT,
             SECRET,
         ])
     }

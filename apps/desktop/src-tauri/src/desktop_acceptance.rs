@@ -1063,3 +1063,36 @@ fn prepare_glance_profile(app: &tauri::AppHandle) {
     };
     tauri::async_runtime::block_on(desktop.engine.load_model(model.id, settings)).unwrap();
 }
+
+#[test]
+#[ignore = "launches the packaged model manager with a disposable encrypted profile under X11"]
+fn model_manager_desktop_fixture() {
+    use super::commands::Desktop;
+    use std::io::Write;
+
+    run_webview_fixture_with_worker(
+        isolated_profile(),
+        include_str!("model_manager_acceptance.js"),
+        "document.documentElement.dataset.modelManagerResult || ''",
+        |webview| {
+            let desktop = webview.state::<Desktop>();
+            let engine = &desktop.engine;
+            let artifact = engine::manifest::LFM25;
+            let mut root = engine.database_path().as_os_str().to_owned();
+            root.push(".models");
+            let files = super::model_files::PrivateModelFiles::open(&PathBuf::from(root)).unwrap();
+            files
+                .open(&format!("{}.partial.gguf", artifact.key), true, true)
+                .unwrap()
+                .write_all(&[0; 32])
+                .unwrap();
+            let mut db = engine.store().lock().unwrap();
+            db.begin_model_download(artifact.key, artifact.sha256)
+                .unwrap();
+            db.set_model_download_phase(artifact.key, "interrupted", None)
+                .unwrap();
+        },
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(25),
+    );
+}

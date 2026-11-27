@@ -374,6 +374,10 @@ pub struct ModelReference {
     /// Key of the curated manifest entry whose size and SHA-256 this file
     /// matched. `None` is an unverified user import.
     pub artifact: Option<String>,
+    /// Current on-disk availability as observed by the engine.
+    pub available: bool,
+    /// Stored in the managed artifact library.
+    pub managed: bool,
 }
 
 pub struct SavedModel {

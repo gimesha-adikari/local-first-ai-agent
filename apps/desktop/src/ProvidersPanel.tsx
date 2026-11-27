@@ -62,8 +62,8 @@ export function ProvidersPanel({ providers, intelligence, busy, onChanged }: {
         <h4>Connections</h4>
         <Switch label="Local-only mode" checked={intelligence.localOnly} disabled={restricting || (intelligence.localOnly && locked)}
           description={intelligence.localOnly
-            ? "No outbound connections. Chat and the contextual panel use your local model; screen capture and text recognition still work on this computer. Turning this on stops any provider request in progress."
-            : "Providers you configure can be reached, only through the app's network boundary."}
+            ? "No outbound connections. Chat and the contextual panel use your local model; screen capture and text recognition still work on this computer. Turning this on stops provider requests and model downloads in progress."
+            : "Configured providers can be reached. Model downloads need your approval."}
           onChange={(localOnly) => localOnly ? void restrictConnections() : void run("mode", () => saveIntelligence({ ...intelligence, localOnly }))} />
         {restrictionError && <Callout tone="error" role="alert" title="Local-only setting"
           actions={<button type="button" className="link-button" disabled={restricting}

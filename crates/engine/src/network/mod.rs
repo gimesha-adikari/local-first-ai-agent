@@ -6,6 +6,7 @@
 //! byte, and while the request and response are in flight.
 
 mod address;
+pub(crate) mod artifact;
 pub mod endpoint;
 mod http;
 mod transport;
@@ -161,9 +162,14 @@ pub struct RequestBinding {
     route: Route,
     body_sha256: [u8; 32],
     body_len: usize,
+    artifact: Option<artifact::Binding>,
 }
 
 impl RequestBinding {
+    pub(crate) fn artifact_epoch(&self) -> Option<u64> {
+        self.artifact.as_ref().map(|artifact| artifact.epoch)
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         self.route.is_valid() && self.body_len <= MAX_REQUEST_BODY
     }
@@ -187,6 +193,7 @@ pub struct Outbound {
     body: Vec<u8>,
     content_type: Option<&'static str>,
     provider_retention: Retention,
+    artifact_target: Option<artifact::Target>,
 }
 
 impl Outbound {
@@ -208,6 +215,7 @@ impl Outbound {
             route,
             body_sha256: sha256(&body),
             body_len: body.len(),
+            artifact: None,
         };
         Self {
             operation: Arc::new(Operation::new(
@@ -224,6 +232,7 @@ impl Outbound {
             content_type: (!body.is_empty()).then_some("application/json"),
             body,
             provider_retention,
+            artifact_target: None,
         }
     }
 
@@ -254,7 +263,10 @@ impl Outbound {
             destination: destination.id().to_owned(),
             origin: destination.endpoint().origin(),
             method: binding.method.as_str().to_owned(),
-            route: binding.route.as_str().to_owned(),
+            route: binding.artifact.as_ref().map_or_else(
+                || binding.route.as_str().to_owned(),
+                |artifact| format!("artifact/{}", artifact.key),
+            ),
             body_sha256: hex(&binding.body_sha256),
             body_bytes: binding.body_len as u64,
             credential: false,
@@ -476,6 +488,16 @@ impl NetworkBoundary {
         share: GrantId,
     ) -> Result<Streaming, Box<Failed>> {
         let mut record = request.record();
+        match (&request.artifact_target, &request.binding().artifact) {
+            (None, None) => {}
+            (Some(target), Some(binding)) if target.matches(binding) => {}
+            _ => {
+                return Err(Box::new(Failed {
+                    failure: Failure::Denied(Denial::Scope),
+                    record,
+                }));
+            }
+        }
         if let Err(denial) = self.policy.admit(request.operation(), process, share) {
             return Err(Box::new(Failed {
                 failure: Failure::from_denial(denial),
@@ -542,6 +564,7 @@ pub struct Streaming {
     ended: bool,
     pub status: u16,
     pub content_type: Option<String>,
+    artifact_head: Option<http::Head>,
     body: futures_channel::mpsc::Receiver<Result<Vec<u8>, Failure>>,
     done: Option<futures_channel::oneshot::Receiver<()>>,
     record: Arc<Mutex<EgressRecord>>,

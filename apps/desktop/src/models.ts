@@ -33,12 +33,16 @@ export function modelProfile(fileName: string): ModelProfile | null {
  * Profile of a listed model. Only the row registered from the verified app
  * resource is built in; an imported copy of the same file is labeled imported.
  */
-export function referenceProfile(reference: { fileName: string; bundled: boolean }): ModelProfile | null {
+export function referenceProfile(reference: { fileName: string; bundled: boolean; managed?: boolean }): ModelProfile | null {
   const profile = modelProfile(reference.fileName);
   if (!profile || profile.builtIn === reference.bundled) return profile;
   return profile.builtIn
-    ? { ...profile, builtIn: false, role: "Imported lightweight assistant" }
+    ? { ...profile, builtIn: false, role: reference.managed ? "Downloaded lightweight assistant" : "Imported lightweight assistant" }
     : { ...profile, builtIn: true };
+}
+
+export function modelOrigin(model: { bundled: boolean; managed?: boolean }): string {
+  return model.managed ? "Downloaded" : model.bundled ? "Built-in" : "Imported";
 }
 
 /**
@@ -88,8 +92,9 @@ export function agentUnavailableText(info: Pick<ModelInfo, "fileName"> | null): 
   return info ? `${modelLabel(info.fileName)} supports Chat only. Agent needs ${advancedModelName}.` : "The loaded model can't run Agent tasks";
 }
 
-/** Display data for curated manifest entries (engine `manifest.rs`, version 1). */
+/** Display data for curated manifest entries (engine `manifest.rs`, version 2). */
 export const curatedArtifacts: Record<string, { name: string; license: string }> = {
   "lfm2.5-1.2b-instruct-q4_k_m": { name: "LFM2.5 1.2B Instruct (Q4_K_M)", license: "LFM Open License v1.0" },
+  "qwen3.5-4b-ud-q4_k_xl": { name: "Qwen3.5 4B (UD-Q4_K_XL)", license: "Apache-2.0" },
   "bge-small-en-v1.5-f16": { name: "BGE small English v1.5 (F16)", license: "MIT" },
 };

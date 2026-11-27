@@ -32,6 +32,8 @@ pub const RETRIEVE: CapabilityId = CapabilityId::new("core.retrieve/1");
 /// Model discovery and connection tests against a configured provider.
 pub const DISCOVER: CapabilityId = CapabilityId::new("core.provider-discovery/1");
 
+pub const DOWNLOAD_MODEL: CapabilityId = CapabilityId::new("core.model-download/1");
+
 #[derive(Debug, Clone)]
 pub struct CapabilityRegistry(BTreeSet<CapabilityId>);
 

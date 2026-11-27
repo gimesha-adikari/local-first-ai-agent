@@ -53,6 +53,8 @@ export type ModelReference = {
   automaticSettings: boolean;
   /** Curated manifest entry whose size and SHA-256 the file matched; null for an unverified import. */
   artifact?: string | null;
+  managed?: boolean;
+  available?: boolean;
 };
 
 export type Bootstrap = {
