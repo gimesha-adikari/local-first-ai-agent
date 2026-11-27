@@ -10,7 +10,11 @@ mod filesystem;
 #[cfg(target_os = "linux")]
 pub mod knowledge;
 #[cfg(target_os = "linux")]
+pub mod ocr;
+#[cfg(target_os = "linux")]
 mod pdf;
+#[cfg(target_os = "linux")]
+mod sandbox;
 
 #[cfg(target_os = "linux")]
 pub use applications::{ApplicationCatalog, ApplicationTarget};
