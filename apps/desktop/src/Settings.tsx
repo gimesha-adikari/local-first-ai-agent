@@ -7,7 +7,7 @@ import {
   Advanced, Capabilities, ModelLicense, ModelsPanel, OutputLimitExplanation, type ModelAction,
 } from "./Dialogs";
 import {
-  BookIcon, ChatIcon, ChevronRightIcon, CloudIcon, CpuIcon, CubeIcon, GearIcon, InfoIcon, MemoryIcon, MonitorIcon, MoonIcon,
+  BookIcon, ChatIcon, ChevronRightIcon, CloudIcon, CpuIcon, CubeIcon, GearIcon, GlobeIcon, InfoIcon, MemoryIcon, MonitorIcon, MoonIcon,
   PowerIcon, ShieldIcon, Spinner, SunIcon,
 } from "./icons";
 import { errorMessage } from "./inference";
@@ -17,15 +17,18 @@ import { Callout, Dialog, Segmented, Switch } from "./ui";
 import { ModelManager } from "./ModelManager";
 import { ProvidersPanel } from "./ProvidersPanel";
 import type { IntelligenceSettings, ProviderView } from "./providers";
+import type { WebResearchView } from "./research";
+import { WebSearchPanel } from "./WebSearchPanel";
 import type { KnowledgeController } from "./useKnowledge";
 
-export type SettingsCategory = "general" | "chat" | "models" | "providers" | "knowledge" | "privacy" | "about";
+export type SettingsCategory = "general" | "chat" | "models" | "providers" | "web" | "knowledge" | "privacy" | "about";
 
 const categories: { key: SettingsCategory; label: string; description: string; icon: ReactNode }[] = [
   { key: "general", label: "General", description: "Appearance, typing and the desktop shortcut.", icon: <GearIcon size={15} /> },
   { key: "chat", label: "Chat & Agent", description: "The loaded model's abilities, replies and file access.", icon: <ChatIcon size={15} /> },
   { key: "models", label: "Models", description: "Find local models, manage downloads and choose what runs on this computer.", icon: <CubeIcon size={15} /> },
   { key: "providers", label: "Providers", description: "Optional cloud and self-hosted intelligence, with what may be shared and monthly limits.", icon: <CloudIcon size={15} /> },
+  { key: "web", label: "Web search", description: "Search providers for web research in Chat, and what is sent and saved.", icon: <GlobeIcon size={15} /> },
   { key: "knowledge", label: "Knowledge & Memory", description: "Semantic search, document context and saved memories.", icon: <BookIcon size={15} /> },
   { key: "privacy", label: "Privacy & Storage", description: "What is stored on this computer, and where.", icon: <ShieldIcon size={15} /> },
   { key: "about", label: "About & Licenses", description: "Version, model licenses and notices.", icon: <InfoIcon size={15} /> },
@@ -44,7 +47,7 @@ export type ModelsPanelProps = Omit<Parameters<typeof ModelsPanel>[0], "drafts" 
 
 export function SettingsDialog({
   snapshot, category, onCategory, onSavePreferences, onClose, models, modelAction, knowledge, knowledgeLock,
-  memoryEnabled, onMemoryEnabledChange, onOpenKnowledge, onOpenMemory, onManageAccess, providers,
+  memoryEnabled, onMemoryEnabledChange, onOpenKnowledge, onOpenMemory, onManageAccess, providers, webResearch,
 }: {
   snapshot: Bootstrap;
   category: SettingsCategory;
@@ -61,6 +64,7 @@ export function SettingsDialog({
   onOpenMemory: () => void;
   onManageAccess: () => void;
   providers: { list: ProviderView[]; intelligence: IntelligenceSettings; busy: boolean; onChanged: () => Promise<void> };
+  webResearch: { view: WebResearchView | null; busy: boolean; onChanged: (view: WebResearchView) => void };
 }) {
   // Drafts live here so switching categories never discards them.
   const [preferences, setPreferences] = useState(snapshot.preferences);
@@ -128,6 +132,9 @@ export function SettingsDialog({
           {category === "providers" && (
             <ProvidersPanel providers={providers.list} intelligence={providers.intelligence} busy={providers.busy}
               onChanged={providers.onChanged} />
+          )}
+          {category === "web" && (
+            <WebSearchPanel view={webResearch.view} busy={webResearch.busy} onChanged={webResearch.onChanged} />
           )}
           {category === "knowledge" && (
             <KnowledgePanel knowledge={knowledge} lockReason={knowledgeLock} memoryEnabled={memoryEnabled}

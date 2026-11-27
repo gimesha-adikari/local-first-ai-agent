@@ -6,6 +6,8 @@ import { ArrowDownIcon, BookIcon, ChevronRightIcon, RefreshIcon, Spinner, ThinkI
 import { contextUsageLabel, coverageLines, coverageSummary, isContextual, type KnowledgeCoverage } from "./knowledge";
 import MarkdownMessage, { CopyButton } from "./MarkdownMessage";
 import { SourceList, useSourceReferences } from "./Sources";
+import { researchUsageLabel, stageLabel, type ResearchStage } from "./research";
+import { WebSourceList, useResearchView } from "./WebSources";
 import { modelLabel } from "./models";
 import { Callout, IconButton } from "./ui";
 import type { UnifiedTurn } from "./unified";
@@ -42,6 +44,8 @@ export type KnowledgeContext = {
   documentName: (id: number) => string | null;
   /** Live coverage kept for this session when the attempt saved none (ordinary Chat routes). */
   liveCoverage: (messageId: number) => KnowledgeCoverage | null;
+  /** Progress of a running web research turn. */
+  researchStage?: (messageId: number) => ResearchStage | null;
 };
 
 function AssistantMessage({
@@ -73,17 +77,23 @@ function AssistantMessage({
   const usage = message.context?.fitted ?? legacyUsage ?? null;
   const coverage = message.context?.coverage ?? message.routeCoverage ?? knowledge.liveCoverage(message.id);
   const summary = coverageSummary(coverage);
-  const citations = useSourceReferences(message.id, !streaming && contextual, knowledge.revision);
+  const research = message.context?.research ?? null;
+  const citations = useSourceReferences(message.id, !streaming && contextual && !research, knowledge.revision);
+  const web = useResearchView(message.id, !streaming && !!research, knowledge.revision);
   const [focus, setFocus] = useState<{ id: string; at: number } | null>(null);
   const onSelect = useCallback((id: string) => setFocus({ id, at: Date.now() }), []);
   const citationProps = useMemo(() => {
-    const ids = new Set(citations.filter(({ cited }) => cited).map(({ citationId }) => citationId));
+    const ids = new Set(web
+      ? web.sources.filter(({ cited }) => cited).map(({ citationId }) => citationId)
+      : citations.filter(({ cited }) => cited).map(({ citationId }) => citationId));
     return ids.size ? { ids, onSelect } : undefined;
-  }, [citations, onSelect]);
+  }, [citations, web, onSelect]);
   const notes = coverageLines(coverage, streaming ? null : usage, (id) =>
     citations.find(({ documentId }) => documentId === id)?.documentName ?? knowledge.documentName(id),
   true);
-  const usageLabel = !streaming ? contextUsageLabel(usage) : null;
+  const usageLabel = streaming ? null : research
+    ? (research.synthesis !== "none" && usage ? researchUsageLabel(usage.sources) : null)
+    : contextUsageLabel(usage);
 
   return (
     <div className="assistant-turn" aria-label="Assistant">
@@ -96,6 +106,9 @@ function AssistantMessage({
       )}
       {reasoning !== null && <Reasoning text={reasoning} complete={reasoningComplete} streaming={streaming} />}
       {answer && <MarkdownMessage text={answer} citations={citationProps} />}
+      {!streaming && web && (
+        <WebSourceList messageId={message.id} view={web} modelName={modelName} focus={focus} onFocusHandled={() => setFocus(null)} />
+      )}
       {!streaming && citations.length > 0 && (
         <SourceList key={`${message.id}:${knowledge.revision}`} messageId={message.id} citations={citations} revision={knowledge.revision}
           focus={focus} onFocusHandled={() => setFocus(null)} />
@@ -107,7 +120,9 @@ function AssistantMessage({
         <ul className="coverage-notes">{notes.map((note) => <li key={note}>{note}</li>)}</ul>
       )}
       {streaming && !answer && reasoning === null && (
-        <p className="activity-live" role="status"><Spinner size={13} />Generating…</p>
+        <p className="activity-live" role="status"><Spinner size={13} />
+          {research ? stageLabel(knowledge.researchStage?.(message.id) ?? "searching", research.mode) : "Generating…"}
+        </p>
       )}
       {notice && !streaming && (
         <Callout tone={notice.tone} title={notice.title}

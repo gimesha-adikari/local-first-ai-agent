@@ -43,6 +43,11 @@ import {
   type IntelligenceSettings, type ProviderView, activeRemote, disclosure, listProviders, localityLabel, readinessCopy,
 } from "./providers";
 import { Onboarding, RemoteDisclosure } from "./RemoteViews";
+import { ResearchBar, SearchToggle } from "./ResearchControl";
+import {
+  emptyResearch, researchOptions, researchPlan,
+  type ResearchDraft, type ResearchStage, type WebResearchView,
+} from "./research";
 
 type Modal = "settings" | "access" | "rename" | "delete" | "instructions";
 type Operation = "opening" | "creating" | "saving" | "generating";
@@ -138,6 +143,10 @@ export default function App() {
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const providerRefresh = useRef(0);
+  const [research, setResearch] = useState<ResearchDraft>(emptyResearch);
+  const [webResearch, setWebResearch] = useState<WebResearchView | null>(null);
+  const [researchStages, setResearchStages] = useState<ReadonlyMap<number, ResearchStage>>(() => new Map());
+  const [researching, setResearching] = useState(false);
   const [providersBusy, setProvidersBusy] = useState(false);
   const viewRef = useRef<View>({ kind: "empty" });
   const agent = useAgent({ onTurnSettled: (identity) => settleTurn(identity) });
@@ -300,6 +309,14 @@ export default function App() {
   const remoteReady = remote?.readiness === "ready";
   /** Chat can answer with the loaded local model or the selected provider. */
   const chatReady = remote ? remoteReady : modelReady;
+  const plan = researchPlan({
+    draft: research, message: draft, view: webResearch,
+    remoteName: remote && remoteReady ? remote.settings.name : null, modelReady: !remote && modelReady,
+  });
+  const researchProblem = research.enabled && selection.enabled
+    ? "Web search can't be combined with selected documents yet. Turn off Knowledge or Search."
+    : research.enabled ? plan.problem : null;
+  const researchReady = research.enabled && plan.canSend && !researchProblem;
   const activeReference = snapshot?.models.find((model) => model.id === snapshot.activeModelId) ?? null;
   const supportsThinking = !remote && !!modelInfo?.supportsThinking;
   const supportsAgent = !!modelInfo?.supportsAgent;
@@ -480,7 +497,9 @@ export default function App() {
 
   async function generate(kind: "send" | "regenerate" | "continue", regenerate: RegenerateRequest = {}, messageId?: number) {
     if (!snapshot || knowledge.holdsLease) return;
-    if (kind === "continue" ? !modelReady : !chatReady) return;
+    const wantsResearch = kind !== "continue" && research.enabled;
+    if (wantsResearch && !researchReady) return;
+    if (kind === "continue" ? !modelReady : !(chatReady || wantsResearch)) return;
     const content = draft;
     if (kind === "send" && !content.trim()) return;
     if (kind === "regenerate" && !canRegenerateLatest(conversation)) return;
@@ -511,10 +530,15 @@ export default function App() {
       maxTokens: regenerate.maxTokens ?? (parsedOverride === null ? null : parsedOverride),
       knowledge: knowledgeRequest,
     });
+    const researchRequest = wantsResearch ? researchOptions(research, webResearch) : undefined;
+    if (researchRequest) options.research = researchRequest;
+    setResearching(!!researchRequest);
     const generation = ++request.current;
     follow.current = true;
     const count = knowledgeRequest?.documentIds.length ?? 0;
-    if (knowledgeRequest || (memoryEnabled && kind !== "continue")) {
+    if (researchRequest) {
+      setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: "Preparing web research…" });
+    } else if (knowledgeRequest || (memoryEnabled && kind !== "continue")) {
       setPendingChat({
         conversationId: id, prompt: kind === "send" ? content : null,
         label: knowledgeRequest ? `Searching ${count} selected ${count === 1 ? "document" : "documents"}…` : "Preparing…",
@@ -524,6 +548,10 @@ export default function App() {
     let routed: KnowledgeCoverage | null = null;
     const events = new Channel<ChatEvent>((event) => {
       if (request.current !== generation) return;
+      if (event.kind === "research") {
+        setResearchStages((current) => new Map(current).set(event.id, event.stage));
+        return;
+      }
       if (event.kind === "knowledge") {
         routed = event.coverage;
         const label = preparationLabel(event.coverage);
@@ -538,6 +566,8 @@ export default function App() {
         }
         // Keep edits made while the request was preparing.
         if (event.user && kind === "send") setDraft((current) => (current === content ? "" : current));
+        // Search applies to one message; the next one is ordinary Chat again.
+        if (researchRequest) setResearch((current) => ({ ...emptyResearch, mode: current.mode }));
         setOutputOverride("");
         setPendingChat(null);
       }
@@ -583,6 +613,7 @@ export default function App() {
     } finally {
       request.current++;
       setPendingChat(null);
+      setResearching(false);
       // A rejected request may still have saved the user message and a partial reply.
       try {
         const saved = await loadConversation(id);
@@ -906,6 +937,19 @@ export default function App() {
   }
 
   /** Models and Settings share one categorized dialog; "models" opens its Models category. */
+  async function refreshWebResearch() {
+    try {
+      setWebResearch(await invoke<WebResearchView>("web_research_settings"));
+    } catch {
+      setWebResearch(null);
+    }
+  }
+
+  useEffect(() => {
+    if (snapshot) void refreshWebResearch();
+    // Local-only changes what web research may do.
+  }, [!!snapshot, snapshot?.intelligence.localOnly]);
+
   async function refreshProviders() {
     const sequence = ++providerRefresh.current;
     setProvidersBusy(true);
@@ -995,21 +1039,26 @@ export default function App() {
       revision: knowledge.sourceRevision,
       documentName: (id) => names.get(id) ?? null,
       liveCoverage: (id) => liveCoverage.get(id) ?? null,
+      researchStage: (id) => researchStages.get(id) ?? null,
     };
-  }, [knowledge.sourceRevision, knowledge.documents, liveCoverage]);
+  }, [knowledge.sourceRevision, knowledge.documents, liveCoverage, researchStages]);
 
   const canSend = !busy && !!draft.trim() && (mode === "agent"
     ? agentAvailable && validTimeout(Number(taskTimeout))
-    : !!snapshot && chatReady && !Number.isNaN(parsedOverride) && !knowledgeBlocked);
+    : !!snapshot && !Number.isNaN(parsedOverride) && (research.enabled
+      ? researchReady
+      : chatReady && !knowledgeBlocked));
 
   const composerStatus = !snapshot ? (startupError ? "The app couldn't start." : "Starting…")
     : generating ? (stopping ? "Stopping…" : pendingChat ? pendingChat.label
-      : remote ? `Waiting for ${remote.settings.name}…` : "Generating locally…")
+      : researching ? "Web research in progress. Stop ends all searching and page reading."
+        : remote ? `Waiting for ${remote.settings.name}…` : "Generating locally…")
       : agent.running ? (activeHere
         ? (agent.activeApproval ? "Waiting for your approval. Approve, deny or cancel above." : "Agent is working. You can cancel at any time.")
         : `An Agent turn is running in “${shorten(activeTitle ?? "another conversation", 40)}”.`)
         : modelAction ? statusText
           : leaseText ? leaseText
+          : mode === "chat" && research.enabled ? "Web research uses the internet, even when the answer is written on this device"
           : mode === "chat" && remote ? (remoteReady ? disclosure(remote)
             : `${remote.settings.name} isn't ready: ${readinessCopy(remote).label}. Open Providers in Settings.`)
           : !modelReady ? (bundled === "checking" && !snapshot.models.length ? "Checking the built-in assistant…"
@@ -1021,7 +1070,9 @@ export default function App() {
   const inThread = view.kind === "conversation" && !!conversation?.turns.length;
   const placeholder = mode === "agent"
     ? (inThread ? "Ask the agent a follow-up…" : "Describe a task for the agent…")
-    : (inThread ? "Reply…" : "Ask anything…");
+    : research.enabled
+      ? (research.mode === "page" ? "What should be done with this page?" : "Ask a question to research on the web…")
+      : (inThread ? "Reply…" : "Ask anything…");
 
   const loadingReference = snapshot?.models.find((model) => model.id === selectedModelId) ?? null;
   const loadingBuiltIn = !!(autoLoad || loadingReference?.bundled);
@@ -1035,6 +1086,9 @@ export default function App() {
       <p>
         {mode === "agent"
           ? "The agent can calculate, describe this device, search and read files you select, and find or open applications after you approve."
+          : research.enabled ? (research.mode === "page"
+            ? "Web research reads the page you enter directly from its site over the internet. Nothing else from your conversations is sent."
+            : "Web research sends your search to the selected search service and reads public pages over the internet. Nothing else from your conversations is sent.")
           : remote ? `Chat sends your requests to ${remote.settings.name} (${localityLabel(remote).toLowerCase()}). Agent mode stays on this computer.`
             : snapshot && !snapshot.models.length ? "Chat needs a local model or a provider you connect."
             : "Chat runs entirely on this computer with your local model."}
@@ -1278,7 +1332,16 @@ export default function App() {
                 documents={knowledge.documents} loaded={knowledge.loaded} indexStates={knowledge.indexStates}
                 readiness={readiness} memoryEnabled={memoryEnabled} disabled={!!agent.activeApproval || !snapshot}
                 onOpenKnowledge={() => openDestination("knowledge")} onOpenMemory={() => openDestination("memory")} />
-            )} />
+            )}
+            researchControl={(
+              <SearchToggle draft={research} disabled={!!agent.activeApproval || !snapshot}
+                onChange={(next) => { setResearch(next); setChatNotice(null); }} />
+            )}
+            researchPanel={research.enabled ? (
+              <ResearchBar draft={research} onChange={setResearch} plan={{ ...plan, problem: researchProblem }} view={webResearch}
+                remoteName={remote && remoteReady ? remote.settings.name : null} message={draft} disabled={generating}
+                onOpenSettings={() => openModal("settings", "web")} />
+            ) : null} />
         </div>
         </>)}
       </main>
@@ -1309,7 +1372,8 @@ export default function App() {
           onOpenKnowledge={() => { setModal(null); openDestination("knowledge"); }}
           onOpenMemory={() => { setModal(null); openDestination("memory"); }}
           onManageAccess={() => openModal("access")}
-          providers={{ list: providers, intelligence: snapshot.intelligence, busy: providersBusy || chatBusy, onChanged: refreshProviders }} />
+          providers={{ list: providers, intelligence: snapshot.intelligence, busy: providersBusy || chatBusy, onChanged: refreshProviders }}
+          webResearch={{ view: webResearch, busy: chatBusy, onChanged: setWebResearch }} />
       )}
       {modal === "access" && (
         <AccessDialog scopes={agent.scopes} remaining={agent.scopeRemaining} action={agent.scopeAction}

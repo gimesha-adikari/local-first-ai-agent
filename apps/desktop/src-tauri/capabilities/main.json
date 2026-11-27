@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "Access saved conversations, the local inference worker, explicitly authorized local agent tools, the local knowledge library, and provider configuration and status. Credentials are entered natively and never pass through this window.",
+  "description": "Access saved conversations, the local inference worker, explicitly authorized local agent tools, the local knowledge library, provider configuration and status, and explicitly authorized web research. Credentials are entered natively and never pass through this window.",
   "windows": [
     "main"
   ],
@@ -86,6 +86,12 @@
     "allow-provider-delete-credential",
     "allow-intelligence-settings",
     "allow-set-intelligence-settings",
+    "allow-web-research-settings",
+    "allow-web-research-save",
+    "allow-web-research-enter-key",
+    "allow-web-research-delete-key",
+    "allow-chat-web-research",
+    "allow-web-research-open",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

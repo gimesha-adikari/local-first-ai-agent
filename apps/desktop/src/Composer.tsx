@@ -21,10 +21,13 @@ export default function Composer({
   savedMaxTokens, outputOverride, onOutputOverride, contextLength, onOpenModelSettings,
   timeout, onTimeoutChange,
   scopes, scopeRemaining, scopeAction, scopeError, onGrant, onRevoke, onManageAccess, grantDisabled,
-  lockMenus = false, placeholder, status, knowledgeControl = null,
+  lockMenus = false, placeholder, status, knowledgeControl = null, researchControl = null, researchPanel = null,
 }: {
   /** Chat-only knowledge selection control. */
   knowledgeControl?: ReactNode;
+  /** Chat-only web research toggle and its disclosure panel. */
+  researchControl?: ReactNode;
+  researchPanel?: ReactNode;
   /** While an approval is pending, close and disable menus so nothing covers its controls. */
   lockMenus?: boolean;
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -117,6 +120,7 @@ export default function Composer({
             ))}
           </ul>
         )}
+        {mode === "chat" && researchPanel}
         <label className="sr-only" htmlFor="composer-input">{mode === "agent" ? "Describe a task" : "Message"}</label>
         <textarea id="composer-input" ref={textarea} rows={1} maxLength={mode === "agent" ? 8192 : 65536}
           value={draft} disabled={inputDisabled} placeholder={placeholder} aria-describedby={statusId}
@@ -177,6 +181,8 @@ export default function Composer({
           </Menu>
 
           {mode === "chat" && knowledgeControl}
+
+          {mode === "chat" && researchControl}
 
           {mode === "chat" && thinkingSupported && (
             <button type="button" className="composer-pill" aria-pressed={thinking}

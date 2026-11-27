@@ -1096,3 +1096,16 @@ fn model_manager_desktop_fixture() {
         Duration::from_secs(25),
     );
 }
+
+#[test]
+#[ignore = "launches the packaged WebView with web research controls in a disposable encrypted profile without network access"]
+fn research_desktop_fixture() {
+    run_webview_fixture_with_worker(
+        isolated_profile(),
+        include_str!("research_acceptance.js"),
+        "document.documentElement.dataset.researchResult || ''",
+        |_| {},
+        || InferenceWorker::spawn(|| Fixture),
+        Duration::from_secs(25),
+    );
+}

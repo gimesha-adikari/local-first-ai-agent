@@ -106,7 +106,8 @@ export type Conversation = ConversationSummary & {
 export type ChatEvent =
   | { kind: "started"; user: Message | null; assistant: Message }
   | { kind: "knowledge"; coverage: KnowledgeCoverage }
-  | { kind: "delta"; id: number; text: string };
+  | { kind: "delta"; id: number; text: string }
+  | { kind: "research"; id: number; stage: import("./research").ResearchStage };
 
 function upsert(messages: Message[], message: Message): Message[] {
   const next = messages.filter((current) => current.id !== message.id);
@@ -115,7 +116,7 @@ function upsert(messages: Message[], message: Message): Message[] {
 }
 
 export function applyChatEvent(messages: Message[], event: ChatEvent): Message[] {
-  if (event.kind === "knowledge") return messages;
+  if (event.kind === "knowledge" || event.kind === "research") return messages;
   if (event.kind === "started") {
     const withUser = event.user ? upsert(messages, event.user) : messages;
     return upsert(withUser, event.assistant);
@@ -201,6 +202,8 @@ export type ChatOptions = {
   maxTokens?: number;
   /** Omitted or null for ordinary Chat. */
   knowledge?: { mode: RetrievalMode; documentIds: number[]; grounding?: "auto" | "documents" } | null;
+  /** One explicitly authorized web research request (Stage 04-C). */
+  research?: ReturnType<typeof import("./research").researchOptions>;
 };
 
 /** Sampling defaults of the backend (agent-core GenerationRequest). */

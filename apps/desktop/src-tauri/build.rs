@@ -93,6 +93,12 @@ fn main() {
         "provider_delete_credential",
         "intelligence_settings",
         "set_intelligence_settings",
+        "web_research_settings",
+        "web_research_save",
+        "web_research_enter_key",
+        "web_research_delete_key",
+        "chat_web_research",
+        "web_research_open",
     ]);
     let attributes = tauri_build::Attributes::new().app_manifest(app_manifest);
     tauri_build::try_build(attributes).expect("failed to configure the Tauri application");

@@ -113,6 +113,8 @@ export type AttemptContext = {
   coverage: KnowledgeCoverage | null;
   memoryEnabled: boolean | null;
   fitted: ContextUsage | null;
+  /** Web research metadata (Stage 04-C). */
+  research?: import("./research").ResearchRecord | null;
 };
 
 export type SourceCitation = {

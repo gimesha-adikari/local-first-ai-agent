@@ -17,6 +17,7 @@ mod panel;
 mod platform;
 mod portal_bus;
 mod providers;
+mod research;
 mod semantic;
 mod summon;
 
@@ -192,6 +193,12 @@ fn run_desktop_instance(
             providers::provider_delete_credential,
             providers::intelligence_settings,
             providers::set_intelligence_settings,
+            research::web_research_settings,
+            research::web_research_save,
+            research::web_research_enter_key,
+            research::web_research_delete_key,
+            research::chat_web_research,
+            research::web_research_open,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");

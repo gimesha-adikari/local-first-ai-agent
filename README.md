@@ -94,6 +94,17 @@ build declares these dependencies automatically.
 - **Memory** is off by default. Save notes explicitly under Settings →
   Knowledge & Memory. When enabled, up to three relevant notes are added to
   later answers as background, separate from document evidence.
+- **Web research** is off until you turn on Search for one message. It uses
+  your own Brave Search API key or a SearXNG instance you configure under
+  Settings → Web search, or reads one public `https://` page you enter. Only
+  your message, or the query you edit, goes to the search provider. Up to
+  three public pages are read directly, without cookies, sign-in, scripts or
+  images, and the answer cites the sources it was given. Searching and
+  reading always use the internet, even with a local model, so Local-only
+  mode blocks them. A cloud or self-hosted model receives page excerpts only
+  when you allow it for that message. Raw results and excerpts stay in
+  memory; cited links are saved only for direct pages or when you mark your
+  search plan as permitting storage.
 
 ## Known limitations
 
@@ -126,6 +137,10 @@ build declares these dependencies automatically.
   conversation removes its saved messages and linked task history.
   Content-free audit entries and external copies can remain. Earlier answers
   may keep quotations from deleted documents or memories.
+- Web research reads HTTPS pages on port 443 only, at most 2 MiB each, and
+  does not read PDFs, run JavaScript or pass sign-in or paywalls. Evidence
+  ranking is lexical. Live compatibility with Brave Search and SearXNG has
+  been checked only against recorded request and response shapes.
 - Downgrading to v0.1.0 requires the database backup taken before the
   upgrade. The v0.1.0 executable accepts only schema version 5 and below.
 

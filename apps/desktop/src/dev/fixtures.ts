@@ -6,7 +6,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 
 type Json = Record<string, unknown>;
-type Message = { id: number; position: number; role: string; state: string; content: string; createdAt: number; stats: Json | null };
+type Message = { id: number; position: number; role: string; state: string; content: string; createdAt: number; stats: Json | null; context?: Json | null };
 type NativeResult = { record: Json; observation: Json };
 type Turn = {
   id: string; kind: "chat" | "agent"; user: Message; assistants: { message: Message; modelName: string | null }[];
@@ -202,6 +202,53 @@ fn main() {
 }
 \`\`\``;
 
+// Synthetic web research: settings, transient source views and progress.
+let webSettings = { provider: "brave" as "brave" | "searxng" | null, braveSaveResults: false, searxngEndpoint: "", searxngSaveResults: false };
+let braveKey: "stored" | "missing" = "stored";
+const researchViews = new Map<number, unknown>();
+
+function webView() {
+  return {
+    settings: structuredClone(webSettings), braveKey,
+    searxngOrigin: webSettings.searxngEndpoint || null,
+    searxngNetwork: webSettings.searxngEndpoint ? "loopback" : null,
+    searxngError: null, localOnly: intelligence.localOnly,
+  };
+}
+
+function researchFixture(research: Json, question: string) {
+  const page = research.mode === "page";
+  const synthesis = research.resultsOnly ? "none" : "local";
+  const sources = page
+    ? [{ citationId: "S1", evidence: "page", supplied: synthesis !== "none", cited: synthesis !== "none", title: "Rainwater harvesting basics", url: String(research.url), host: new URL(String(research.url)).hostname, published: "2026-10-02", excerpt: "Collected rainwater can irrigate gardens during dry weeks. Tanks should be covered and cleaned yearly.", saved: true, openable: true }]
+    : [
+      { citationId: "S1", evidence: "page", supplied: synthesis !== "none", cited: synthesis !== "none", title: "Fernhill bridge opens to traffic", url: "https://news.example.org/fernhill-bridge?ref=search", host: "news.example.org", published: "2026-03-02", excerpt: "The Fernhill bridge opened to traffic in March 2026 after four years of construction.", saved: false, openable: true },
+      { citationId: "S2", evidence: "page", supplied: synthesis !== "none", cited: synthesis !== "none", title: "Engineering notes: Fernhill crossing", url: "https://blog.example.net/fernhill", host: "blog.example.net", published: null, excerpt: "The crossing spans 120 metres and carries two traffic lanes and a cycle path.", saved: false, openable: true },
+      { citationId: "S3", evidence: "snippet", supplied: synthesis !== "none", cited: false, title: "Members only: bridge report", url: "https://paywall.example.com/story", host: "paywall.example.com", published: null, excerpt: "The bridge opened in March 2026, members report.", saved: false, openable: true },
+    ];
+  const record = {
+    version: 1, mode: page ? "page" : "search", ...(page ? {} : { provider: webSettings.provider ?? "brave" }), synthesis,
+    discovered: page ? 0 : 5, retrieved: page ? 1 : 2, unavailable: page ? 0 : 1,
+    sources: sources.map((source) => ({ evidence: source.evidence, saved: source.saved })), transientResults: !page,
+  };
+  const view = {
+    record, sources,
+    discovered: page ? [] : [
+      { title: "Fernhill bridge timeline", url: "https://city.example.gov/projects/fernhill", host: "city.example.gov", snippet: "Project milestones from 2022 to 2026.", published: null, attempted: false },
+      { title: "Bridge photos", url: "https://photos.example.com/fernhill", host: "photos.example.com", snippet: "A gallery of the opening day.", published: null, attempted: false },
+    ],
+    limitations: page ? [] : ["paywall.example.com requires sign-in or blocks automated reading (access restricted)."],
+    query: page ? null : String(research.query ?? question), transient: true,
+  };
+  const text = synthesis === "none"
+    ? page ? "The webpage was read. You asked for results only. The sources are listed below."
+      : `Brave Search found 5 results. You asked for results only. The sources are listed below.`
+    : page
+      ? "The page explains that collected rainwater can irrigate gardens during dry weeks, and that tanks should be covered and cleaned every year [S1]."
+      : "The Fernhill bridge opened to traffic in **March 2026**, after four years of construction [S1]. It spans 120 metres with two lanes and a cycle path [S2].";
+  return { record, view, text, supplied: synthesis === "none" ? 0 : sources.length };
+}
+
 async function streamChat(args: Json, regenerate: boolean): Promise<Message> {
   const conversation = find(args.id);
   const options = (args.options ?? {}) as Json;
@@ -220,6 +267,31 @@ async function streamChat(args: Json, regenerate: boolean): Promise<Message> {
   }
   const assistant = msg("assistant", "", "streaming");
   turn.assistants.push({ message: assistant, modelName: activeModelId === 1 ? "Qwen3-0.6B-Q4_K_M.gguf" : MODEL });
+  const research = options.research as Json | undefined;
+  if (research) {
+    if (intelligence.localOnly) throw { code: "policy_denied", message: "Local-only mode is on. Web research needs internet access, even with a local model." };
+    const fixture = researchFixture(research, turn.user.content);
+    assistant.context = { coverage: null, memoryEnabled: null, fitted: null, research: fixture.record };
+    deliver(args.events, index++, { kind: "started", user, assistant: { ...assistant } });
+    for (const stage of research.mode === "page" ? ["reading", "ranking"] : ["searching", "reading", "ranking"]) {
+      deliver(args.events, index++, { kind: "research", id: assistant.id, stage });
+      await wait(700);
+    }
+    if (fixture.record.synthesis !== "none") deliver(args.events, index++, { kind: "research", id: assistant.id, stage: "answering" });
+    for (let offset = 0; offset < fixture.text.length; offset += 16) {
+      const chunk = fixture.text.slice(offset, offset + 16);
+      assistant.content += chunk;
+      deliver(args.events, index++, { kind: "delta", id: assistant.id, text: chunk });
+      await wait(16);
+    }
+    assistant.context = { ...(assistant.context as Json), fitted: { sources: fixture.supplied, memories: 0 } };
+    researchViews.set(assistant.id, fixture.view);
+    assistant.state = "complete";
+    assistant.stats = fixture.record.synthesis === "none" ? null : stats(80);
+    deliver(args.events, index++, { kind: "research", id: assistant.id, stage: "done" });
+    conversation.updatedAt = Date.now();
+    return assistant;
+  }
   deliver(args.events, index++, { kind: "started", user, assistant: { ...assistant } });
   const prompt = turn.user.content.toLowerCase();
   const body = /12,?193|calculator|that number/.test(prompt)
@@ -429,6 +501,8 @@ async function startTurn(conversationId: number, prompt: string, timeoutSeconds:
 
 export async function installFixtures(name: string) {
   scenario = name;
+  if (name === "research" || name === "researchnomodel") intelligence.localOnly = false;
+  if (name === "researchnomodel") { inference = { phase: "empty", model: null }; activeModelId = null; }
   if (name === "nomodel" || bundledScenarios.has(name)) { inference = { phase: "empty", model: null }; activeModelId = null; }
   if (bundledScenarios.has(name)) models.splice(0, models.length);
   if (name === "onboarding") { inference = { phase: "empty", model: null }; activeModelId = null; models.splice(0, models.length); }
@@ -491,6 +565,17 @@ export async function installFixtures(name: string) {
       case "provider_delete_credential":
         providers = providers.map((item) => item.id === Number(args.id) ? { ...item, credential: "missing" } : item);
         return "missing";
+      case "web_research_settings": return webView();
+      case "web_research_save": {
+        const next = args.settings as typeof webSettings;
+        if (next.searxngEndpoint && !/^https?:\/\//.test(next.searxngEndpoint)) throw { code: "invalid_config", message: "Enter a valid http or https URL." };
+        webSettings = { ...next, searxngEndpoint: next.searxngEndpoint.replace(/\/$/, "") };
+        return webView();
+      }
+      case "web_research_enter_key": braveKey = "stored"; return "stored";
+      case "web_research_delete_key": braveKey = "missing"; return null;
+      case "chat_web_research": return structuredClone(researchViews.get(Number(args.messageId)) ?? null);
+      case "web_research_open": return null;
       case "provider_test": return { status: 200, models: ["fixture-model", "other-model"], modelListed: true, elapsedMs: 182 };
       case "list_conversations": {
         const query = String(args.query ?? "").toLowerCase();

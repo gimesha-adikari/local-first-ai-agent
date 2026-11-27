@@ -129,7 +129,9 @@ export function applyChatEventToTurns(turns: UnifiedTurn[], event: ChatEvent, mo
     }
     return turns;
   }
+  if (event.kind === "research") return turns;
   if (typeof event.text !== "string" || !event.text) return turns;
+  const text = event.text;
   let changed = false;
   const next = turns.map((turn) => {
     const index = turn.assistants.findIndex((attempt) =>
@@ -138,7 +140,7 @@ export function applyChatEventToTurns(turns: UnifiedTurn[], event: ChatEvent, mo
     changed = true;
     const assistants = [...turn.assistants];
     const current = assistants[index];
-    assistants[index] = { ...current, message: { ...current.message, content: current.message.content + event.text } };
+    assistants[index] = { ...current, message: { ...current.message, content: current.message.content + text } };
     return { ...turn, assistants };
   });
   return changed ? next : turns;
