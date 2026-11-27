@@ -9,6 +9,7 @@
     "allow-configure-shortcut",
     "allow-glance-show",
     "allow-bootstrap",
+    "allow-database-recovery-key",
     "allow-list-conversations",
     "allow-get-conversation",
     "allow-create-conversation",

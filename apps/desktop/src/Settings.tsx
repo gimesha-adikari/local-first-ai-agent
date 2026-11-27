@@ -367,6 +367,17 @@ export function EmbeddingModelCard({ knowledge, lockReason }: { knowledge: Knowl
 }
 
 function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+
+  async function openRecovery() {
+    setRecoveryError(null);
+    try {
+      await invoke("database_recovery_key");
+    } catch (failure) {
+      setRecoveryError(errorMessage(failure));
+    }
+  }
+
   return (
     <div className="settings-stack">
       <section className="settings-section">
@@ -377,7 +388,7 @@ function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
             : "Local-only mode is off. Chat and the contextual panel send requests only to the provider you select, after showing what will be shared. Agent, Knowledge, Memory, screen capture and text recognition still run locally, and the app doesn't download models."}</li>
           <li>The contextual panel reads the clipboard or the screen only when you ask. Each screen capture asks your desktop for permission again, holds one frame in memory, and keeps only the region you confirm until the panel closes. Nothing from the panel is saved unless you choose Remember.</li>
           <li>Provider API keys are kept in your system keyring, never in the database or this window.</li>
-          <li>Conversations, imported document text, semantic indexes and saved memories are stored in an ordinary SQLite database. It isn't encrypted.</li>
+          <li>Conversations, imported document text, semantic indexes and saved memories are encrypted on disk. Your system keyring unlocks the database.</li>
           <li>The paths of models you choose, including the remembered semantic model, are stored locally and never shown to the interface or sent anywhere.</li>
           <li>The agent can read only files and folders you select. Access is read-only, expires automatically, and ends when the app closes.</li>
           <li>Saved answers can contain text or facts from files and documents you selected, even after a document is deleted.</li>
@@ -390,6 +401,23 @@ function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
           <span>Location</span>
           <code>{snapshot.databasePath}</code>
         </div>
+        <button type="button" className="secondary-button small" onClick={() => void openRecovery()}>
+          Show recovery key…
+        </button>
+        {recoveryError && <p className="error-text" role="alert">{recoveryError}</p>}
+        {snapshot.plaintextBackup && (
+          <>
+            <div className="data-location" role="group" aria-label="Unencrypted migration backup">
+              <span aria-hidden="true">Unencrypted migration backup</span>
+              <code>{snapshot.plaintextBackup}</code>
+            </div>
+            <p className="hint">
+              After you verify your records and save your recovery key, quit the app and remove this backup
+              from your file manager if you no longer need it. Removing this file cannot erase older copies
+              in system snapshots or backups, and does not guarantee erasure from an SSD.
+            </p>
+          </>
+        )}
       </section>
     </div>
   );

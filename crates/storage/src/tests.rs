@@ -31,8 +31,16 @@ impl TestDatabase {
         self.directory.join("chat.sqlite3")
     }
 
+    fn open_encrypted(&self) -> SqliteStore {
+        use crate::profile::{DatabaseKey, Profile};
+        Profile::claim(&self.path())
+            .unwrap()
+            .open(&DatabaseKey::from_bytes(&[83; 32]).unwrap())
+            .unwrap()
+    }
+
     fn open(&self) -> SqliteStore {
-        SqliteStore::open(&self.path()).unwrap()
+        SqliteStore::open_test_fixture(&self.path()).unwrap()
     }
 }
 
@@ -43,7 +51,7 @@ impl Drop for TestDatabase {
 }
 
 fn in_memory() -> SqliteStore {
-    SqliteStore::open(Path::new(":memory:")).unwrap()
+    SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap()
 }
 
 fn finish_complete(store: &mut SqliteStore, id: MessageId, response: &str) {
@@ -93,7 +101,9 @@ fn refuses_a_newer_schema_and_rolls_back_a_failed_migration() {
         .unwrap();
     drop(manual);
 
-    let error = SqliteStore::open(&database.path()).err().unwrap();
+    let error = SqliteStore::open_test_fixture(&database.path())
+        .err()
+        .unwrap();
     assert_eq!(error.code, ErrorCode::Storage);
     assert!(error.message.contains("unsupported schema version"));
     let manual = Connection::open(database.path()).unwrap();
@@ -104,7 +114,9 @@ fn refuses_a_newer_schema_and_rolls_back_a_failed_migration() {
     manual.pragma_update(None, "user_version", 0).unwrap();
     drop(manual);
 
-    let error = SqliteStore::open(&database.path()).err().unwrap();
+    let error = SqliteStore::open_test_fixture(&database.path())
+        .err()
+        .unwrap();
     assert_eq!(error.code, ErrorCode::Storage);
     let manual = Connection::open(database.path()).unwrap();
     let version: i64 = manual
@@ -340,7 +352,9 @@ fn prevents_second_instance_recovery_and_recovers_checkpoints_after_close() {
     active
         .checkpoint(pending.assistant.id, "Saved partial text")
         .unwrap();
-    let second_open = SqliteStore::open(&database.path()).err().unwrap();
+    let second_open = SqliteStore::open_test_fixture(&database.path())
+        .err()
+        .unwrap();
     assert_eq!(second_open.code, ErrorCode::Busy);
     assert_eq!(
         active
@@ -904,4 +918,16 @@ fn schema_fourteen_memories_upgrade_without_provenance_and_panel_memories_keep_t
     // Editing keeps the origin labels: an edit never downgrades sensitivity.
     assert!(edited.labels().contains(CLIPBOARD_TEXT));
     assert!(edited.labels().contains(MEMORY));
+}
+
+#[test]
+fn sqlite_build_includes_sqlcipher_community_and_fts5() {
+    let connection = Connection::open_in_memory().unwrap();
+    let version: String = connection
+        .pragma_query_value(None, "cipher_version", |row| row.get(0))
+        .expect("SQLCipher must be linked");
+    assert!(version.contains("community"), "{version}");
+    connection
+        .execute_batch("CREATE VIRTUAL TABLE search USING fts5(text);")
+        .unwrap();
 }

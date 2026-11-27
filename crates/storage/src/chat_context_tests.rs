@@ -293,7 +293,7 @@ fn memories_persist_and_retrieve_only_when_enabled_and_relevant() {
 }
 
 #[test]
-fn migrates_populated_schema_seven_without_changing_saved_state() {
+fn encrypts_populated_schema_seven_without_changing_saved_state() {
     let profile = TestDatabase::new();
     let mut db = profile.open();
     let conversation = db.create().unwrap().id;
@@ -334,7 +334,7 @@ fn migrates_populated_schema_seven_without_changing_saved_state() {
         )
         .unwrap();
     drop(db);
-    let db = profile.open();
+    let db = profile.open_encrypted();
     assert_eq!(
         db.connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -351,6 +351,16 @@ fn migrates_populated_schema_seven_without_changing_saved_state() {
             .indexed_documents,
         1
     );
+    let keyword = db
+        .retrieve_for_chat(
+            Some("legacy"),
+            &[doc],
+            RetrievalMode::Keyword,
+            BGE_KEY,
+            None,
+        )
+        .unwrap();
+    assert_eq!(keyword.sources[0].document_id, doc);
     assert!(!db.memory_enabled().unwrap());
     assert!(
         db.chat_source_references(turn.assistant.id)

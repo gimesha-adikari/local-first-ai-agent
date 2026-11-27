@@ -241,7 +241,7 @@ fn last_loaded_model_restores_unless_explicitly_unloaded() {
 
 #[test]
 fn a_row_whose_file_is_gone_moves_to_a_new_copy_and_keeps_settings() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let settings = ModelSettings::recommended(2048);
     let bundled = store
         .register_bundled_model(

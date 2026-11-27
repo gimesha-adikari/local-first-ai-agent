@@ -225,7 +225,7 @@ fn harness_with_platform(platform: Arc<dyn Platform>) -> Harness {
     let engine = Engine::new(
         platform,
         Arc::new(worker),
-        SqliteStore::open(Path::new(":memory:")).unwrap(),
+        SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap(),
         ":memory:".into(),
     )
     .unwrap();

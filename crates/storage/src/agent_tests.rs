@@ -30,7 +30,7 @@ impl Fixture {
         self.0.join("chat.sqlite3")
     }
     fn open(&self) -> SqliteStore {
-        SqliteStore::open(&self.path()).unwrap()
+        SqliteStore::open_test_fixture(&self.path()).unwrap()
     }
 }
 impl Drop for Fixture {
@@ -146,7 +146,7 @@ fn failed_v2_migration_keeps_v1_version_and_chat() {
     )
     .unwrap();
     drop(db);
-    assert!(SqliteStore::open(&fixture.path()).is_err());
+    assert!(SqliteStore::open_test_fixture(&fixture.path()).is_err());
     let db = Connection::open(fixture.path()).unwrap();
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -168,7 +168,7 @@ fn failed_v2_migration_keeps_v1_version_and_chat() {
 
 #[test]
 fn durable_intent_and_outcome_are_bound_and_finalized() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let mut task = started(&mut store);
     let id = task.id();
     let mut policy = PermissionEngine::new("journal_test").unwrap();
@@ -268,7 +268,7 @@ fn restart_marks_pending_intents_uncertain_without_replay() {
     transition(&mut store, &mut task, TaskState::Observing);
     transition(&mut store, &mut task, TaskState::Planning);
     let pending = intent(&mut store, &mut task, &mut policy);
-    assert!(SqliteStore::open(&fixture.path()).is_err());
+    assert!(SqliteStore::open_test_fixture(&fixture.path()).is_err());
     drop(store);
     drop(policy);
     let mut store = fixture.open();
@@ -294,7 +294,7 @@ fn restart_marks_pending_intents_uncertain_without_replay() {
 
 #[test]
 fn audit_batch_retry_is_idempotent_and_conflicts_fail() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let mut policy = PermissionEngine::new("audit_test").unwrap();
     policy
         .grant_scope(agent_core::agent::ScopeKind::File, Duration::from_secs(30))
@@ -351,7 +351,7 @@ fn audit_batch_retry_is_idempotent_and_conflicts_fail() {
 
 #[test]
 fn history_pagination_and_cross_mode_exclusion() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let conversation = store.create().unwrap();
     let first = store.allocate_agent_task().unwrap();
     assert!(store.allocate_agent_task().is_err());
@@ -381,7 +381,7 @@ fn history_pagination_and_cross_mode_exclusion() {
 
 #[test]
 fn rejects_skipped_and_cross_task_transitions() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let task = started(&mut store);
     let event = RuntimeEvent::Transition {
         transition: agent_core::agent::TaskTransition {
@@ -740,7 +740,7 @@ fn interruption_preserves_intent_then_deletion_removes_content_and_detaches_audi
 
 #[test]
 fn conversation_context_selects_only_the_latest_bounded_suffix() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let id = store.create().unwrap().id;
     for index in 0..15 {
         let turn = store
@@ -765,7 +765,7 @@ fn conversation_context_selects_only_the_latest_bounded_suffix() {
 
 #[test]
 fn linked_finalization_rolls_back_the_journal_when_answer_persistence_fails() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let id = store.create().unwrap().id;
     let link = store
         .begin_agent_turn(id, "Synthetic prompt", "model.gguf", 300_000)

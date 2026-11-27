@@ -23,6 +23,7 @@ mod intelligence;
 pub mod knowledge;
 pub mod memory;
 pub mod models;
+pub mod profile;
 pub mod providers;
 pub mod semantic;
 pub use continuation::ContinuationPlan;
@@ -38,11 +39,18 @@ const NEW_TITLE: &str = "New conversation";
 /// from marking another live instance's pending response as interrupted.
 pub struct SqliteStore {
     connection: Connection,
+    // Held until the SQLite connection has released its own lock.
+    _profile_lock: Option<std::sync::Arc<std::fs::File>>,
 }
 
 impl SqliteStore {
-    pub fn open(path: &Path) -> Result<Self> {
-        let mut connection = Connection::open(path).map_err(sql_error)?;
+    /// Opens an unencrypted synthetic fixture. Production profiles use `profile::Profile`.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn open_test_fixture(path: &Path) -> Result<Self> {
+        Self::initialize(Connection::open(path).map_err(sql_error)?)
+    }
+
+    fn initialize(mut connection: Connection) -> Result<Self> {
         connection
             .busy_timeout(Duration::from_millis(250))
             .map_err(sql_error)?;
@@ -51,6 +59,7 @@ impl SqliteStore {
                 "PRAGMA foreign_keys = ON;
                  PRAGMA trusted_schema = OFF;
                  PRAGMA secure_delete = ON;
+                 PRAGMA temp_store = MEMORY;
                  PRAGMA locking_mode = EXCLUSIVE;",
             )
             .map_err(sql_error)?;
@@ -179,7 +188,10 @@ impl SqliteStore {
             )
             .map_err(sql_error)?;
         transaction.commit().map_err(sql_error)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            _profile_lock: None,
+        })
     }
 }
 
@@ -1029,6 +1041,9 @@ fn sql_error(error: rusqlite::Error) -> InferenceError {
             ErrorCode::Busy,
             "The chat database is busy. Close any other app instance and try again.",
         );
+    }
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+        return InferenceError::new(ErrorCode::Storage, "The database disk is full.");
     }
     storage_error()
 }

@@ -46,7 +46,7 @@ fn query(query: &str, document_ids: Option<Vec<i64>>, limit: u32) -> KnowledgeSe
 }
 
 #[test]
-fn v5_migration_preserves_saved_domains_and_enables_fts5() {
+fn v5_plaintext_migration_preserves_saved_domains_and_enables_fts5() {
     let database = TestDatabase::new();
     let legacy = Connection::open(database.path()).unwrap();
     for migration in [
@@ -92,7 +92,7 @@ fn v5_migration_preserves_saved_domains_and_enables_fts5() {
         .unwrap();
     drop(legacy);
 
-    let store = database.open();
+    let store = database.open_encrypted();
     let (version, fts5): (String, i32) = store
         .connection
         .query_row(

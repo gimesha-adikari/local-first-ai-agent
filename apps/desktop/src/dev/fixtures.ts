@@ -466,11 +466,13 @@ export async function installFixtures(name: string) {
       case "bootstrap":
         return {
           preferences: { appearance: name === "light" ? "light" : "system", defaults: settings(768), enterToSend: true },
+          plaintextBackup: null,
           databasePath: "/home/user/.local/share/io.github.gimesha-adikari.localfirstaiagent/chat/conversations.sqlite3",
           models, activeModelId, inference,
           intelligence: structuredClone(intelligence),
         };
       case "provider_list": return structuredClone(providerViews());
+      case "database_recovery_key": return undefined;
       case "intelligence_settings": return structuredClone(intelligence);
       case "set_intelligence_settings":
         intelligence = { ...(args.settings as typeof intelligence) };

@@ -146,7 +146,7 @@ fn remote(handler: Handler, configure: impl FnOnce(&mut ProviderSettings)) -> Re
     let engine = Engine::with_network(
         Arc::new(Threads),
         Arc::new(worker),
-        SqliteStore::open(Path::new(":memory:")).unwrap(),
+        SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap(),
         ":memory:".into(),
         Arc::clone(&vault) as Arc<dyn CredentialSource>,
         BoundaryConfig {
@@ -709,7 +709,7 @@ fn local_only_is_durable_and_explicit_on_failed_write() {
         Engine::new(
             Arc::new(Threads),
             Arc::new(InferenceWorker::spawn(|| Scripted(Script::default())).unwrap()),
-            SqliteStore::open(&path).unwrap(),
+            SqliteStore::open_test_fixture(&path).unwrap(),
             path.clone(),
         )
         .unwrap()
@@ -768,7 +768,7 @@ fn database_failures_are_recoverable_across_provider_deletion() {
         Engine::with_network(
             Arc::new(Threads),
             Arc::new(InferenceWorker::spawn(|| Scripted(Script::default())).unwrap()),
-            SqliteStore::open(&path).unwrap(),
+            SqliteStore::open_test_fixture(&path).unwrap(),
             path.clone(),
             Arc::clone(&vault) as Arc<dyn CredentialSource>,
             BoundaryConfig::default(),

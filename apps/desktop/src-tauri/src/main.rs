@@ -6,6 +6,8 @@ mod capture;
 mod chat_context;
 mod commands;
 mod credentials;
+mod database_keyring;
+mod database_startup;
 #[cfg(all(test, target_os = "linux"))]
 mod desktop_acceptance;
 mod knowledge;
@@ -25,36 +27,6 @@ use inference::{InferenceWorker, LlamaProvider};
 use storage::SqliteStore;
 use tauri::Manager;
 
-fn prepare_database(path: &Path) -> std::io::Result<()> {
-    let directory = path.parent().expect("database directory");
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(directory)?;
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(path) {
-        Ok(_) => Ok(()),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::AlreadyExists
-                && path.symlink_metadata()?.is_file() =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
-
 fn main() {
     let instance = match summon::claim() {
         Ok(Some(instance)) => instance,
@@ -68,6 +40,7 @@ fn main() {
         tauri::Builder::default(),
         || InferenceWorker::spawn(LlamaProvider::default),
         Some(instance),
+        database_startup::open_native,
     );
 }
 
@@ -76,13 +49,14 @@ fn run_desktop(
     builder: tauri::Builder<tauri::Wry>,
     spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
 ) {
-    run_desktop_instance(builder, spawn_worker, None)
+    run_desktop_instance(builder, spawn_worker, None, database_startup::open_fixture)
 }
 
 fn run_desktop_instance(
     builder: tauri::Builder<tauri::Wry>,
     spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
     instance: Option<summon::Instance>,
+    open_database: fn(&Path) -> Option<(SqliteStore, database_startup::DatabaseAccess)>,
 ) {
     builder
         .register_uri_scheme_protocol("glance-crop", panel::crop_protocol)
@@ -91,8 +65,10 @@ fn run_desktop_instance(
                 .path()
                 .app_local_data_dir()?
                 .join("chat/conversations.sqlite3");
-            prepare_database(&path)?;
-            let database = SqliteStore::open(&path)?;
+            let Some((database, access)) = open_database(&path) else {
+                app.handle().exit(1);
+                return Ok(());
+            };
             let worker = Arc::new(spawn_worker()?);
             let engine = Arc::new(Engine::with_network(
                 Arc::new(platform::TauriPlatform),
@@ -107,6 +83,15 @@ fn run_desktop_instance(
             );
             app.manage(Desktop { engine, agent });
             app.manage(panel::Panel::default());
+            app.manage(access);
+            let main_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .expect("main window configuration");
+            tauri::WebviewWindowBuilder::from_config(app, main_config)?.build()?;
             panel::prewarm(app.handle());
             summon::install(app.handle(), instance);
             Ok(())
@@ -128,6 +113,7 @@ fn run_desktop_instance(
             panel::screen::glance_ocr,
             panel::screen::glance_estimate,
             bootstrap,
+            database_startup::database_recovery_key,
             list_conversations,
             get_conversation,
             create_conversation,

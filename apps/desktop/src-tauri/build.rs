@@ -16,6 +16,7 @@ fn main() {
         "glance_ocr",
         "glance_estimate",
         "bootstrap",
+        "database_recovery_key",
         "list_conversations",
         "get_conversation",
         "create_conversation",

@@ -28,7 +28,7 @@ fn settings() -> ProviderSettings {
 }
 
 fn store() -> SqliteStore {
-    SqliteStore::open(Path::new(":memory:")).unwrap()
+    SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap()
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn schema_twelve_profiles_upgrade_local_only_and_keep_their_models() {
     std::fs::create_dir(&directory).unwrap();
     let path = directory.join("chat.sqlite3");
     {
-        let mut db = SqliteStore::open(&path).unwrap();
+        let mut db = SqliteStore::open_test_fixture(&path).unwrap();
         let model = db
             .remember_model(
                 Path::new("/models/lfm.gguf"),
@@ -274,7 +274,7 @@ fn schema_twelve_profiles_upgrade_local_only_and_keep_their_models() {
             )
             .unwrap();
     }
-    let db = SqliteStore::open(&path).unwrap();
+    let db = SqliteStore::open_test_fixture(&path).unwrap();
     assert_eq!(
         db.intelligence_settings().unwrap(),
         IntelligenceSettings::default()

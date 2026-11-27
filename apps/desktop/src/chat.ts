@@ -58,6 +58,7 @@ export type ModelReference = {
 export type Bootstrap = {
   preferences: Preferences;
   databasePath: string;
+  plaintextBackup: string | null;
   models: ModelReference[];
   activeModelId: number | null;
   inference: Status;

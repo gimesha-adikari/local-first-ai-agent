@@ -13,12 +13,12 @@ use secret_service::{EncryptionType, Error, SecretService};
 use tauri::{AppHandle, Manager};
 use zeroize::Zeroizing;
 
-const APPLICATION: &str = "io.github.gimesha-adikari.localfirstaiagent";
+pub(crate) const APPLICATION: &str = "io.github.gimesha-adikari.localfirstaiagent";
 const KIND: &str = "provider-credential";
 /// Bound for each secure-storage operation that needs no user interaction.
-const TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(3);
 /// Bound for storing, which may wait for the keyring to accept a new item.
-const STORE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const STORE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn attributes(key: &CredentialKey) -> HashMap<&str, &str> {
     HashMap::from([
@@ -29,7 +29,7 @@ fn attributes(key: &CredentialKey) -> HashMap<&str, &str> {
     ])
 }
 
-fn map_error(error: Error) -> CredentialError {
+pub(crate) fn map_error(error: Error) -> CredentialError {
     match error {
         Error::Locked | Error::Prompt | Error::PromptDisconnected => CredentialError::Locked,
         Error::NoResult => CredentialError::Missing,
@@ -52,7 +52,7 @@ fn local_session_bus() -> bool {
     }
 }
 
-async fn connect() -> Result<SecretService<'static>, CredentialError> {
+pub(crate) async fn connect() -> Result<SecretService<'static>, CredentialError> {
     if !local_session_bus() {
         return Err(CredentialError::Unavailable);
     }
