@@ -80,6 +80,7 @@ impl Platform for QueuedChat {
 #[derive(Clone, Debug)]
 pub(crate) struct Seen {
     prompt: String,
+    system: String,
     history_turns: usize,
     evidence: Option<Vec<String>>,
     memories: Vec<String>,
@@ -122,6 +123,7 @@ impl InferenceProvider for Scripted {
     ) -> Result<GenerationStats> {
         self.0.0.lock().unwrap().push(Seen {
             prompt: request.prompt.clone(),
+            system: request.history.system.clone(),
             history_turns: request.history.turns.len(),
             evidence: request.context.as_ref().and_then(|c| c.evidence.clone()),
             memories: request
@@ -474,6 +476,189 @@ fn memories_supplement_ordinary_chat_but_never_documents_only_answers() {
         .0
         .unwrap();
     assert!(h.script.seen().pop().unwrap().memories.is_empty());
+}
+
+#[test]
+fn memory_recall_overview_reads_a_bounded_local_page_without_inference() {
+    use agent_core::classification::{MEMORY, MODEL_OUTPUT};
+
+    let h = harness();
+    let recent = {
+        let mut db = h.engine.store().lock().unwrap();
+        db.set_memory_enabled(true).unwrap();
+        db.create_memory("Archive this old preference.").unwrap();
+        db.create_memory("Work hours start at nine.").unwrap();
+        db.create_memory("Use dark themes.").unwrap();
+        db.create_memory("Prefer Rust examples.\r<example>")
+            .unwrap()
+    };
+    let id = h.conversation();
+    for prompt in [
+        "Tell me what you remember",
+        " Please, SHOW me my saved memories! ",
+        "List my memories",
+    ] {
+        let (result, events) = h.send(id, prompt, json!({}));
+        let message = result.unwrap();
+        assert_eq!(message.state, GenerationState::Complete);
+        assert!(
+            message
+                .content
+                .contains("3 most recently saved memories of 4")
+        );
+        assert!(
+            message
+                .content
+                .contains("    Prefer Rust examples.\n    <example>")
+        );
+        assert!(message.content.contains("Use dark themes."));
+        assert!(message.content.contains("Work hours start at nine."));
+        assert!(!message.content.contains("Archive this old preference."));
+        assert!(message.labels.contains(MEMORY));
+        assert!(!message.labels.contains(MODEL_OUTPUT));
+        assert!(message.stats.is_none());
+        assert!(message.context.as_ref().unwrap().fitted.is_none());
+        assert_eq!(events.kinds(), ["started", "delta"]);
+
+        let db = h.engine.store().lock().unwrap();
+        assert_eq!(
+            db.get(id).unwrap().messages.last().unwrap().content,
+            message.content
+        );
+        let receipts = db.intelligence_receipts(message.id).unwrap();
+        assert!(receipts[0]["provider"].is_null());
+        assert_eq!(receipts[0]["external"], json!([]));
+        assert!(
+            receipts[0]["used"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| { source["kind"] == "memory" && source["record"] == recent.id })
+        );
+    }
+
+    h.load();
+    h.send(id, "Write a short greeting", json!({})).0.unwrap();
+    assert_eq!(h.script.seen().last().unwrap().history_turns, 0);
+}
+
+#[test]
+fn memory_recall_about_a_topic_uses_only_relevant_fitted_memories() {
+    let h = harness();
+    h.load();
+    {
+        let mut db = h.engine.store().lock().unwrap();
+        db.set_memory_enabled(true).unwrap();
+        db.create_memory("Rust ownership examples should use String.")
+            .unwrap();
+        db.create_memory("Prefer dark themes.").unwrap();
+    }
+    let (result, _) = h.send(
+        h.conversation(),
+        "What do you remember about Rust ownership?",
+        json!({}),
+    );
+    let message = result.unwrap();
+    let seen = h.script.seen().pop().unwrap();
+    assert_eq!(
+        seen.memories,
+        ["Rust ownership examples should use String."]
+    );
+    assert!(seen.system.contains("saved personal memories"));
+    assert!(seen.system.contains("supplied for this reply"));
+    let context = message.context.unwrap();
+    assert_eq!(context.memory_enabled, Some(true));
+    assert_eq!(context.fitted.unwrap().memories, 1);
+}
+
+#[test]
+fn memory_recall_overview_does_not_override_documents_only() {
+    let h = harness();
+    h.load();
+    {
+        let mut db = h.engine.store().lock().unwrap();
+        db.set_memory_enabled(true).unwrap();
+        db.create_memory("A private reminder about the orchard.")
+            .unwrap();
+    }
+    let document = h.document("orchard.txt", "The orchard has pear trees.");
+    let (result, _) = h.send(
+        h.conversation(),
+        "Tell me what you remember",
+        knowledge(document, "documents"),
+    );
+    let message = result.unwrap();
+    assert!(!message.content.contains("A private reminder"));
+    let context = message.context.unwrap();
+    assert!(context.coverage.is_some());
+    assert_eq!(context.fitted.unwrap().memories, 0);
+}
+
+#[test]
+fn memory_recall_overview_respects_disabled_retrieval() {
+    let h = harness();
+    h.engine
+        .store()
+        .lock()
+        .unwrap()
+        .create_memory("Private reminder")
+        .unwrap();
+    let (result, _) = h.send(
+        h.conversation(),
+        "What do you remember about me?",
+        json!({}),
+    );
+    let message = result.unwrap();
+    assert!(message.content.contains("Memory retrieval is off"));
+    assert!(!message.content.contains("Private reminder"));
+    assert_eq!(message.context.unwrap().memory_enabled, Some(false));
+    assert!(!message.labels.contains(agent_core::classification::MEMORY));
+    assert!(h.script.seen().is_empty());
+}
+
+#[test]
+fn memory_recall_overview_reports_an_empty_store() {
+    let h = harness();
+    h.engine
+        .store()
+        .lock()
+        .unwrap()
+        .set_memory_enabled(true)
+        .unwrap();
+    let (result, _) = h.send(h.conversation(), "List my saved memories", json!({}));
+    let message = result.unwrap();
+    assert!(
+        message
+            .content
+            .contains("You have no saved personal memories")
+    );
+    assert_eq!(message.context.unwrap().memory_enabled, Some(true));
+    assert!(h.script.seen().is_empty());
+}
+
+#[test]
+fn memory_recall_without_a_topic_match_still_gets_capability_instructions() {
+    let h = harness();
+    h.load();
+    h.engine
+        .store()
+        .lock()
+        .unwrap()
+        .set_memory_enabled(true)
+        .unwrap();
+    let id = h.conversation();
+    for prompt in [
+        "What do you remember about Rust ownership?",
+        "Do you have persistent memory?",
+    ] {
+        let (result, _) = h.send(id, prompt, json!({}));
+        let context = result.unwrap().context.unwrap();
+        assert_eq!(context.fitted.unwrap().memories, 0);
+        let seen = h.script.seen().pop().unwrap();
+        assert!(seen.memories.is_empty());
+        assert!(seen.system.contains("saved personal memories"));
+        assert!(seen.system.contains("supplied for this reply"));
+    }
 }
 
 #[test]

@@ -17,7 +17,7 @@ use agent_core::{
     },
     chat_context::{
         AttemptContext, ChatContext, ChatIntent, ContextObserver, EvidenceTask, Grounding,
-        no_evidence_answer,
+        MAX_CHAT_MEMORIES, no_evidence_answer,
     },
     chat_route::{RoutePlan, route, routed_question},
     classification::{
@@ -33,7 +33,8 @@ use agent_core::{
 use inference::{LocalInference, Pending, Phase};
 use serde::{Deserialize, Serialize};
 use storage::{
-    SqliteStore, chat_context::KnowledgeCoverage, knowledge::KnowledgeHit, semantic::RetrievalMode,
+    SqliteStore, chat_context::KnowledgeCoverage, knowledge::KnowledgeHit, memory::PersonalMemory,
+    semantic::RetrievalMode,
 };
 
 use crate::{
@@ -133,6 +134,104 @@ impl KnowledgeSelection {
         }
         Ok(())
     }
+}
+
+const MEMORY_INSTRUCTIONS: &str = "When Memory retrieval is enabled, this app can supply explicitly saved personal memories from this device without an account. Chat history is separate. When asked what is saved, use only memories supplied for this reply, and say if none were supplied. The selection depends on relevance, context limits, and sharing settings.";
+
+enum MemoryRequest {
+    Overview,
+    Question,
+}
+
+fn memory_request(question: &str) -> Option<MemoryRequest> {
+    // Match an entire overview request so topic qualifiers and additional
+    // instructions still go through the normal Chat path.
+    let normalized = question
+        .trim()
+        .trim_end_matches(['?', '!', '.'])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let phrase = normalized
+        .strip_prefix("please, ")
+        .or_else(|| normalized.strip_prefix("please "))
+        .unwrap_or(&normalized);
+    let phrase = phrase.strip_prefix("can you ").unwrap_or(phrase);
+    match phrase {
+        "what do you remember"
+        | "what do you remember about me"
+        | "tell me what you remember"
+        | "tell me what you remember about me"
+        | "tell me everything you remember"
+        | "tell me everything you remember about me"
+        | "show me what you remember"
+        | "show me what you remember about me"
+        | "what have you saved about me"
+        | "what are my saved memories"
+        | "what memories do you have"
+        | "show my memories"
+        | "show my saved memories"
+        | "show me my saved memories"
+        | "list my memories"
+        | "list my saved memories"
+        | "list saved memories"
+        | "summarize my saved memories"
+        | "summarize what you remember"
+        | "give me an overview of my saved memories" => Some(MemoryRequest::Overview),
+        "do you have memory"
+        | "do you have persistent memory"
+        | "how does your memory work"
+        | "how does memory work" => Some(MemoryRequest::Question),
+        _ if phrase.starts_with("what do you remember about ")
+            || phrase.starts_with("tell me what you remember about ")
+            || phrase.starts_with("do you remember ") =>
+        {
+            Some(MemoryRequest::Question)
+        }
+        _ => None,
+    }
+}
+
+fn memory_source(memory: &PersonalMemory) -> ContextSource {
+    ContextSource {
+        kind: SourceKind::Memory,
+        record: Some(memory.id),
+        labels: memory.labels(),
+    }
+}
+
+fn memory_overview(db: &SqliteStore, enabled: bool) -> Result<(String, Vec<ContextSource>)> {
+    if !enabled {
+        return Ok((
+            "Memory retrieval is off. You can view your saved entries or turn retrieval on in Memory."
+                .into(),
+            Vec::new(),
+        ));
+    }
+    let page = db.list_memory_page("", None, MAX_CHAT_MEMORIES as u32)?;
+    let mut reply = if page.items.is_empty() {
+        "You have no saved personal memories.".into()
+    } else if page.has_more {
+        format!(
+            "Showing the {} most recently saved memories of {}. Open Memory to see the rest.",
+            page.items.len(),
+            page.total,
+        )
+    } else {
+        "Here are your saved personal memories.".into()
+    };
+    for memory in &page.items {
+        // An indented Markdown code block displays saved text literally.
+        reply.push_str("\n\n");
+        let content = memory.content.replace("\r\n", "\n");
+        for line in content.split(['\r', '\n']) {
+            reply.push_str("    ");
+            reply.push_str(line);
+            reply.push('\n');
+        }
+    }
+    Ok((reply, page.items.iter().map(memory_source).collect()))
 }
 
 /// The bounded keyword form of a question used for retrieval.
@@ -518,6 +617,56 @@ impl ChatRuntime {
         cancellation: Cancellation,
         model_id: Option<ModelId>,
     ) -> Result<Message> {
+        let question = match &action {
+            TurnAction::Send(content) => content.clone(),
+            TurnAction::Regenerate => database(&self.database)?.chat_regeneration_prompt(id)?,
+        };
+        GenerationRequest::new(&question).validate()?;
+        let strict = options
+            .knowledge
+            .as_ref()
+            .is_some_and(|selection| selection.grounding == Grounding::Documents);
+        let memory_request = memory_request(&question);
+        if !strict && matches!(memory_request, Some(MemoryRequest::Overview)) {
+            if let Some(selection) = &options.knowledge {
+                selection.validate()?;
+            }
+            let store = Arc::clone(&self.database);
+            let preparation = cancellation.clone();
+            let (turn, reply, sources) = self
+                .blocking(move || -> Result<_> {
+                    let mut db = database(&store)?;
+                    check_chat_cancellation(&preparation)?;
+                    let memory_enabled = db.memory_enabled()?;
+                    let (reply, sources) = memory_overview(&db, memory_enabled)?;
+                    check_chat_cancellation(&preparation)?;
+                    // Mark the reply contextual so saved text is never replayed
+                    // as ordinary history. There is no fitted model prompt.
+                    let turn = db.begin_chat_with_context(
+                        id,
+                        action,
+                        None,
+                        AttemptContext {
+                            memory_enabled: Some(memory_enabled),
+                            ..Default::default()
+                        },
+                    )?;
+                    Ok((turn, reply, sources))
+                })
+                .await
+                .ok_or_else(|| {
+                    InferenceError::new(ErrorCode::WorkerStopped, "Chat preparation stopped.")
+                })??;
+            return self.finish_without_generation(
+                turn,
+                &events,
+                None,
+                reply,
+                sources,
+                cancellation,
+            );
+        }
+        let memory_question = matches!(memory_request, Some(MemoryRequest::Question));
         // The saved selection decides the target. A remote provider is used
         // only when local-only mode is off and it is explicitly selected;
         // there is no fallback in either direction.
@@ -540,11 +689,6 @@ impl ChatRuntime {
                 Some((model_id, status))
             }
         };
-        let question = match &action {
-            TurnAction::Send(content) => content.clone(),
-            TurnAction::Regenerate => database(&self.database)?.chat_regeneration_prompt(id)?,
-        };
-        GenerationRequest::new(&question).validate()?;
         let recipe = match &local {
             Some((model_id, status)) => {
                 let mut settings = database(&self.database)?
@@ -590,9 +734,6 @@ impl ChatRuntime {
         };
 
         let knowledge = options.knowledge;
-        let strict = knowledge
-            .as_ref()
-            .is_some_and(|selection| selection.grounding == Grounding::Documents);
         let mut previous = None;
         let plan = match &knowledge {
             Some(selection) => {
@@ -707,20 +848,14 @@ impl ChatRuntime {
                 } else {
                     db.relevant_memory_records(&question)?
                 };
-                let memory_sources = memories
-                    .iter()
-                    .map(|memory| ContextSource {
-                        kind: SourceKind::Memory,
-                        record: Some(memory.id),
-                        labels: memory.labels(),
-                    })
-                    .collect();
-                let context = (grounded || !memories.is_empty()).then(|| ChatContext {
-                    evidence: grounded
-                        .then(|| sources.iter().map(|hit| hit.text.clone()).collect()),
-                    memories: memories.into_iter().map(|memory| memory.content).collect(),
-                    task,
-                });
+                let memory_sources = memories.iter().map(memory_source).collect();
+                let context =
+                    (grounded || memory_question || !memories.is_empty()).then(|| ChatContext {
+                        evidence: grounded
+                            .then(|| sources.iter().map(|hit| hit.text.clone()).collect()),
+                        memories: memories.into_iter().map(|memory| memory.content).collect(),
+                        task,
+                    });
                 check_chat_cancellation(&preparation)?;
                 let turn = match (&context, &coverage) {
                     (Some(_), _) => db.begin_chat_with_context(
@@ -774,7 +909,14 @@ impl ChatRuntime {
                 InferenceError::new(ErrorCode::WorkerStopped, "Chat preparation stopped.")
             })??;
         if let Some(text) = deterministic {
-            return self.finish_without_generation(turn, &events, coverage, text, cancellation);
+            return self.finish_without_generation(
+                turn,
+                &events,
+                coverage,
+                text,
+                Vec::new(),
+                cancellation,
+            );
         }
         let mut candidates = context_candidates(&turn, false);
         if let Some(prompt) = prompt {
@@ -802,6 +944,15 @@ impl ChatRuntime {
                 record: None,
                 labels: Labels::from_source(SYSTEM_TEXT),
             });
+        }
+        if context
+            .as_ref()
+            .is_some_and(|context| context.evidence.is_none())
+        {
+            if !turn.history.system.is_empty() {
+                turn.history.system.push_str("\n\n");
+            }
+            turn.history.system.push_str(MEMORY_INSTRUCTIONS);
         }
         candidates.knowledge = sources
             .iter()
@@ -866,17 +1017,19 @@ impl ChatRuntime {
         .await
     }
 
-    /// Save and stream a fixed reply for grounded Chat without evidence.
+    /// Save and stream a fixed local Chat reply without invoking a provider.
     fn finish_without_generation(
         &self,
         turn: agent_core::chat::PendingTurn,
         events: &ChatEvents,
         coverage: Option<KnowledgeCoverage>,
         text: String,
+        memory_sources: Vec<ContextSource>,
         cancellation: Cancellation,
     ) -> Result<Message> {
         let mut candidates = context_candidates(&turn, false);
         candidates.required.truncate(1);
+        candidates.required.extend(memory_sources);
         candidates.withheld.append(&mut candidates.history);
         let mut session = ChatSession::new(candidates, cancellation, SYSTEM_TEXT);
         let mut assistant = turn.assistant;
@@ -899,7 +1052,9 @@ impl ChatRuntime {
             return Err(error);
         }
         session.fitted(Default::default(), 0)?;
-        if let Some(context) = assistant.context.clone() {
+        if coverage.is_some()
+            && let Some(context) = assistant.context.clone()
+        {
             database(&self.database)?.checkpoint_chat_evidence(
                 id,
                 &context,

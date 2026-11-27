@@ -306,6 +306,28 @@ fn local_only_mode_opens_no_connection() {
 }
 
 #[test]
+fn memory_recall_overview_stays_local_with_a_remote_provider_selected() {
+    let r = remote(streaming(true), |_| {});
+    {
+        let mut db = r.engine.store().lock().unwrap();
+        db.set_memory_enabled(true).unwrap();
+        db.create_memory("The project codename is HERONSECRET")
+            .unwrap();
+    }
+    let id = r.conversation();
+    let overview = r.send(id, "Tell me what you remember", json!({})).unwrap();
+    assert!(overview.content.contains("HERONSECRET"));
+    assert!(r.server.requests().is_empty());
+    assert_eq!(r.server.accepted(), 0);
+    assert_eq!(r.receipt(overview.id)["external"], json!([]));
+
+    r.send(id, "Write a short greeting", json!({})).unwrap();
+    let bodies = r.request_bodies();
+    assert_eq!(bodies.len(), 1);
+    assert!(!bodies[0].to_string().contains("HERONSECRET"));
+}
+
+#[test]
 fn withheld_history_memories_and_documents_never_reach_the_provider() {
     let r = remote(streaming(true), |_| {});
     let id = r.conversation();
