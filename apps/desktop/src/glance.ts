@@ -8,17 +8,37 @@ export type Recipe = keyof typeof recipes;
 
 export type GlanceProvider = {
   id: number; name: string; model: string; locality: string; retention: string; revision: string;
-  sharing: { documents: boolean; memories: boolean };
+  sharing: { documents: boolean; memories: boolean }; imageInput?: boolean; retentionSummary?: string;
 };
+
+export type OcrState = { available: boolean; engine: string | null; languages: string[]; defaults: string[] };
 
 export type GlanceState = {
   localAvailable: boolean; memoryEnabled: boolean; providers: GlanceProvider[];
-  documents: { id: number; name: string }[];
+  documents: { id: number; name: string }[]; ocr?: OcrState;
+};
+
+export type Region = { x: number; y: number; width: number; height: number };
+export type CaptureRecord = {
+  source: string; portalVersion: number; persistMode: number; restoreToken: string; restoreTokenReturned: boolean;
+  cursor: string; consentMs: number; sessionClosedMs: number; monitor: [number, number, number, number] | null;
+  stream: { library: string; format: string; width: number; height: number; frames: number; rejectedBuffers: number; settled: string; firstFrameMs: number; waitedMs: number };
+};
+export type RegionRecord = { region: Region; frameWidth: number; frameHeight: number };
+export type CropInfo = {
+  id: string; width: number; height: number; bytes: number; imageEligible: boolean;
+  region: RegionRecord; capture: CaptureRecord;
+};
+export type OcrRecord = { engine: string; languages: string[]; elapsedMs: number; characters: number; sandbox: string };
+export type ScreenReceipt = { capture: CaptureRecord; region: RegionRecord; ocr: OcrRecord | null; imageAttached: boolean; fullFrame: string };
+export type Estimate = {
+  classes: string[]; inputTokens: number; maxOutputTokens: number; costMicros: number | null; currency: string | null; imageTokens: number;
 };
 
 export type GlanceInput = {
   text: string; recipe: Recipe; language?: string; question?: string;
   provider?: number; revision?: string; share: boolean; memory: boolean; documents: number[];
+  image?: boolean; crop?: string;
 };
 
 export type GlanceReceipt = {
@@ -28,7 +48,13 @@ export type GlanceReceipt = {
   external: { origin: string; transmission: string; labels: string[] }[];
   usage_basis?: string;
 };
-export type GlanceResult = { text: string; receipt: GlanceReceipt | null; error: string | null };
+export type GlanceResult = { text: string; receipt: GlanceReceipt | null; error: string | null; screen?: ScreenReceipt | null };
+
+/** Human labels for data classes shown before a provider request. */
+export const classNames: Record<string, string> = {
+  "core.user-input/1": "Your text", "core.clipboard-text/1": "Clipboard text", "core.screen-image/1": "Screen image",
+  "core.screen-text/1": "Text recognized from the screen", "core.memory/1": "Saved memories", "core.library/1": "Knowledge documents",
+};
 
 const encoder = new TextEncoder();
 
@@ -45,15 +71,19 @@ export function inputProblem(text: string, recipe: Recipe, language: string, que
 
 export function prepareGlance(
   state: GlanceState, provider: GlanceProvider | undefined, recipe: Recipe, text: string,
-  language: string, question: string, memory: boolean, documents: number[],
+  language: string, question: string, memory: boolean, documents: number[], crop?: string,
 ): GlanceInput | null {
-  if (!text.trim() || (!provider && !state.localAvailable) || inputProblem(text, recipe, language, question)) return null;
+  // An image goes only to a provider that accepts images; text is then optional.
+  const image = !!crop && !!provider?.imageInput;
+  if (crop && !image) return null;
+  if ((!text.trim() && !image) || (!provider && !state.localAvailable) || inputProblem(text, recipe, language, question)) return null;
   if ((recipe === "translate" && !language.trim()) || (recipe === "custom" && !question.trim())) return null;
   return {
     text, recipe, share: false,
     ...(recipe === "translate" && { language: language.trim() }),
     ...(recipe === "custom" && { question: question.trim() }),
     ...(provider && { provider: provider.id, revision: provider.revision }),
+    ...(image && { image: true, crop }),
     memory: memory && state.memoryEnabled && (!provider || provider.sharing.memories),
     documents: provider && !provider.sharing.documents ? [] : state.documents.filter(d => documents.includes(d.id)).map(d => d.id),
   };

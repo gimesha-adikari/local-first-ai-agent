@@ -56,3 +56,15 @@
 .glance-receipt dl { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 4px 12px; margin: 9px 0; }
 .glance-receipt dt { font-weight: 550; }
 .glance-receipt dd { margin: 0; overflow-wrap: anywhere; }
+.glance-crop { display: grid; grid-template-columns: minmax(0, 168px) minmax(0, 1fr); gap: 12px; padding: 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); }
+.glance-crop img { width: 100%; max-height: 132px; object-fit: contain; align-self: start; border-radius: var(--radius-sm); border: 1px solid var(--border); background: repeating-conic-gradient(var(--surface-hover) 0 25%, transparent 0 50%) 0 0 / 12px 12px; }
+.glance-crop-meta { display: grid; gap: 4px; align-content: start; min-width: 0; font-size: 12px; color: var(--text-secondary); }
+.glance-crop-meta strong { color: var(--text); font-size: 13px; font-weight: 620; }
+.glance-crop-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 0 -7px; }
+.glance-crop-actions button { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 12px; font-weight: 550; padding: 5px 7px; border-radius: var(--radius-sm); }
+.glance-crop-actions button:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
+.glance-languages summary { font-size: 12px; padding: 2px 0; }
+.glance-languages > div { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0; }
+.glance-languages p { font-size: 11px; color: var(--text-tertiary); }
+.glance-review-image { max-width: 100%; max-height: 160px; object-fit: contain; justify-self: start; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); }
+@media (max-width: 400px) { .glance-crop { grid-template-columns: 1fr; } }

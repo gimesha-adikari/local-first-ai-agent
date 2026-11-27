@@ -44,3 +44,19 @@ test("source, custom question and language respect native UTF-8 limits", () => {
   assert.equal(prepareGlance(state, undefined, "translate", "text", "  ", "", false, []), null);
   assert.equal(prepareGlance(state, undefined, "custom", "text", "", "", false, []), null);
 });
+
+test("a screen crop is offered only to image providers and makes text optional", () => {
+  const vision = { ...provider, imageInput: true };
+  const image = prepareGlance(state, vision, "explain", "", "", "", false, [], "crop-1");
+  assert.equal(image.image, true);
+  assert.equal(image.crop, "crop-1");
+  assert.equal(image.text, "");
+  assert.equal(image.share, false);
+  // No silent switch: a crop cannot go to a text-only provider or the local model.
+  assert.equal(prepareGlance(state, provider, "explain", "text", "", "", false, [], "crop-1"), null);
+  assert.equal(prepareGlance(state, undefined, "explain", "text", "", "", false, [], "crop-1"), null);
+  // Recognized text alone goes anywhere text may go.
+  const text = prepareGlance(state, undefined, "summarize", "Recognized text", "", "", false, []);
+  assert.equal(text.image, undefined);
+  assert.equal(text.crop, undefined);
+});

@@ -1,13 +1,24 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertIcon, ArrowUpIcon, CheckIcon, ChevronDownIcon, CloseIcon, CloudIcon, CopyIcon,
-  CpuIcon, FileIcon, LaunchIcon, MemoryIcon, QuoteIcon, ShieldIcon, SlidersIcon, Spinner, StopIcon, ThinkIcon } from "./icons";
+import { AlertIcon, ArrowUpIcon, CheckIcon, ChevronDownIcon, CloseIcon, CloudIcon, CopyIcon, CpuIcon, CropIcon, FileIcon,
+  ImageIcon, LaunchIcon, MemoryIcon, QuoteIcon, ScanTextIcon, ShieldIcon, SlidersIcon, Spinner, StopIcon, ThinkIcon, TrashIcon } from "./icons";
 import { errorMessage } from "./inference";
-import { inputProblem, prepareGlance, recipes, type GlanceReceipt, type GlanceInput, type GlanceProvider, type GlanceResult, type GlanceState, type Recipe } from "./glance";
+import { classNames, inputProblem, prepareGlance, recipes, type CropInfo, type Estimate, type GlanceReceipt, type GlanceInput,
+  type GlanceProvider, type GlanceResult, type GlanceState, type OcrRecord, type Recipe, type ScreenReceipt } from "./glance";
 import { IconButton } from "./ui";
 import "./glance.css";
 
-type Review = { input: GlanceInput; provider: GlanceProvider; documents: string[] };
+type Review = { input: GlanceInput; provider: GlanceProvider; documents: string[]; estimate: Estimate };
+
+function cropUrl(crop: CropInfo) {
+  return `glance-crop://localhost/${crop.id}.png`;
+}
+
+function costText(estimate: Estimate) {
+  const tokens = `about ${estimate.inputTokens.toLocaleString()} input tokens (including ${estimate.imageTokens.toLocaleString()} for the image) and at most ${estimate.maxOutputTokens.toLocaleString()} output tokens`;
+  if (estimate.costMicros === null) return `${tokens}. No pricing is configured for this provider.`;
+  return `${tokens}, at most ${(estimate.costMicros / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 })} ${estimate.currency ?? ""}.`;
+}
 
 function providerLocation(provider: GlanceProvider) {
   return ["self_hosted", "self-hosted"].includes(provider.locality) ? "Self-hosted" : "Cloud";
@@ -20,11 +31,24 @@ function retentionText(value: string) {
   return value;
 }
 
-function ReceiptDetails({ receipt }: { receipt: GlanceReceipt }) {
+function ScreenDetails({ screen }: { screen: ScreenReceipt }) {
+  const { capture, region, ocr } = screen;
+  return <>
+    <dt>Capture</dt><dd>{`${capture.source}${capture.portalVersion ? ` v${capture.portalVersion}` : ""}, fresh consent (persist mode ${capture.persistMode}, restore token ${capture.restoreTokenReturned ? "returned and discarded" : "none"}), cursor ${capture.cursor}`}</dd>
+    <dt>Frame</dt><dd>{`${capture.stream.width} × ${capture.stream.height} ${capture.stream.format}, ${capture.stream.frames} frame(s), ${capture.stream.settled}, stream closed after ${capture.sessionClosedMs} ms`}</dd>
+    <dt>Region</dt><dd>{`${region.region.width} × ${region.region.height} at ${region.region.x}, ${region.region.y} of ${region.frameWidth} × ${region.frameHeight}`}</dd>
+    <dt>Full frame</dt><dd>{screen.fullFrame}</dd>
+    <dt>Recognition</dt><dd>{ocr ? `${ocr.engine} (${ocr.languages.join(", ")}), ${ocr.characters} characters in ${ocr.elapsedMs} ms, on this device` : "Not used"}</dd>
+    <dt>Image</dt><dd>{screen.imageAttached ? "The selected region was attached to this request" : "Not sent"}</dd>
+  </>;
+}
+
+function ReceiptDetails({ receipt, screen }: { receipt: GlanceReceipt; screen?: ScreenReceipt | null }) {
   const sourceKinds = (sources: GlanceReceipt["used"]) => [...new Set(sources.map(item => item.kind.replaceAll("_", " ")))].join(", ") || "None";
   return <details className="glance-receipt">
     <summary><ShieldIcon size={14} />Processing receipt <ChevronDownIcon size={13} /></summary>
     <dl>
+      {screen && <ScreenDetails screen={screen} />}
       <dt>Status</dt><dd>{receipt.state}</dd>
       <dt>Processing</dt><dd>{receipt.provider ? `${receipt.provider.id} · ${receipt.provider.locality.replaceAll("_", " ")}` : "No provider recorded"}</dd>
       <dt>Sources used</dt><dd>{sourceKinds(receipt.used)}</dd>
@@ -55,6 +79,10 @@ export default function Glance() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [remembered, setRemembered] = useState(false);
+  const [crop, setCrop] = useState<CropInfo | null>(null);
+  const [useImage, setUseImage] = useState(false);
+  const [ocrLanguages, setOcrLanguages] = useState<string[]>([]);
+  const [recognized, setRecognized] = useState<OcrRecord | null>(null);
   const editor = useRef<HTMLTextAreaElement>(null);
   const reviewBox = useRef<HTMLElement>(null);
   const outputBox = useRef<HTMLElement>(null);
@@ -70,7 +98,7 @@ export default function Glance() {
       if (document.visibilityState !== "visible") return;
       document.removeEventListener("visibilitychange", start);
       invoke<GlanceState>("glance_state").then(value => {
-        if (mounted) setState(value);
+        if (mounted) { setState(value); setOcrLanguages(value.ocr?.defaults ?? []); }
       }).catch(e => { if (mounted) setError(errorMessage(e)); });
       editor.current?.focus();
     };
@@ -100,18 +128,19 @@ export default function Glance() {
 
   const provider = state?.providers.find(p => p.id === providerId);
   const input = state && (providerId === null || provider)
-    ? prepareGlance(state, provider, recipe, text, language, question, memory, documents) : null;
+    ? prepareGlance(state, provider, recipe, text, language, question, memory, documents, useImage && crop ? crop.id : undefined) : null;
+  const imageReady = !!crop && !!provider?.imageInput && crop.imageEligible;
   const locked = running || !!review || !!pending;
   const allowMemory = state?.memoryEnabled && (!provider || provider.sharing.memories);
   const allowDocuments = !provider || provider.sharing.documents;
   const contextCount = (allowMemory && memory ? 1 : 0) + (allowDocuments ? documents.length : 0);
   const invalid = inputProblem(text, recipe, language, question);
 
-  async function action(name: string, completed: (value: unknown) => void = () => {}) {
+  async function action(name: string, completed: (value: unknown) => void = () => {}, args?: Record<string, unknown>) {
     if (actionLock.current) return;
     actionLock.current = true;
     setPending(name); setError(""); setNotice("");
-    try { completed(await invoke(name)); }
+    try { completed(await invoke(name, args)); }
     catch (e) { setError(errorMessage(e)); }
     finally { setPending(null); actionLock.current = false; }
   }
@@ -140,8 +169,34 @@ export default function Glance() {
     if (!input || locked) return;
     setError(""); setNotice("");
     if (provider) {
-      setReview({ input, provider, documents: state!.documents.filter(d => input.documents.includes(d.id)).map(d => d.name) });
+      const chosen = provider;
+      void action("glance_estimate", value => {
+        setReview({ input, provider: chosen, estimate: value as Estimate, documents: state!.documents.filter(d => input.documents.includes(d.id)).map(d => d.name) });
+      }, { input });
     } else { void run(input); }
+  }
+
+  function capture() {
+    void action("glance_capture", value => {
+      const info = value as CropInfo;
+      setCrop(info); setUseImage(false); setRecognized(null);
+      setNotice("Region captured and the screen stream closed. Nothing has been processed yet.");
+    });
+  }
+
+  function extract() {
+    if (!crop) return;
+    void action("glance_ocr", value => {
+      const { text: recognizedText, record } = value as { text: string; record: OcrRecord };
+      setText(recognizedText); setSource("Screen text"); setRecognized(record);
+      setNotice(recognizedText ? `Recognized on this device with ${record.engine} (${record.languages.join(", ")}) in ${record.elapsedMs} ms. Check the text before processing it.`
+        : "No text was recognized in this region.");
+      editor.current?.focus();
+    }, { request: { crop: crop.id, languages: ocrLanguages } });
+  }
+
+  function discard() {
+    void action("glance_capture_clear", () => { setCrop(null); setUseImage(false); setRecognized(null); });
   }
 
   function changeProvider(id: string) {
@@ -164,17 +219,41 @@ export default function Glance() {
           <span>{text ? `${source} · ${Array.from(text).length.toLocaleString()} characters` : "Manual"}</span>
         </div>
         <textarea id="glance-source" ref={editor} value={text} readOnly={locked} placeholder="Paste or type the text to work with…"
-          onChange={e => { setText(e.target.value); setSource(old => old === "Manual" ? old : "Edited clipboard"); }} />
+          onChange={e => { setText(e.target.value); setSource(old => old === "Manual" ? old : old.includes("Screen") || old.includes("screen") ? "Edited screen text" : "Edited clipboard"); }} />
         <div className="glance-source-actions">
           <button type="button" disabled={locked} onClick={() => void action("glance_clipboard", value => {
             if (typeof value !== "string") return;
             setText(value); setSource("Clipboard"); editor.current?.focus();
             if (!value) setNotice("The clipboard contains no readable text.");
           })}><CopyIcon size={14} />Read clipboard</button>
+          <button type="button" disabled={locked} onClick={capture}><CropIcon size={14} />Capture region</button>
           <button type="button" disabled={locked} onClick={() => setNotice("Selection capture is unavailable on this desktop. Copy the selection, then choose Read clipboard, or paste it above.")}>
             <QuoteIcon size={14} />Use selection</button>
         </div>
       </section>
+      {crop && <section className="glance-crop" aria-label="Screen region">
+        <img src={cropUrl(crop)} alt={`Selected screen region, ${crop.width} by ${crop.height} pixels`} />
+        <div className="glance-crop-meta">
+          <strong>Screen region</strong>
+          <span>{crop.width} × {crop.height} px · from a {crop.region.frameWidth} × {crop.region.frameHeight} screen</span>
+          {recognized && <span>{recognized.characters} characters recognized ({recognized.languages.join(", ")})</span>}
+          <div className="glance-crop-actions">
+            <button type="button" disabled={locked || !state?.ocr?.available || !ocrLanguages.length} onClick={extract}><ScanTextIcon size={14} />Extract text</button>
+            {recognized && text && <button type="button" disabled={locked} onClick={() => void action("glance_copy", () => setNotice("Text copied."), { text })}><CopyIcon size={14} />Copy text</button>}
+            <button type="button" disabled={locked} onClick={discard}><TrashIcon size={14} />Discard</button>
+          </div>
+          {state?.ocr?.available && <details className="glance-languages"><summary>Languages: {ocrLanguages.join(", ") || "none"}<ChevronDownIcon size={12} /></summary>
+            <div>{state.ocr.languages.map(code => <label className="glance-choice" key={code}><input type="checkbox" disabled={locked}
+              checked={ocrLanguages.includes(code)} onChange={e => setOcrLanguages(current => e.target.checked
+                ? (current.length < 4 ? [...current, code] : current) : current.filter(item => item !== code))} />{code}</label>)}</div>
+            <p>Recognition quality differs by language and script. Up to four at a time.</p>
+          </details>}
+          {!state?.ocr?.available && <p className="glance-note">Local text recognition needs Tesseract.</p>}
+          {provider?.imageInput && <label className="glance-choice"><input type="checkbox" checked={useImage && imageReady} disabled={locked || !imageReady}
+            onChange={e => setUseImage(e.target.checked)} /><ImageIcon size={14} />Send this image to {provider.name}</label>}
+          {provider?.imageInput && !crop.imageEligible && <p className="glance-note">This region is too large to send as an image.</p>}
+        </div>
+      </section>}
       <fieldset disabled={locked} className="glance-options">
         <div className="glance-pair">
           <label>Action<select value={recipe} onChange={e => setRecipe(e.target.value as Recipe)}>
@@ -204,11 +283,15 @@ export default function Glance() {
       {review && <section className="glance-review" aria-labelledby="review-heading" tabIndex={-1} ref={reviewBox}>
         <h2 id="review-heading"><ShieldIcon size={16} />Review this request</h2>
         <p><strong>{review.provider.name}</strong> · {review.provider.model} · {providerLocation(review.provider)}</p>
-        <p>This sends the source text above and your “{recipes[review.input.recipe]}” instruction
+        {review.input.image && crop && <img className="glance-review-image" src={cropUrl(crop)} alt="The exact region that will be sent" />}
+        <p>This sends {review.input.image ? "the image above" : ""}{review.input.image && review.input.text.trim() ? " and " : ""}{review.input.text.trim() ? "the source text above" : ""} with your “{recipes[review.input.recipe]}” instruction
           {review.input.question ? ` (“${review.input.question}”)` : review.input.language ? ` (to ${review.input.language})` : ""}.
           {review.input.memory ? " Saved memories may be included." : " Memories are off."}
-          {review.documents.length ? ` Selected documents: ${review.documents.join(", ")}.` : " Documents are off."}</p>
-        <p>{retentionText(review.provider.retention)}</p>
+          {review.documents.length ? ` Selected documents: ${review.documents.join(", ")}.` : " Documents are off."}
+          {review.input.image ? " The rest of the screen is never sent." : ""}</p>
+        <p>Data: {review.estimate.classes.map(id => classNames[id] ?? id).join(", ")}.</p>
+        <p>{retentionText(review.provider.retention)}{review.provider.retentionSummary ? ` ${review.provider.retentionSummary}` : ""}</p>
+        <p>Estimated usage: {costText(review.estimate)}</p>
       </section>}
       {(running || output || result?.receipt) && <section aria-labelledby="result-title" ref={outputBox} className="glance-result">
         <div className="glance-section-head"><h2 id="result-title">Result</h2>{running && <span role="status"><Spinner size={13} />Generating</span>}</div>
@@ -218,7 +301,7 @@ export default function Glance() {
           <button type="button" disabled={!!pending || remembered || result.receipt?.state !== "completed" || !!result.error} onClick={() => void action("glance_remember", () => { setRemembered(true); setNotice("Result saved to memory."); })}>
             {remembered ? <CheckIcon size={14} /> : <MemoryIcon size={14} />}{remembered ? "Remembered" : "Remember"}</button>
         </div>}
-        {result?.receipt && <ReceiptDetails receipt={result.receipt} />}
+        {result?.receipt && <ReceiptDetails receipt={result.receipt} screen={result.screen} />}
       </section>}
       {notice && <p role="status" className="glance-note">{notice}</p>}
       {invalid && <p role="status" className="glance-error">{invalid}</p>}

@@ -66,3 +66,6 @@ export function Spinner({ size = 14 }: { size?: number }) {
     </svg>
   );
 }
+export const CropIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 9V5.5a1 1 0 0 1 1-1H9M15 4.5h3.5a1 1 0 0 1 1 1V9M19.5 15v3.5a1 1 0 0 1-1 1H15M9 19.5H5.5a1 1 0 0 1-1-1V15" /><rect x="8.5" y="8.5" width="7" height="7" rx="1" /></Icon>;
+export const ImageIcon = (p: IconProps) => <Icon {...p}><rect x="3.5" y="5" width="17" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m4.5 17.5 4.5-4.5 3.5 3.5 2.5-2.5 4.5 4" /></Icon>;
+export const ScanTextIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 8.5V6a1.5 1.5 0 0 1 1.5-1.5h2.5M15.5 4.5H18A1.5 1.5 0 0 1 19.5 6v2.5M19.5 15.5V18a1.5 1.5 0 0 1-1.5 1.5h-2.5M8.5 19.5H6A1.5 1.5 0 0 1 4.5 18v-2.5" /><path d="M8.5 9.5h7M8.5 12h7M8.5 14.5h4" /></Icon>;
