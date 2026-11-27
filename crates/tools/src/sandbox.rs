@@ -1,9 +1,10 @@
 //! A contained, single-process subprocess for untrusted input. Bubblewrap
 //! unshares every namespace (so there is no network), the only filesystem is
 //! read-only system libraries, the executable, explicitly listed data and an
-//! in-memory input file. A seccomp filter denies fork, clone and sockets, and
-//! `prlimit` bounds address space, CPU time, file size and descriptors. The
-//! input reaches the child through a pipe; nothing is written to disk.
+//! in-memory input file. A seccomp filter denies fork, clone, sockets and
+//! io_uring (which could open sockets without those calls), and `prlimit`
+//! bounds address space, CPU time, file size and descriptors. The input
+//! reaches the child through a pipe; nothing is written to disk.
 
 use std::{
     fs::File,
@@ -184,8 +185,8 @@ pub(crate) fn run<E>(
 }
 
 /// Applied after Bubblewrap has set up namespaces. Contained tools do not
-/// need to fork or create sockets. Keeping the workload single-process
-/// makes its address-space and CPU limits apply to all of it.
+/// need to fork, create sockets or use io_uring. Keeping the workload
+/// single-process makes its address-space and CPU limits apply to all of it.
 fn filter() -> io::Result<File> {
     #[cfg(target_arch = "x86_64")]
     let (audit_arch, denied): (u32, &[libc::c_long]) = (
@@ -197,6 +198,9 @@ fn filter() -> io::Result<File> {
             libc::SYS_vfork,
             libc::SYS_socket,
             libc::SYS_socketpair,
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
         ],
     );
     #[cfg(target_arch = "aarch64")]
@@ -207,6 +211,9 @@ fn filter() -> io::Result<File> {
             libc::SYS_clone3,
             libc::SYS_socket,
             libc::SYS_socketpair,
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
         ],
     );
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
