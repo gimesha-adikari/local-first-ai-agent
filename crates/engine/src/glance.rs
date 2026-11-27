@@ -114,6 +114,9 @@ pub enum Origin {
     EditedClipboard,
     /// Text recognized from the session's screen crop, edited or not.
     Screen,
+    /// The session used both the clipboard and a screen crop; the text is
+    /// labelled with both, conservatively.
+    ScreenAndClipboard,
 }
 
 fn prompt_labels(origin: Origin) -> Labels {
@@ -122,6 +125,11 @@ fn prompt_labels(origin: Origin) -> Labels {
         Origin::Manual => {}
         Origin::Clipboard | Origin::EditedClipboard => labels.insert(CLIPBOARD_TEXT),
         Origin::Screen => {
+            labels.insert(SCREEN_TEXT);
+            labels.insert(SCREEN_IMAGE);
+        }
+        Origin::ScreenAndClipboard => {
+            labels.insert(CLIPBOARD_TEXT);
             labels.insert(SCREEN_TEXT);
             labels.insert(SCREEN_IMAGE);
         }
@@ -139,6 +147,7 @@ pub struct PanelState {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Provider {
     id: ProviderId,
     name: String,
@@ -390,7 +399,7 @@ impl ChatRuntime {
             kind: match origin {
                 Origin::Manual => SourceKind::ManualText,
                 Origin::Clipboard | Origin::EditedClipboard => SourceKind::Clipboard,
-                Origin::Screen => SourceKind::ScreenText,
+                Origin::Screen | Origin::ScreenAndClipboard => SourceKind::ScreenText,
             },
             record: None,
             labels: prompt_labels(origin),
