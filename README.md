@@ -16,7 +16,7 @@ deferred until v1.0.0. [v0.2.0 architecture](docs/architecture.md#local-knowledg
 | BGE-small-en-v1.5 F16 | Semantic and hybrid Knowledge search in English | 64.2 MiB |
 
 Open **Models → Discover** to see the exact file, license and estimated
-settings. Downloads require approval and are blocked in Local-only mode.
+settings. **Download** starts the selected model’s transfer from Hugging Face.
 Use **Downloads** to cancel, resume or discard a partial file. The app
 checks the full SHA-256 before making the model available in **Installed**.
 Load a Chat model or choose **Use for Knowledge** when you're ready to use it.
@@ -102,9 +102,9 @@ build declares these dependencies automatically.
   confirm before selecting it; its results are never saved. Only
   your message, or the query you edit, goes to the search provider. Up to
   three public pages are read directly, without cookies, sign-in, scripts or
-  images, and the answer cites the sources it was given. Searching and
-  reading always use the internet, even with a local model, so Local-only
-  mode blocks them. A cloud or self-hosted model receives page excerpts only
+  images. Choose **Search and answer**, **Search results only**, or **Read a webpage**
+  in the composer. Visual-derived queries require review before sending.
+  A cloud or self-hosted model receives page excerpts only
   when you allow it for that message. Raw results and excerpts stay in
   memory; cited links are saved only for direct pages or when you turn on
   saving for Brave or your SearXNG instance.
@@ -228,12 +228,13 @@ are optional `tesseract-ocr-*` packages; the recommended set is listed in
 ### Providers
 
 Settings → Providers configures OpenAI-compatible cloud services and servers
-you run. Local-only mode, the default, makes no outbound connections. Every
+you run. Chat uses the local model until you select a provider. The app
+connects when you request an operation that needs a connection. Every
 remote request passes the Rust network boundary, carries only the categories
 you allow, and is checked against the monthly limit first. API keys are
 entered in a native dialog and kept in the system keyring (Secret Service);
 without a keyring, providers that need a key stay off.
-[Stage 03-C record](docs/stage-03-c-providers.md)
+[Stage 04 connectivity decision](docs/stage-04-connectivity-ux.md)
 
 ## Licenses and notices
 
