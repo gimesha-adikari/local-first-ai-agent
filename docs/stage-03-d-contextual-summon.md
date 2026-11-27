@@ -177,3 +177,10 @@ with the panel's geometry.
   verified current-selection provenance yet.
 - With no window manager on Xvfb, focus return after dismissal and token
   focus behaviour were not observable.
+- **Portal identity needs an installed desktop file.** The host Registry
+  rejects the app ID unless
+  `io.github.gimesha-adikari.localfirstaiagent.desktop` is installed and its
+  `Exec` binary is on `PATH`. The 03-E investigation showed this. A build
+  run from `target/` therefore reports the shortcut as unavailable. That
+  fails closed, and the `--summon` command fallback still works. The Debian
+  package provides both.
