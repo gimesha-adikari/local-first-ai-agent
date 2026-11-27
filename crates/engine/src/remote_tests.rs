@@ -1037,3 +1037,73 @@ fn screen_crops_reach_only_image_providers_with_confirmation_and_text_keeps_scre
     assert_eq!(blocked.err().unwrap().code, ErrorCode::PolicyDenied);
     assert_eq!(vision.server.accepted(), before);
 }
+
+#[test]
+fn local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_accurate() {
+    use crate::chat::glance::{Input, Origin};
+    let handler: Handler = Arc::new(|_, out: &mut dyn Write| {
+        let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+        for _ in 0..200 {
+            let event = format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{"content":"tick "}}]})
+            );
+            let chunk = format!("{:x}\r\n{event}\r\n", event.len());
+            if out.write_all(chunk.as_bytes()).is_err() || out.flush().is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    });
+    let r = Arc::new(remote(handler, |_| {}));
+    let state =
+        serde_json::to_value(futures_executor::block_on(r.engine.glance_state()).unwrap()).unwrap();
+    let input: Input = serde_json::from_value(json!({
+        "text": "Synthetic recognized screen text", "recipe": "explain",
+        "provider": r.provider, "revision": state["providers"][0]["revision"],
+        "share": true, "documents": [], "memory": false
+    }))
+    .unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let events = Arc::clone(&recorder);
+    let runner = Arc::clone(&r);
+    let turn = std::thread::spawn(move || {
+        futures_executor::block_on(runner.engine.run_glance(
+            input,
+            Origin::Screen,
+            None,
+            Default::default(),
+            events,
+        ))
+    });
+    let started = std::time::Instant::now();
+    while !format!("{:?}", recorder.0.lock().unwrap()).contains("tick") {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no streamed text"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Turning on Local-only revokes the live grant: the stream stops at the
+    // next response check instead of running to completion.
+    r.engine.enable_local_only().unwrap();
+    let revoked_at = std::time::Instant::now();
+    let outcome = turn.join().unwrap();
+    assert!(revoked_at.elapsed() < Duration::from_secs(3));
+    let answer = match outcome {
+        Ok(answer) => answer,
+        Err(error) => panic!("expected a stopped answer with its receipt, got {error:?}"),
+    };
+    assert!(answer.error.is_some());
+    assert!(answer.text.matches("tick").count() < 200);
+    let receipt = serde_json::to_value(answer.receipt.as_ref().unwrap()).unwrap();
+    assert_ne!(receipt["state"], "completed");
+    // The receipt still records that the text was sent before the revocation.
+    assert_eq!(receipt["external"][0]["transmission"], "sent");
+    assert_eq!(receipt["used"][0]["kind"], "screen_text");
+    // The panel now offers only on-device work and says why.
+    let state =
+        serde_json::to_value(futures_executor::block_on(r.engine.glance_state()).unwrap()).unwrap();
+    assert_eq!(state["localOnly"], true);
+    assert_eq!(state["providers"], json!([]));
+}

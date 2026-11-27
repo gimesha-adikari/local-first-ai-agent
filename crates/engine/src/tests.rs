@@ -184,7 +184,7 @@ impl InferenceProvider for Scripted {
 }
 
 #[derive(Default)]
-pub(crate) struct Recorder(Mutex<Vec<Value>>);
+pub(crate) struct Recorder(pub(crate) Mutex<Vec<Value>>);
 
 impl ChatEventSink for Recorder {
     fn send(&self, event: ChatEvent) {
@@ -1293,4 +1293,69 @@ fn local_glance_stops_holds_the_chat_gate_and_refuses_to_remember_partial_output
     // The gate is released for the next request.
     h.send(id, "Hello", json!({})).0.unwrap();
     assert!(h.engine.get_conversation(id).unwrap().messages.len() == 2);
+}
+
+#[test]
+fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work() {
+    use crate::chat::glance::{Attachment, Origin};
+    use agent_core::{
+        capability::ImageInput,
+        classification::{Labels, SCREEN_IMAGE, SCREEN_TEXT},
+    };
+    let h = harness();
+    h.load();
+    h.engine
+        .set_intelligence_settings(agent_core::provider::IntelligenceSettings {
+            local_only: true,
+            active_provider: None,
+        })
+        .unwrap();
+    let run = |input: Value, attachment: Option<Attachment>| {
+        futures_executor::block_on(h.engine.run_glance(
+            serde_json::from_value(input).unwrap(),
+            Origin::Screen,
+            attachment,
+            Cancellation::default(),
+            Arc::new(Recorder::default()),
+        ))
+    };
+    // Recognized screen text is processed on this device in Local-only mode.
+    let answer = run(
+        json!({"text": "Synthetic recognized screen text", "recipe": "translate",
+            "language": "French", "share": false, "memory": false, "documents": []}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(answer.text, "Hello there.");
+    let receipt = answer.receipt.as_ref().unwrap();
+    assert!(receipt.output_labels.contains(SCREEN_TEXT));
+    assert!(receipt.output_labels.contains(SCREEN_IMAGE));
+    let value = serde_json::to_value(receipt).unwrap();
+    assert_eq!(value["state"], "completed");
+    assert_eq!(value["external"], json!([]));
+    assert_eq!(value["used"][0]["kind"], "screen_text");
+    // There is no local vision model: an image is refused, not switched.
+    let crop = Attachment {
+        image: ImageInput::new(b"\x89PNG\r\n\x1a\nSYNTHETIC".to_vec()).unwrap(),
+        size: (64, 32),
+        labels: Labels::from_source(SCREEN_IMAGE),
+    };
+    let refused = run(
+        json!({"text": "", "recipe": "explain", "share": false, "memory": false,
+            "documents": [], "image": true, "crop": "c1"}),
+        Some(crop),
+    );
+    assert_eq!(
+        refused.err().unwrap().code,
+        ErrorCode::UnsupportedCapability
+    );
+    // A remote target is refused before anything else in Local-only mode.
+    let remote = run(
+        json!({"text": "Synthetic recognized screen text", "recipe": "explain",
+            "provider": 1, "revision": "r", "share": true, "memory": false, "documents": []}),
+        None,
+    );
+    let remote = remote.err().unwrap();
+    assert_eq!(remote.code, ErrorCode::PolicyDenied);
+    assert!(remote.message.contains("Local-only mode is on"));
 }
