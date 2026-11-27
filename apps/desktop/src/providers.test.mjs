@@ -20,12 +20,11 @@ const view = (patch = {}) => ({
   ...patch,
 });
 
-test("only an explicitly selected provider outside local-only mode receives Chat", () => {
+test("only the explicitly selected provider receives Chat", () => {
   const providers = [view()];
-  assert.equal(activeRemote({ localOnly: true, activeProvider: 1 }, providers), null);
-  assert.equal(activeRemote({ localOnly: false, activeProvider: null }, providers), null);
-  assert.equal(activeRemote({ localOnly: false, activeProvider: 2 }, providers), null);
-  assert.equal(activeRemote({ localOnly: false, activeProvider: 1 }, providers)?.id, 1);
+  assert.equal(activeRemote({ activeProvider: null }, providers), null);
+  assert.equal(activeRemote({ activeProvider: 2 }, providers), null);
+  assert.equal(activeRemote({ activeProvider: 1 }, providers)?.id, 1);
   assert.equal(activeRemote(null, providers), null);
 });
 
@@ -35,7 +34,7 @@ test("disclosure names the provider, shared and withheld categories", () => {
   assert.deepEqual(summary.withheld, ["saved memories", "document excerpts"]);
   assert.equal(listText(["a", "b", "c"]), "a, b and c");
   const text = disclosure(view());
-  assert.match(text, /^Sends your message and conversation history to Fixture \(cloud\); not saved memories and document excerpts\.$/);
+  assert.match(text, /^Sends your message and conversation history to Fixture \(cloud\)\. Withholds saved memories and document excerpts\.$/);
   assert.equal(localityLabel(view({ settings: { ...newProvider("self_hosted") }, network: "loopback", encrypted: false })),
     "Self-hosted on this computer, unencrypted");
 });

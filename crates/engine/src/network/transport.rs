@@ -616,7 +616,7 @@ async fn run(
 }
 
 /// A ready socket may wake before the next liveness tick. Order each
-/// non-blocking write/flush poll against the same lock used by restriction.
+/// non-blocking write/flush poll against the same lock used by grant revocation.
 async fn guarded_write(
     job: &Job,
     write: impl std::future::Future<Output = io::Result<()>>,

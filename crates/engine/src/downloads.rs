@@ -98,7 +98,6 @@ struct Entry {
 pub struct ModelCatalog {
     entries: Vec<Entry>,
     available_memory: Option<u64>,
-    local_only: bool,
     transfer_active: bool,
 }
 
@@ -159,7 +158,7 @@ fn network_error(failure: Failure) -> InferenceError {
         ),
         Failure::Denied(Denial::Locality | Denial::Revoked | Denial::Scope) => (
             ErrorCode::PolicyDenied,
-            "Local-only mode blocks model downloads. A new download approval is required after it is turned off.",
+            "The download authorization ended. Retry the download to start a new request.",
         ),
         Failure::TimedOut | Failure::Denied(Denial::Expired) => (
             ErrorCode::TimedOut,
@@ -278,17 +277,13 @@ impl Engine {
         Ok((files.inspection_path(final_name(artifact)), files))
     }
 
-    /// Before presenting native consent, validate the curated identity and
-    /// refuse Local-only operation.
-    pub fn model_download_offer(&self, key: &str) -> Result<&'static Artifact> {
+    /// Validate the curated identity and support for this model.
+    fn model_download_offer(&self, key: &str) -> Result<&'static Artifact> {
         let artifact = manifest::by_key(key).ok_or_else(unknown)?;
         if !model_supported(artifact) {
             return Err(incompatible(
                 "This app build cannot use this catalog model.",
             ));
-        }
-        if self.policy.is_local_only() {
-            return Err(network_error(Failure::Denied(Denial::Locality)));
         }
         Ok(artifact)
     }
@@ -325,10 +320,9 @@ impl Engine {
     ) -> Result<()> {
         let (transfer, slot) = self.reserve_transfer(artifact)?;
         let consent = match mode {
-            Acquire::Download { .. } => Some(
-                DownloadConsent::new(&self.policy, artifact, transfer.cancel.clone())
-                    .map_err(network_error)?,
-            ),
+            Acquire::Download { .. } => {
+                Some(DownloadConsent::new(artifact, transfer.cancel.clone()))
+            }
             Acquire::Finish => None,
         };
         let plan = self.download_plan(artifact)?;
@@ -561,7 +555,6 @@ impl Engine {
         Ok(ModelCatalog {
             entries,
             available_memory,
-            local_only: self.policy.is_local_only(),
             transfer_active: active.is_some(),
         })
     }
@@ -685,7 +678,7 @@ impl Engine {
             .await
             .ok_or_else(stopped)??;
         if let Some(consent) = consent {
-            consent.check(&self.policy).map_err(network_error)?;
+            consent.check().map_err(network_error)?;
         }
         if transfer.cancel.is_cancelled() {
             return Err(network_error(Failure::Cancelled));
@@ -744,7 +737,7 @@ impl Engine {
         transfer: &Transfer,
         consent: &DownloadConsent,
     ) -> Result<()> {
-        consent.check(&self.policy).map_err(network_error)?;
+        consent.check().map_err(network_error)?;
         let representation = database(&self.database)?
             .model_download(artifact.key, artifact.sha256)?
             .and_then(|record| record.representation)

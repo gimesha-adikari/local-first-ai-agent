@@ -40,7 +40,7 @@ use crate::{
         Failed, Failure, NetworkBoundary, Outbound,
         page::{PageError, PublicUrl, PublicUrlError, ResearchConsent},
     },
-    policy::{Denial, Permission, Policy},
+    policy::{Permission, Policy},
 };
 
 /// One explicitly authorized research request, sent with a Chat message.
@@ -60,6 +60,9 @@ pub struct ResearchOptions {
     /// the query's labels; nothing of the attachments themselves is sent.
     #[serde(default)]
     pub query_attachments: Vec<String>,
+    /// The outgoing derived query the user explicitly reviewed.
+    #[serde(default)]
+    pub reviewed_query: Option<String>,
     /// The public page to read in page mode.
     #[serde(default)]
     pub url: Option<String>,
@@ -82,7 +85,6 @@ pub struct WebResearchView {
     pub searxng_origin: Option<String>,
     pub searxng_network: Option<&'static str>,
     pub searxng_error: Option<String>,
-    pub local_only: bool,
 }
 
 /// A source in citation-slot order, merged from the saved record and, while
@@ -198,13 +200,6 @@ fn invalid(message: &str) -> InferenceError {
     InferenceError::new(ErrorCode::InvalidConfig, message)
 }
 
-pub(crate) fn local_only_error() -> InferenceError {
-    InferenceError::new(
-        ErrorCode::PolicyDenied,
-        "Local-only mode is on. Web research needs internet access, even with a local model. Turn off Local-only mode to search or read webpages.",
-    )
-}
-
 /// Map a transport failure on a search request.
 pub(crate) fn search_failure(provider: SearchProviderKind, failure: &Failure) -> InferenceError {
     let name = provider.label();
@@ -213,7 +208,6 @@ pub(crate) fn search_failure(provider: SearchProviderKind, failure: &Failure) ->
             ErrorCode::CredentialMissing,
             "Add your Brave Search API key in Settings → Web search.",
         ),
-        Failure::Denied(Denial::Locality) => local_only_error(),
         Failure::Cancelled => InferenceError::new(ErrorCode::Cancelled, "Research was stopped."),
         Failure::Resolve | Failure::Connect | Failure::Io => InferenceError::new(
             ErrorCode::NetworkFailed,
@@ -245,9 +239,6 @@ pub(crate) fn page_limitation(host: &str, error: &PageError) -> String {
     let reason = match error {
         PageError::Network(Failure::Address) => {
             "resolved to a private or disallowed network address, so it was not contacted".into()
-        }
-        PageError::Network(Failure::Denied(Denial::Locality)) => {
-            "was stopped by Local-only mode".into()
         }
         PageError::Network(Failure::Denied(_)) => "was refused by the research policy".into(),
         PageError::Network(Failure::Cancelled) => "was not read because research stopped".into(),
@@ -290,7 +281,7 @@ impl NetworkBoundary {
     ) -> Result<Vec<SearchResult>> {
         let policy = self.authority();
         consent
-            .check(policy)
+            .check()
             .map_err(|failure| search_failure(provider, &failure))?;
         consent
             .take()
@@ -450,10 +441,8 @@ impl Engine {
         sources: Labels,
         cancellation: agent_core::inference::Cancellation,
     ) -> Result<VisualSearch> {
-        if self.policy.is_local_only() {
-            return Err(local_only_error());
-        }
         let settings = database(&self.database)?.web_research_settings()?;
+        settings.validate()?;
         let provider = settings.provider.ok_or_else(|| {
             invalid("Choose a search provider in Settings → Web search to search the web.")
         })?;
@@ -463,16 +452,7 @@ impl Engine {
             ));
         }
         let query = SearchQuery::new(query)?;
-        let consent = ResearchConsent::new(
-            &self.policy,
-            cancellation,
-            1,
-            std::time::Duration::from_secs(120),
-        )
-        .map_err(|failure| match failure {
-            Failure::Denied(_) => local_only_error(),
-            other => crate::providers::failure_error(&other),
-        })?;
+        let consent = ResearchConsent::new(cancellation, 1, std::time::Duration::from_secs(120));
         let mut egress = Vec::new();
         let results = self
             .boundary
@@ -525,7 +505,6 @@ impl Engine {
             searxng_error: searxng
                 .and_then(std::result::Result::err)
                 .map(|error| error.to_string()),
-            local_only: self.policy.is_local_only(),
             settings,
             brave_key,
         })

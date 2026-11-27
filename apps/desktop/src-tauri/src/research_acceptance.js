@@ -1,19 +1,18 @@
-// Opt-in test against the packaged WebView and an isolated encrypted profile.
-// Runs without network access: every check is local or a policy refusal.
+// Runs the packaged WebView against a loopback search fixture with no public results.
 void (async () => {
-  const { invoke } = window.__TAURI_INTERNALS__;
+  const { invoke, transformCallback } = window.__TAURI_INTERNALS__;
   const result = { pass: false, steps: [] };
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
   const waitFor = async (find, message) => {
-    const end = performance.now() + 6000;
+    const end = performance.now() + 6500;
     while (performance.now() < end) {
-      const match = find();
+      const match = await find();
       if (match) return match;
       await new Promise((resolve) => setTimeout(resolve, 40));
     }
     throw new Error(message);
   };
-  const button = (text) => [...document.querySelectorAll("button")].find(
+  const button = (text) => [...document.querySelectorAll(text === "Search" ? ".composer button" : "button")].find(
     (item) => item.getClientRects().length && (item.textContent.trim() === text || item.getAttribute("aria-label") === text
       || item.getAttribute("title") === text),
   );
@@ -21,60 +20,53 @@ void (async () => {
     const found = button(text);
     return found && !found.disabled ? found : null;
   }, `Missing or disabled button ${text}`)).click();
+  const set = (element, value) => {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "value").set;
+    setter.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  };
   const refusal = (promise) => promise.then(() => null, (error) => error);
+  const send = () => click("Send message");
+  const selectMode = async (current, next) => {
+    await click(current);
+    await click(next);
+  };
   try {
     const initial = await invoke("web_research_settings");
-    assert(initial.localOnly === true && initial.settings.provider === null, "A new profile must start Local-only without a provider");
-    assert(initial.braveKey !== undefined, "Brave key status missing");
+    assert(initial.settings.provider === null && initial.braveKey !== undefined, "Unexpected first-run search settings");
+    const composer = await waitFor(() => document.querySelector(".composer"), "The composer did not load");
+    const textarea = composer.querySelector("#composer-input");
 
-    await click("Search the web or read a page for your next message");
-    await waitFor(() => document.querySelector(".research-bar"), "The research disclosure did not open");
-    await waitFor(() => document.body.textContent.includes("even with a local model"), "Local-only warning missing");
-    const textarea = document.querySelector("#composer-input");
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
-    setter.call(textarea, "What changed this week?");
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    await waitFor(() => document.body.textContent.includes("Choose a search provider") || document.body.textContent.includes("even with a local model"), "Plan problem missing");
-    assert(button("Send message")?.disabled, "Send must stay disabled in Local-only mode");
-    result.steps.push("Search toggle shows the disclosure and Local-only blocks sending");
+    await click("Search");
+    await waitFor(() => document.activeElement.textContent.trim() === "Search and answer", "Search menu did not take focus");
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    assert(document.activeElement.textContent.trim() === "Search results only", "Arrow key did not move between search modes");
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await waitFor(() => document.activeElement === button("Search") && !document.querySelector('[role="menu"]'), "Escape did not return focus");
+    await selectMode("Search", "Search and answer");
+    set(textarea, "Fixture question");
+    await waitFor(() => button("Set up search") && button("Send message")?.disabled, "Search without a provider missed its setup action");
 
-    const conversation = await invoke("create_conversation");
-    const channel = `__CHANNEL__:${window.__TAURI_INTERNALS__.transformCallback(() => {})}`;
-    const denied = await refusal(invoke("send_message", {
-      id: conversation.id, content: "Read it",
-      options: { research: { mode: "page", url: "https://example.org/" } }, events: channel,
-    }));
-    assert(denied?.code === "policy_denied", `Local-only research must be refused, got ${JSON.stringify(denied)}`);
-    assert((await invoke("get_conversation", { id: conversation.id })).messages.length === 0, "A refused research turn was saved");
-    result.steps.push("The engine refuses research in Local-only mode before saving anything");
+    await selectMode("Search · Search and answer", "Read a webpage");
+    set(composer.querySelector('input[type="url"]'), "https://localhost/");
+    await waitFor(() => composer.textContent.includes("Only public websites"), "Private page address was accepted");
+    assert(button("Send message")?.disabled, "An unsafe page can be submitted");
+    set(composer.querySelector('input[type="url"]'), "https://example.org/article");
+    await waitFor(() => !button("Send message")?.disabled, "Public page requires a search provider");
+    await selectMode("Search · Read a webpage", "Search and answer");
+    result.steps.push("Search menu supports keyboard navigation, a compact setup action and provider-free public webpage entry");
 
     const unsafe = await refusal(invoke("web_research_save", {
       settings: { provider: "searxng", braveSaveResults: false, searxngEndpoint: "http://169.254.169.254", searxngSaveResults: false },
     }));
     assert(unsafe?.code === "invalid_config", "A metadata-service SearXNG address was accepted");
     const saved = await invoke("web_research_save", {
-      settings: { provider: "searxng", braveSaveResults: false, searxngEndpoint: "http://127.0.0.1:8888/", searxngSaveResults: false },
+      settings: { provider: "searxng", braveSaveResults: false, searxngEndpoint: "http://127.0.0.1:__PORT__/", searxngSaveResults: false },
     });
-    assert(saved.settings.searxngEndpoint === "http://127.0.0.1:8888" && saved.searxngNetwork === "loopback", "SearXNG was not canonicalized");
-    const extra = await refusal(invoke("web_research_save", { settings: { provider: null, extra: true } }));
-    assert(extra, "Unknown settings fields were accepted");
-    result.steps.push("SearXNG settings are canonicalized and unsafe or unknown values refused");
+    assert(saved.settings.searxngEndpoint === "http://127.0.0.1:__PORT__" && saved.searxngNetwork === "loopback", "SearXNG was not canonicalized");
 
-    assert(await invoke("chat_web_research", { messageId: 1 }) === null, "A message without research returned sources");
-    const link = await refusal(invoke("web_research_open", { messageId: 1, target: { kind: "source", index: 0 } }));
-    assert(link?.code === "invalid_config", "A link was opened without a trusted research record");
-    const far = await refusal(invoke("web_research_open", { messageId: 1, target: { kind: "discovered", index: 99 } }));
-    assert(far?.code === "invalid_config", "An out-of-range link index was accepted");
-    const raw = await refusal(invoke("web_research_open", { messageId: 1, url: "https://evil.example/" }));
-    assert(raw, "The open command accepted a raw URL");
-    result.steps.push("Links open only from trusted research records");
-
-    await click("Settings");
-    await click("Web search");
-    await waitFor(() => document.body.textContent.includes("Brave Search API"), "Web search settings did not render");
-    await waitFor(() => document.body.textContent.includes("http://127.0.0.1:8888 · This computer"), "Saved SearXNG address not shown");
-    result.steps.push("Settings show the provider configuration");
-
+    await click("Set up search");
+    await waitFor(() => document.body.textContent.includes("http://127.0.0.1:__PORT__ · This computer"), "Saved SearXNG address not shown");
     await click("Purili (experimental)");
     await waitFor(() => document.querySelector(".error-text[role=alert]")?.textContent.includes("non-commercial"),
       "Selecting Purili without confirmation was not refused");
@@ -87,10 +79,59 @@ void (async () => {
     await click("Purili (experimental)");
     await waitFor(() => button("Purili (experimental)")?.getAttribute("aria-checked") === "true", "Purili was not selected");
     const chosen = (await invoke("web_research_settings")).settings;
-    assert(chosen.provider === "purili" && chosen.puriliPersonalUse === true, "Purili settings were not stored");
+    assert(chosen.provider === "purili" && chosen.puriliPersonalUse, "Purili confirmation was not stored");
     consent.click();
-    await waitFor(() => button("None")?.getAttribute("aria-checked") === "true", "Withdrawing the confirmation kept Purili selected");
-    result.steps.push("Purili needs the personal-use confirmation and is deselected when it is withdrawn");
+    await waitFor(() => button("None")?.getAttribute("aria-checked") === "true", "Withdrawing confirmation kept Purili selected");
+    await click("SearXNG");
+    await waitFor(() => button("SearXNG")?.getAttribute("aria-checked") === "true", "Could not return to the loopback search provider");
+    await click("Close");
+    result.steps.push("Purili selection requires the stored personal-use confirmation");
+
+    const coordinates = () => {
+      const bounds = composer.getBoundingClientRect();
+      const send = composer.querySelector(".send-button").getBoundingClientRect();
+      const actions = composer.querySelector(".composer-toolbar").getBoundingClientRect();
+      assert(Math.abs(send.bottom - actions.bottom) < 1 && send.left >= actions.right, "Send wrapped into the toolbar");
+      return Math.round(bounds.right - send.right);
+    };
+    assert(button("Thinking"), "The layout fixture is missing the Thinking control");
+    const inset = coordinates();
+    composer.style.width = "310px";
+    assert(composer.querySelector(".composer-toolbar").getBoundingClientRect().height > 35, "Controls did not wrap at the narrow width");
+    assert(coordinates() === inset, "Send moved from the right edge when controls wrapped");
+    composer.style.removeProperty("width");
+    result.steps.push("Send stays at the same right inset when the full Chat toolbar wraps");
+
+    const conversation = await invoke("create_conversation");
+    const channel = `__CHANNEL__:${transformCallback(() => {})}`;
+    const badPage = await refusal(invoke("send_message", {
+      id: conversation.id, content: "Read it",
+      options: { research: { mode: "page", url: "https://localhost/" } }, events: channel,
+    }));
+    assert(badPage?.code === "invalid_config", "The engine accepted a private direct page");
+    assert(!(await invoke("get_conversation", { id: conversation.id })).messages.length, "The refused page saved a turn");
+    await invoke("delete_conversation", { id: conversation.id });
+
+    await click("Edit query");
+    set(composer.querySelector('input[placeholder="Search query"]'), "Edited fixture query");
+    await send();
+    const finished = async (count) => waitFor(async () => {
+      const [thread] = await invoke("list_conversations", { query: "" });
+      if (!thread) return null;
+      const { messages } = await invoke("get_conversation", { id: thread.id });
+      const answers = messages.filter((message) => message.role === "assistant" && message.state === "complete");
+      return answers.length === count ? invoke("chat_web_research", { messageId: answers.at(-1).id }) : null;
+    }, "Search turn did not finish");
+    const answer = await finished(1);
+    assert(answer.record.synthesis === "local", "Search and answer did not select the local model");
+    assert(answer.record.provider === "searxng" && answer.query === "Edited fixture query", "Edited query did not reach the fixture");
+    await selectMode("Search", "Search results only");
+    set(textarea, "Typed results only");
+    await send();
+    const results = await finished(2);
+    assert(results.record.provider === "searxng" && results.query === "Typed results only" && results.record.synthesis === "none",
+      "Results-only mode did not send the typed query without synthesis");
+    result.steps.push("Edited Search and answer and typed results-only both completed via the Rust boundary without a confirmation");
     result.pass = true;
   } catch (error) {
     result.error = error?.message || String(error);

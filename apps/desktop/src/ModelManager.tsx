@@ -43,7 +43,7 @@ type Entry = {
   recommended: ModelSettings | null;
   supported: boolean;
 };
-type Catalog = { entries: Entry[]; localOnly: boolean; availableMemory: number | null; transferActive: boolean };
+type Catalog = { entries: Entry[]; availableMemory: number | null; transferActive: boolean };
 type View = "discover" | "installed" | "downloads";
 const views: { value: View; label: string }[] = [
   { value: "discover", label: "Discover" }, { value: "installed", label: "Installed" }, { value: "downloads", label: "Downloads" },
@@ -66,12 +66,11 @@ const inDownloads = (entry: Entry) => active(entry) || entry.partial
 const languages = new Intl.DisplayNames(["en"], { type: "language" });
 
 export function ModelManager({
-  children, initialInstalled, localOnly, operationsBusy, onSelectModel, onImportChat, onImportEmbedding, onUnloadEmbedding,
+  children, initialInstalled, operationsBusy, onSelectModel, onImportChat, onImportEmbedding, onUnloadEmbedding,
   onEmbeddingChanged, embeddingNotice,
 }: {
   children: ReactNode;
   initialInstalled: boolean;
-  localOnly: boolean;
   operationsBusy: boolean;
   onSelectModel: (id: number) => void;
   onImportChat: () => void;
@@ -123,7 +122,8 @@ export function ModelManager({
 
   async function start(entry: Entry, restart: boolean) {
     await run(entry.artifact.key, async () => {
-      if (await invoke<boolean>("start_model_download", { key: entry.artifact.key, restart })) setView("downloads");
+      await invoke("start_model_download", { key: entry.artifact.key, restart });
+      setView("downloads");
     });
   }
 
@@ -134,7 +134,6 @@ export function ModelManager({
 
   const entries = catalog?.entries ?? [];
   const downloads = entries.filter((entry) => inDownloads(entry) || entry.status === "installed");
-  const blocked = localOnly || !!catalog?.localOnly;
   const networkBusy = action !== null || !!catalog?.transferActive;
   const installedEntries = entries.filter((entry) => entry.status === "removal_pending"
     || (entry.status === "incompatible" || entry.status === "missing") && entry.managedFile
@@ -157,9 +156,6 @@ export function ModelManager({
         </details>
       </div>
       {error && <Callout tone="error" title="Model library" role="alert">{error}</Callout>}
-      {view !== "installed" && blocked && <Callout title="Local-only mode is on">
-        Turn it off in Providers to approve a download. You can use installed models or import files from this computer.
-      </Callout>}
       {view !== "installed" && !catalog && !error && <p className="hint inline-status"><Spinner size={14} />Loading model catalog…</p>}
 
       {view === "discover" && catalog && (
@@ -189,7 +185,7 @@ export function ModelManager({
                       artifact.capabilities.includes("core.embed/1") && "Semantic search",
                     ].filter(Boolean).join(", ")}</dd>
                     <dt>Languages</dt><dd>{artifact.languages.map((language) => languages.of(language)).join(", ") || artifact.languageNote || "See model card"}</dd>
-                    <dt>Source</dt><dd>{artifact.source}</dd>
+                    <dt>Source</dt><dd>{artifact.source} · Downloaded from Hugging Face and its CDN</dd>
                     <dt>File</dt><dd>{artifact.fileName} · {artifact.bytes.toLocaleString()} bytes</dd>
                     <dt>Revision</dt><dd>{artifact.revision}</dd>
                     <dt>SHA-256</dt><dd>{artifact.sha256}</dd>
@@ -202,9 +198,9 @@ export function ModelManager({
                     ? <button type="button" className="secondary-button small" onClick={() => showModel(entry)}>View installed</button>
                     : inDownloads(entry)
                       ? <button type="button" className="secondary-button small" onClick={() => setView("downloads")}>View download</button>
-                      : <button type="button" className="primary-button small" disabled={blocked || networkBusy || !entry.supported
+                      : <button type="button" className="primary-button small" disabled={networkBusy || !entry.supported
                         || entry.status === "incompatible"} onClick={() => void start(entry, false)}
-                        aria-label={`Download ${artifact.name}`}>Download…</button>}
+                        aria-label={`Download ${artifact.name}`}>Download</button>}
                 </div>
               </article>
             );
@@ -232,10 +228,10 @@ export function ModelManager({
                 {entry.status === "ready_to_finish" && <button className="primary-button small" type="button" disabled={networkBusy || operationsBusy}
                   onClick={() => void run(entry.artifact.key, () => invoke("finish_model_installation", { key: entry.artifact.key }))}>Finish installation</button>}
                 {!active(entry) && !entry.managedFile && entry.status !== "ready_to_finish" && <>
-                  <button className="primary-button small" type="button" disabled={networkBusy || blocked || !entry.supported}
-                    onClick={() => void start(entry, !entry.resumable && entry.partial)}>{entry.resumable ? "Resume…" : "Retry…"}</button>
-                  {entry.resumable && <button className="secondary-button small" type="button" disabled={networkBusy || blocked || !entry.supported}
-                    onClick={() => void start(entry, true)}>Restart…</button>}
+                  <button className="primary-button small" type="button" disabled={networkBusy || !entry.supported}
+                    onClick={() => void start(entry, !entry.resumable && entry.partial)}>{entry.resumable ? "Resume" : "Retry"}</button>
+                  {entry.resumable && <button className="secondary-button small" type="button" disabled={networkBusy || !entry.supported}
+                    onClick={() => void start(entry, true)}>Restart</button>}
                 </>}
                 {!active(entry) && entry.partial && !entry.managedFile && <button className="ghost-button small" type="button" disabled={networkBusy}
                   onClick={() => setRemove({ entry, installed: false })}>Discard partial…</button>}

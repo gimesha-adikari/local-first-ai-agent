@@ -98,6 +98,8 @@ fn deliver(events: &ChatEvents, event: ChatEvent) {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatOptions {
+    /// The Chat target shown at submission time.
+    expected_target: Option<ExpectedChatTarget>,
     #[serde(default)]
     enable_thinking: bool,
     max_tokens: Option<u32>,
@@ -108,6 +110,12 @@ pub struct ChatOptions {
     /// Files attached to this message (Stage 04-D).
     #[serde(default)]
     attachments: Option<AttachmentRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExpectedChatTarget {
+    provider_id: Option<agent_core::provider::ProviderId>,
 }
 
 #[cfg(test)]
@@ -517,6 +525,14 @@ impl Engine {
         events: ChatEvents,
     ) -> Result<Message> {
         let operation = self.reserve()?;
+        if let Some(target) = &options.expected_target
+            && self.intelligence_settings()?.active_provider != target.provider_id
+        {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "The Chat provider changed. Review the current target and send again.",
+            ));
+        }
         let cancellation = Cancellation::default();
         let active = ActiveChat::register(&self.chat_cancellation, cancellation.clone())?;
         let model_id = self.active_model();
@@ -731,11 +747,8 @@ impl ChatRuntime {
             );
         }
         let memory_question = matches!(memory_request, Some(MemoryRequest::Question));
-        // The saved selection decides the target. A remote provider is used
-        // only when local-only mode is off and it is explicitly selected;
-        // there is no fallback in either direction.
-        let selection =
-            crate::providers::effective_settings(&*database(&self.database)?, &self.policy)?;
+        // The explicitly selected Chat target is authoritative for the turn.
+        let selection = database(&self.database)?.intelligence_settings()?;
         let remote = crate::providers::remote_target(&self.database, selection)?;
         let local = match &remote {
             Some(_) => None,

@@ -172,7 +172,6 @@ fn remote(handler: Handler, configure: impl FnOnce(&mut ProviderSettings)) -> Re
     vault.values.lock().unwrap().insert(key, KEY.into());
     engine
         .set_intelligence_settings(IntelligenceSettings {
-            local_only: false,
             active_provider: Some(view.id),
         })
         .unwrap();
@@ -287,22 +286,86 @@ fn cloud_only_chat_completes_without_a_local_model() {
 }
 
 #[test]
-fn local_only_mode_opens_no_connection() {
+fn choosing_the_local_model_keeps_chat_off_the_network() {
     let r = remote(streaming(true), |_| {});
     r.engine
         .set_intelligence_settings(IntelligenceSettings {
-            local_only: true,
-            active_provider: Some(r.provider),
+            active_provider: None,
         })
         .unwrap();
+    let settings = agent_core::chat::ModelSettings::recommended(2048);
+    let model = r
+        .engine
+        .store()
+        .lock()
+        .unwrap()
+        .remember_model(
+            Path::new("/synthetic/scripted.gguf"),
+            "scripted.gguf",
+            settings,
+        )
+        .unwrap();
+    futures_executor::block_on(r.engine.load_model(model.id, settings)).unwrap();
     let id = r.conversation();
-    let error = r.send(id, "Hello", json!({})).unwrap_err();
-    assert_eq!(error.code, ErrorCode::NoModel);
-    let error = futures_executor::block_on(r.engine.test_provider(r.provider)).unwrap_err();
-    assert_eq!(error.code, ErrorCode::PolicyDenied);
+    let answer = r
+        .send(
+            id,
+            "Hello",
+            json!({ "expectedTarget": { "providerId": null } }),
+        )
+        .unwrap();
+    assert_eq!(answer.state, GenerationState::Complete);
+    assert_eq!(r.receipt(answer.id)["external"], json!([]));
     assert_eq!(r.server.accepted(), 0);
     assert_eq!(r.engine.network().connections(), 0);
     assert!(!r.engine.network().started());
+}
+
+#[test]
+fn opening_a_legacy_profile_with_a_configured_provider_keeps_transport_idle() {
+    let directory =
+        std::env::temp_dir().join(format!("agent-connectivity-startup-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("chat.sqlite3");
+    let server = Fixture::start(None, streaming(true));
+    {
+        let mut db = SqliteStore::open_test_fixture(&path).unwrap();
+        let saved = db
+            .save_provider(None, &provider_settings(server.port))
+            .unwrap();
+        db.save_intelligence_settings(IntelligenceSettings {
+            active_provider: Some(saved.id),
+        })
+        .unwrap();
+    }
+    let old = rusqlite::Connection::open(&path).unwrap();
+    old.execute_batch(
+        "ALTER TABLE intelligence_settings ADD COLUMN local_only INTEGER NOT NULL DEFAULT 1 CHECK (local_only IN (0, 1));
+         PRAGMA user_version = 19;",
+    ).unwrap();
+    drop(old);
+
+    let engine = Engine::new(
+        Arc::new(Threads),
+        Arc::new(InferenceWorker::spawn(|| Scripted(Script::default())).unwrap()),
+        SqliteStore::open_test_fixture(&path).unwrap(),
+        path,
+    )
+    .unwrap();
+    assert_eq!(
+        engine.bootstrap().unwrap().intelligence.active_provider,
+        None
+    );
+    assert_eq!(
+        futures_executor::block_on(engine.list_providers())
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!engine.network().started());
+    assert_eq!(server.accepted(), 0);
+    drop(engine);
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -628,17 +691,6 @@ fn busy_provider_deletion_preserves_registration_and_key() {
             .unwrap()
             .deletion_pending
     );
-    r.engine.enable_local_only().unwrap();
-    assert!(r.engine.intelligence_settings().unwrap().local_only);
-    assert!(
-        r.engine
-            .store()
-            .lock()
-            .unwrap()
-            .intelligence_settings()
-            .unwrap()
-            .local_only
-    );
     drop(lease);
     futures_executor::block_on(r.engine.delete_provider(r.provider)).unwrap();
     assert!(
@@ -694,64 +746,6 @@ fn keyring_failure_keeps_removal_pending_until_retry() {
             .unwrap()
             .is_empty()
     );
-}
-
-#[test]
-fn local_only_is_durable_and_explicit_on_failed_write() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "agent-restriction-{}-{}.sqlite",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let open = || {
-        Engine::new(
-            Arc::new(Threads),
-            Arc::new(InferenceWorker::spawn(|| Scripted(Script::default())).unwrap()),
-            SqliteStore::open_test_fixture(&path).unwrap(),
-            path.clone(),
-        )
-        .unwrap()
-    };
-    let engine = open();
-    engine
-        .set_intelligence_settings(IntelligenceSettings {
-            local_only: false,
-            active_provider: None,
-        })
-        .unwrap();
-    engine.enable_local_only().unwrap();
-    drop(engine);
-    let engine = open();
-    assert!(engine.intelligence_settings().unwrap().local_only);
-    engine
-        .set_intelligence_settings(IntelligenceSettings {
-            local_only: false,
-            active_provider: None,
-        })
-        .unwrap();
-    drop(engine);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("CREATE TRIGGER deny_restriction BEFORE UPDATE OF local_only ON intelligence_settings WHEN NEW.local_only = 1 BEGIN SELECT RAISE(ABORT, 'synthetic persistence failure'); END;").unwrap();
-    drop(db);
-    let engine = open();
-    let error = engine.enable_local_only().unwrap_err();
-    assert_eq!(error.code, ErrorCode::Storage);
-    assert!(error.message.contains("Saving it failed"));
-    assert!(engine.intelligence_settings().unwrap().local_only);
-    assert!(engine.intelligence_policy().is_local_only());
-    assert!(
-        !engine
-            .store()
-            .lock()
-            .unwrap()
-            .intelligence_settings()
-            .unwrap()
-            .local_only
-    );
-    drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1045,23 +1039,10 @@ fn screen_crops_reach_only_image_providers_with_confirmation_and_text_keeps_scre
     );
     // Nothing from the panel request reached the database.
     assert!(!vision.database_text().contains("Synthetic recognized text"));
-
-    // Local-only stops image and text requests before anything is sent.
-    vision
-        .engine
-        .set_intelligence_settings(agent_core::provider::IntelligenceSettings {
-            local_only: true,
-            active_provider: None,
-        })
-        .unwrap();
-    let before = vision.server.accepted();
-    let blocked = run(&vision, input(&vision, true, true), Some(crop()));
-    assert_eq!(blocked.err().unwrap().code, ErrorCode::PolicyDenied);
-    assert_eq!(vision.server.accepted(), before);
 }
 
 #[test]
-fn local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_accurate() {
+fn cancelling_a_remote_screen_request_keeps_the_receipt_accurate() {
     use crate::chat::glance::{Input, Origin};
     let handler: Handler = Arc::new(|_, out: &mut dyn Write| {
         let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
@@ -1089,12 +1070,14 @@ fn local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_ac
     let recorder = Arc::new(Recorder::default());
     let events = Arc::clone(&recorder);
     let runner = Arc::clone(&r);
+    let cancellation = agent_core::inference::Cancellation::default();
+    let active_cancellation = cancellation.clone();
     let turn = std::thread::spawn(move || {
         futures_executor::block_on(runner.engine.run_glance(
             input,
             Origin::SCREEN,
             None,
-            Default::default(),
+            active_cancellation,
             events,
         ))
     });
@@ -1106,9 +1089,7 @@ fn local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_ac
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    // Turning on Local-only revokes the live grant: the stream stops at the
-    // next response check instead of running to completion.
-    r.engine.enable_local_only().unwrap();
+    cancellation.cancel();
     let revoked_at = std::time::Instant::now();
     let outcome = turn.join().unwrap();
     assert!(revoked_at.elapsed() < Duration::from_secs(3));
@@ -1120,14 +1101,9 @@ fn local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_ac
     assert!(answer.text.matches("tick").count() < 200);
     let receipt = serde_json::to_value(answer.receipt.as_ref().unwrap()).unwrap();
     assert_ne!(receipt["state"], "completed");
-    // The receipt still records that the text was sent before the revocation.
+    // The receipt still records that the text was sent before cancellation.
     assert_eq!(receipt["external"][0]["transmission"], "sent");
     assert_eq!(receipt["used"][0]["kind"], "screen_text");
-    // The panel now offers only on-device work and says why.
-    let state =
-        serde_json::to_value(futures_executor::block_on(r.engine.glance_state()).unwrap()).unwrap();
-    assert_eq!(state["localOnly"], true);
-    assert_eq!(state["providers"], json!([]));
 }
 
 #[path = "attachment_remote_tests.rs"]

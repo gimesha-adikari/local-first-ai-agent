@@ -51,7 +51,15 @@ void (async () => {
   try {
     await waitFor(() => document.querySelector("#composer-input"), "The composer did not appear", 60000);
     await waitFor(async () => (await invoke("inference_status")).phase === "ready", "The fixture model did not load");
-    await invoke("web_research_save", { settings: { provider: "brave", braveSaveResults: false, searxngEndpoint: "", searxngSaveResults: false, puriliPersonalUse: false } });
+    await click("Settings");
+    await click("Web search");
+    const personalUse = await waitFor(() => [...document.querySelectorAll('[role="switch"]')].find(
+      (item) => item.labels?.[0]?.textContent.includes("only for personal, non-commercial")), "Purili terms missing");
+    personalUse.click();
+    await waitFor(() => personalUse.getAttribute("aria-checked") === "true", "Purili terms were not saved");
+    await click("Purili (experimental)");
+    await waitFor(() => button("Purili (experimental)")?.getAttribute("aria-checked") === "true", "Purili not selected");
+    await click("Close");
     const visual = await invoke("visual_settings");
     assert(visual.ocr.available && visual.ocr.defaults.includes("eng"), `OCR state ${JSON.stringify(visual.ocr)}`);
     result.steps.push(`shared OCR languages default to ${visual.ocr.defaults.join(", ")}`);
@@ -97,7 +105,13 @@ void (async () => {
     await card("Search");
     const query = await waitFor(() => document.querySelector(".research-edit input")?.value, "Search query was not prefilled");
     assert(/Settings/.test(query), `Query ${query}`);
-    assert(/never\s+the image/.test(document.querySelector(".research-bar").textContent), "Visual search disclosure missing");
+    const confirm = await waitFor(() => document.querySelector(".research-bar .check-row input"), "Visual query review missing");
+    assert(/only the query text/i.test(confirm.labels[0].textContent), "Visual search disclosure missing");
+    assert(button("Send message")?.disabled, "Derived query was enabled before review");
+    confirm.click();
+    await waitFor(() => confirm.checked, "Visual query review could not be confirmed");
+    set(document.querySelector(".research-edit input"), "Edited visual query");
+    assert(!confirm.checked, "Editing did not clear the visual query review");
     assert([...document.querySelectorAll(".attachment-card button")].some((item) => item.textContent.trim() === "Paused"),
       "The image was not paused for the search message");
     await shot("chat-visual-search");
@@ -105,7 +119,8 @@ void (async () => {
 
     // Back to the attachment: translation request through Chat's pipeline.
     await click("Use my message");
-    document.querySelector('.composer-pill[aria-pressed="true"]')?.click();
+    await click("Search · Search and answer");
+    await click("Search off");
     await waitFor(() => !document.querySelector(".research-bar"), "Search did not turn off");
     await card("Paused");
     await card("Translate");

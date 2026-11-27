@@ -24,7 +24,7 @@ use super::{
     Destination, Endpoint, Failed, Failure, Method, NetworkBoundary, Outbound, RequestBinding,
     Route, sha256,
 };
-use crate::policy::{Connectivity, Denial, Operation, Permission, Policy, Session};
+use crate::policy::{Connectivity, Denial, Operation, Permission, Session};
 
 /// Hard transport bound for one page response. The reader stops earlier, at
 /// [`MAX_PAGE_BYTES`], and aborts the transfer.
@@ -192,7 +192,6 @@ fn public_name(name: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Binding {
-    pub epoch: u64,
     target_sha256: [u8; 32],
 }
 
@@ -216,32 +215,21 @@ impl Target {
 }
 
 /// The trusted, bounded authorization for one research request. It owns the
-/// policy session: cancellation, Local-only mode or dropping the consent ends
+/// policy session: cancellation or dropping the consent ends
 /// every request made under it.
 pub(crate) struct ResearchConsent {
     session: Session,
-    epoch: u64,
     expires: Instant,
     requests: AtomicUsize,
 }
 
 impl ResearchConsent {
-    pub fn new(
-        policy: &Policy,
-        cancel: Cancellation,
-        requests: usize,
-        lifetime: Duration,
-    ) -> Result<Self, Failure> {
-        let epoch = policy.restriction_epoch();
-        if policy.is_local_only() {
-            return Err(Failure::Denied(Denial::Locality));
-        }
-        Ok(Self {
+    pub fn new(cancel: Cancellation, requests: usize, lifetime: Duration) -> Self {
+        Self {
             session: Session::new(cancel),
-            epoch,
             expires: Instant::now() + lifetime,
             requests: AtomicUsize::new(requests),
-        })
+        }
     }
 
     pub fn session(&self) -> &Session {
@@ -252,12 +240,9 @@ impl ResearchConsent {
         self.expires
     }
 
-    pub fn check(&self, policy: &Policy) -> Result<(), Failure> {
-        if self.session.cancellation().is_cancelled() {
+    pub fn check(&self) -> Result<(), Failure> {
+        if self.session.is_closed() {
             return Err(Failure::Cancelled);
-        }
-        if policy.is_local_only() || self.epoch != policy.restriction_epoch() {
-            return Err(Failure::Denied(Denial::Locality));
         }
         if Instant::now() >= self.expires {
             return Err(Failure::TimedOut);
@@ -335,7 +320,7 @@ impl NetworkBoundary {
     ) -> Result<FetchedPage, PageError> {
         let mut url = url;
         for hop in 0..=MAX_REDIRECTS {
-            consent.check(&self.policy).map_err(PageError::Network)?;
+            consent.check().map_err(PageError::Network)?;
             consent.take().map_err(PageError::Network)?;
             #[cfg(not(test))]
             let destination = destination(&url).map_err(PageError::Network)?;
@@ -349,7 +334,6 @@ impl NetworkBoundary {
                 body_len: 0,
                 artifact: None,
                 page: Some(Binding {
-                    epoch: consent.epoch,
                     target_sha256: sha256(target.path.as_bytes()),
                 }),
             };

@@ -64,8 +64,8 @@ export type Bootstrap = {
   models: ModelReference[];
   activeModelId: number | null;
   inference: Status;
-  /** Local-only mode and the provider Chat uses. */
-  intelligence: { localOnly: boolean; activeProvider: number | null };
+  /** The provider Chat uses. */
+  intelligence: { activeProvider: number | null };
 };
 
 /** Result of verifying the model resource shipped with the app (Task 04-A). */
@@ -198,6 +198,7 @@ export function validModelSettings(settings: ModelSettings): boolean {
 
 /** Per-request chat options accepted by `send_message` and `regenerate`. */
 export type ChatOptions = {
+  expectedTarget?: { providerId: number | null };
   enableThinking?: boolean;
   maxTokens?: number;
   /** Omitted or null for ordinary Chat. */

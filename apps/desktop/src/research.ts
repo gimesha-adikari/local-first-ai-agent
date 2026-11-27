@@ -21,7 +21,6 @@ export type WebResearchView = {
   searxngOrigin: string | null;
   searxngNetwork: string | null;
   searxngError: string | null;
-  localOnly: boolean;
 };
 
 export type WebSourceRecord = {
@@ -91,10 +90,11 @@ export type ResearchDraft = {
    * search, Stage 04-E). Only their classes travel with the query; the
    * attachments themselves are not sent. */
   queryAttachments: string[];
+  reviewedQuery: { text: string; provider: SearchProviderKind } | null;
 };
 
 export const emptyResearch: ResearchDraft = {
-  enabled: false, mode: "search", query: null, url: "", resultsOnly: false, share: false, queryAttachments: [],
+  enabled: false, mode: "search", query: null, url: "", resultsOnly: false, share: false, queryAttachments: [], reviewedQuery: null,
 };
 
 export const maxQueryChars = 400;
@@ -149,6 +149,8 @@ export function urlProblem(text: string): string | null {
 
 export type ResearchPlan = {
   canSend: boolean;
+  setupRequired: boolean;
+  reviewRequired: boolean;
   problem: string | null;
   /** Shown before sending: who receives what. */
   destination: string;
@@ -167,19 +169,23 @@ export function researchPlan({ draft, message, view, remoteName, modelReady }: {
 }): ResearchPlan {
   const provider = view?.settings.provider ?? null;
   let problem: string | null = null;
+  let setupRequired = false;
+  let reviewRequired = false;
   let destination: string;
   let outgoing: string | null = null;
-  if (view?.localOnly) problem = "Local-only mode is on. Web research needs internet access, even with a local model.";
   if (draft.mode === "search") {
     destination = providerLabel(provider);
     outgoing = normalizeQuery(draft.query ?? message);
-    if (!provider) problem ??= "Choose a search provider in Settings → Web search, or read a specific page.";
+    if (!provider) problem = "Choose a search provider.";
     else if (provider === "brave" && view?.braveKey !== "stored") problem ??= "Add your Brave Search API key in Settings → Web search.";
-    else if (provider === "searxng" && !view?.searxngOrigin) problem ??= "Enter your SearXNG address in Settings → Web search.";
+    else if (provider === "searxng" && !view?.searxngOrigin) problem = "Enter your SearXNG address in Settings → Web search.";
+    else if (provider === "purili" && !view?.settings.puriliPersonalUse) problem = "Confirm Purili’s personal-use terms in Settings.";
+    setupRequired = problem !== null;
+    reviewRequired = draft.queryAttachments.length > 0 && !approvedQuery(draft, provider, outgoing);
     if (message.trim() || draft.query !== null) problem ??= queryProblem(draft.query ?? message);
   } else {
     destination = "the webpage's own site";
-    problem ??= urlProblem(draft.url);
+    if (draft.url.trim()) problem = urlProblem(draft.url);
   }
   const pages = draft.mode === "search" ? `up to ${maxPages} public pages` : "the page";
   let answer: ResearchPlan["answer"];
@@ -199,11 +205,18 @@ export function researchPlan({ draft, message, view, remoteName, modelReady }: {
     answer = "none";
     answerNote = "No model is loaded, so you'll get the sources without a written answer.";
   }
-  return { canSend: !problem && !!message.trim(), problem, destination, outgoing, answer, answerNote };
+  return {
+    canSend: !problem && !reviewRequired && !!message.trim() && (draft.mode !== "page" || !!draft.url.trim()),
+    problem, setupRequired, reviewRequired, destination, outgoing, answer, answerNote,
+  };
+}
+
+function approvedQuery(draft: ResearchDraft, provider: SearchProviderKind | null, outgoing: string) {
+  return !!outgoing && draft.reviewedQuery?.provider === provider && draft.reviewedQuery.text === outgoing;
 }
 
 /** The per-message research request, or undefined when Search is off. */
-export function researchOptions(draft: ResearchDraft, view: WebResearchView | null) {
+export function researchOptions(draft: ResearchDraft, view: WebResearchView | null, message = "") {
   if (!draft.enabled) return undefined;
   if (draft.mode === "page") {
     return {
@@ -212,11 +225,14 @@ export function researchOptions(draft: ResearchDraft, view: WebResearchView | nu
       ...(draft.share ? { shareWithProvider: true } : {}),
     };
   }
+  const provider = view?.settings.provider ?? null;
+  const query = draft.query !== null || draft.queryAttachments.length ? normalizeQuery(draft.query ?? message) : null;
   return {
     mode: "search" as const,
-    provider: view?.settings.provider ?? undefined,
-    ...(draft.query !== null ? { query: normalizeQuery(draft.query) } : {}),
-    ...(draft.query !== null && draft.queryAttachments.length ? { queryAttachments: draft.queryAttachments } : {}),
+    provider: provider ?? undefined,
+    ...(query !== null ? { query } : {}),
+    ...(draft.queryAttachments.length ? { queryAttachments: draft.queryAttachments } : {}),
+    ...(query !== null && draft.queryAttachments.length && approvedQuery(draft, provider, query) ? { reviewedQuery: query } : {}),
     ...(draft.resultsOnly ? { resultsOnly: true } : {}),
     ...(draft.share ? { shareWithProvider: true } : {}),
   };

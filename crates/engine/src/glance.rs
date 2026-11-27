@@ -174,9 +174,6 @@ pub fn prompt_labels(origin: Origin) -> Labels {
 #[serde(rename_all = "camelCase")]
 pub struct PanelState {
     local_available: bool,
-    /// Local-only mode is on: providers are hidden and only on-device work
-    /// (including screen capture and text recognition) is offered.
-    local_only: bool,
     memory_enabled: bool,
     providers: Vec<Provider>,
     documents: Vec<Document>,
@@ -253,7 +250,6 @@ impl Engine {
         }
         Ok(PanelState {
             local_available: self.active_model().is_some(),
-            local_only: self.policy.is_local_only(),
             memory_enabled,
             providers,
             documents: documents
@@ -446,12 +442,6 @@ impl ChatRuntime {
             let db = database(&self.database)?;
             let target = match input.provider {
                 Some(id) => {
-                    if self.policy.is_local_only() {
-                        return Err(InferenceError::new(
-                            ErrorCode::PolicyDenied,
-                            "Local-only mode is on, so nothing is sent to providers. Choose the local model, or turn off Local-only mode in the main window.",
-                        ));
-                    }
                     if !input.share {
                         return Err(InferenceError::new(
                             ErrorCode::PolicyDenied,

@@ -27,12 +27,11 @@ fn second() -> Destination {
     destination("fixture.second/1", "https://second.example/v1")
 }
 
-fn policy(local_only: bool) -> Policy {
+fn policy() -> Policy {
     Policy::new(
         CapabilityRegistry::new([GENERATE]),
         DataClasses::default(),
         [first(), second()],
-        local_only,
     )
 }
 
@@ -82,7 +81,7 @@ fn future() -> Instant {
 #[test]
 fn denies_unknown_ids_endpoint_changes_routes_and_unverifiable_adapters() {
     let session = Session::new(Cancellation::default());
-    let authority = policy(false);
+    let authority = policy();
     let payload = || Classified::from_source(vec![1], USER_INPUT);
     let admit = |request: &Outbound| authority.admit(request.operation(), 0, 0);
     let unknown_capability = Outbound::new(
@@ -160,7 +159,7 @@ fn denies_unknown_ids_endpoint_changes_routes_and_unverifiable_adapters() {
 #[test]
 fn sharing_is_one_operation_bound_to_its_payload() {
     let session = Session::new(Cancellation::default());
-    let authority = policy(false);
+    let authority = policy();
     let request = request(&session, first());
     let (process, share) = grants(&authority, &request, future());
     // An identical body in a new operation needs its own grants.
@@ -224,7 +223,7 @@ fn sharing_is_one_operation_bound_to_its_payload() {
 #[test]
 fn requires_current_process_and_share_grants() {
     let session = Session::new(Cancellation::default());
-    let authority = policy(false);
+    let authority = policy();
     let request = request(&session, first());
     assert_eq!(
         authority.admit(request.operation(), 0, 0),
@@ -270,7 +269,7 @@ fn requires_current_process_and_share_grants() {
 
 #[test]
 fn observation_processing_retention_and_sharing_are_independent() {
-    let authority = policy(false);
+    let authority = policy();
     let session = Session::new(Cancellation::default());
     let operation = Operation::local(
         &session,
@@ -318,18 +317,8 @@ fn observation_processing_retention_and_sharing_are_independent() {
 }
 
 #[test]
-fn local_only_and_local_selection_never_fall_back_to_remote() {
+fn a_local_intention_cannot_be_routed_to_a_remote_destination() {
     let session = Session::new(Cancellation::default());
-    let authority = policy(true);
-    let remote = request(&session, first());
-    assert_eq!(
-        authority.admit(remote.operation(), 0, 0),
-        Err(Denial::Locality)
-    );
-    assert_eq!(
-        authority.grant(Permission::Share, remote.operation(), future()),
-        Err(Denial::Locality)
-    );
     let intended_local = Outbound::new(
         &session,
         GENERATE,
@@ -341,17 +330,9 @@ fn local_only_and_local_selection_never_fall_back_to_remote() {
         Classified::from_source(vec![1], USER_INPUT),
         Retention::None,
     );
-    let remote_enabled = policy(false);
+    let authority = policy();
     assert_eq!(
-        remote_enabled.admit(intended_local.operation(), 0, 0),
-        Err(Denial::Locality)
-    );
-    // Switching local-only on later invalidates an already granted operation.
-    let request = request(&session, second());
-    let (process, share) = grants(&remote_enabled, &request, future());
-    remote_enabled.set_local_only(true);
-    assert_eq!(
-        remote_enabled.admit(request.operation(), process, share),
+        authority.admit(intended_local.operation(), 0, 0),
         Err(Denial::Locality)
     );
 }
@@ -366,7 +347,6 @@ fn registering_a_data_class_does_not_grant_existing_workflow_access() {
         CapabilityRegistry::new([GENERATE]),
         DataClasses::new([extension]),
         [],
-        true,
     );
     let session = Session::new(Cancellation::default());
     let operation = Operation::local(
@@ -404,7 +384,6 @@ fn search_requests_admit_visual_query_classes_but_never_history_memory_or_docume
         CapabilityRegistry::new([WEB_SEARCH]),
         DataClasses::default(),
         [search.clone()],
-        false,
     );
     let session = Session::new(Cancellation::default());
     let query = |purpose, sources: &[DataClass]| {

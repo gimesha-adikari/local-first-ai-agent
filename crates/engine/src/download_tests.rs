@@ -166,7 +166,6 @@ impl Harness {
         if fixture_route {
             crate::network::artifact::route_fixture(&engine.policy, fixture.port);
         }
-        engine.policy.set_local_only(false);
         Self {
             engine,
             fixture,
@@ -458,62 +457,43 @@ fn unsafe_continuation_is_rejected_and_a_full_response_can_restart() {
 }
 
 #[test]
-fn cancellation_revocation_and_duplicates_preserve_the_partial() {
-    for revoke in [false, true] {
-        let mut data = gguf();
-        let saved = 1024 * 1024;
-        data.resize(2 * saved, 0);
-        let artifact = artifact(&data);
-        let (sent, received) = std::sync::mpsc::channel();
-        let handler = Arc::new(move |_: &[u8], out: &mut dyn Write| {
-            send(out, &full(artifact.bytes), &data[..saved]);
-            let _ = sent.send(());
-            thread::sleep(Duration::from_secs(3));
-        });
-        let h = Harness::new(u64::MAX, handler, true, &["127.0.0.1"]);
-        h.engine.policy.set_local_only(true);
-        assert_eq!(
-            h.start(artifact, false).unwrap_err().code,
-            ErrorCode::PolicyDenied
-        );
-        assert!(!h.engine.network().started());
-        h.engine.policy.set_local_only(false);
-        h.start(artifact, false).unwrap();
-        received.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(h.start(artifact, false).unwrap_err().code, ErrorCode::Busy);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while fs::metadata(h.partial(artifact)).unwrap().len() != saved as u64 {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(10));
-        }
-        if revoke {
-            h.engine.policy.set_local_only(true);
-            h.engine.policy.set_local_only(false);
-        } else {
-            assert!(
-                h.engine
-                    .downloads
-                    .0
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|transfer| {
-                        transfer.cancel.cancel();
-                        true
-                    })
-            );
-        }
-        let phase = h.wait(artifact);
-        assert_eq!(phase.phase, "interrupted");
-        assert_eq!(
-            fs::metadata(h.partial(artifact)).unwrap().len(),
-            saved as u64
-        );
-        assert!(phase.representation.is_some());
-        assert_eq!(h.fixture.accepted(), 1);
-        block_on(h.engine.remove_artifact(artifact, false)).unwrap();
-        assert!(!h.partial(artifact).exists());
+fn a_curated_download_starts_directly_and_cancellation_preserves_the_partial() {
+    let mut data = gguf();
+    let saved = 1024 * 1024;
+    data.resize(saved, 0);
+    let artifact = &manifest::LFM25;
+    let (sent, received) = std::sync::mpsc::channel();
+    let handler = Arc::new(move |_: &[u8], out: &mut dyn Write| {
+        send(out, &full(artifact.bytes), &data[..saved]);
+        let _ = sent.send(());
+        thread::sleep(Duration::from_secs(3));
+    });
+    let h = Harness::new(u64::MAX, handler, true, &["127.0.0.1"]);
+    h.engine.start_model_download(artifact.key, false).unwrap();
+    received.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        h.engine
+            .start_model_download(artifact.key, false)
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fs::metadata(h.partial(artifact)).unwrap().len() != saved as u64 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
     }
+    assert!(h.engine.cancel_model_download(artifact.key).unwrap());
+    let phase = h.wait(artifact);
+    assert_eq!(phase.phase, "interrupted");
+    assert_eq!(
+        fs::metadata(h.partial(artifact)).unwrap().len(),
+        saved as u64
+    );
+    assert!(phase.representation.is_some());
+    assert_eq!(h.fixture.accepted(), 1);
+    block_on(h.engine.remove_model_download(artifact.key, false)).unwrap();
+    assert!(!h.partial(artifact).exists());
 }
 
 #[test]
@@ -534,7 +514,6 @@ fn low_disk_preflight_and_local_registration_recovery() {
         .unwrap()
         .set_model_download_phase(artifact.key, "ready", None)
         .unwrap();
-    h.engine.policy.set_local_only(true);
     h.engine
         .start_acquisition(artifact, Acquire::Finish)
         .unwrap();
@@ -592,7 +571,6 @@ fn live_bge_distribution() {
         .unwrap(),
     );
     let artifact = &manifest::BGE_SMALL_EN;
-    engine.policy.set_local_only(false);
     engine.start_model_download(artifact.key, false).unwrap();
     let deadline = Instant::now() + Duration::from_secs(360);
     while engine.downloads.0.lock().unwrap().is_some() {

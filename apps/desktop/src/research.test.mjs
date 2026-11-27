@@ -11,7 +11,6 @@ const view = (patch = {}) => ({
   searxngOrigin: null,
   searxngNetwork: null,
   searxngError: null,
-  localOnly: false,
   ...patch,
 });
 
@@ -56,9 +55,6 @@ test("the plan discloses provider, outgoing query and where the answer is writte
 
   assert.match(researchPlan({ draft, message: "q", view: view({ braveKey: "missing" }), remoteName: null, modelReady: true }).problem, /API key/);
   assert.match(researchPlan({ draft, message: "q", view: view({ settings: { ...view().settings, provider: null } }), remoteName: null, modelReady: true }).problem, /Choose a search provider/);
-  const offline = researchPlan({ draft, message: "q", view: view({ localOnly: true }), remoteName: null, modelReady: true });
-  assert.equal(offline.canSend, false);
-  assert.match(offline.problem, /even with a local model/);
 
   const page = researchPlan({ draft: { ...draft, mode: "page", url: "https://example.org/a" }, message: "Summarize", view: view({ settings: { ...view().settings, provider: null } }), remoteName: null, modelReady: true });
   assert.equal(page.canSend, true);
@@ -70,6 +66,7 @@ test("Purili is named as experimental, needs no key and keeps results to the ses
   const draft = { ...emptyResearch, enabled: true };
   const plan = researchPlan({ draft, message: "history of the bicycle", view: purili, remoteName: null, modelReady: true });
   assert.equal(plan.canSend, true);
+  assert.equal(researchPlan({ draft, message: "q", view: view({ settings: { ...purili.settings, puriliPersonalUse: false } }), remoteName: null, modelReady: true }).canSend, false);
   assert.equal(plan.destination, "Purili (experimental)");
   assert.deepEqual(researchOptions(draft, purili), { mode: "search", provider: "purili" });
   const note = historyNote({ transient: false, record: { provider: "purili" }, sources: [{ saved: false }] });
@@ -87,7 +84,7 @@ test("options carry only what was authorized for this message", () => {
   const visual = researchOptions({ ...emptyResearch, enabled: true, query: "CAMERA TEST 42", queryAttachments: [`a${"1".repeat(32)}`] }, view());
   assert.deepEqual(visual.queryAttachments, [`a${"1".repeat(32)}`]);
   assert.equal(visual.query, "CAMERA TEST 42");
-  assert.equal(researchOptions({ ...emptyResearch, enabled: true, queryAttachments: ["x"] }, view()).queryAttachments, undefined);
+  assert.equal(visual.reviewedQuery, undefined);
   assert.deepEqual(researchOptions({ ...emptyResearch, enabled: true, mode: "page", url: " https://e.org/ ", resultsOnly: true }, view()),
     { mode: "page", url: "https://e.org/", resultsOnly: true });
 });
@@ -103,4 +100,22 @@ test("summaries and labels stay honest about what was read and saved", () => {
   assert.equal(historyNote({ transient: true, sources: [] }), null);
   assert.match(historyNote({ transient: false, record, sources: [{ saved: false }] }), /storage terms/);
   assert.equal(stageLabel("reading", "page"), "Reading the page…");
+});
+
+test("image-derived queries need review of the exact query and search provider", () => {
+  const draft = { ...emptyResearch, enabled: true, queryAttachments: ["image-id"] };
+  const plan = (settings, message = "Reviewed image text", config = view()) => researchPlan({
+    draft: settings, message, view: config, remoteName: null, modelReady: true,
+  });
+  assert.equal(plan(draft).canSend, false);
+  assert.equal(plan(draft).reviewRequired, true);
+  const confirmed = { ...draft, reviewedQuery: { text: "Reviewed image text", provider: "brave" } };
+  assert.equal(plan(confirmed).canSend, true);
+  assert.equal(plan(confirmed, "Edited image text").canSend, false);
+  assert.equal(plan(confirmed, "Reviewed image text", view({
+    settings: { ...view().settings, provider: "searxng" }, searxngOrigin: "http://127.0.0.1",
+  })).canSend, false);
+  assert.deepEqual(researchOptions(confirmed, view(), "Reviewed image text"), {
+    mode: "search", provider: "brave", query: "Reviewed image text", queryAttachments: ["image-id"], reviewedQuery: "Reviewed image text",
+  });
 });

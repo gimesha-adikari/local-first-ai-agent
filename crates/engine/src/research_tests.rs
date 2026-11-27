@@ -213,12 +213,6 @@ fn research(search: Handler) -> Research {
         ..Default::default()
     }))
     .unwrap();
-    engine
-        .set_intelligence_settings(IntelligenceSettings {
-            local_only: false,
-            active_provider: None,
-        })
-        .unwrap();
     let model = engine
         .store()
         .lock()
@@ -585,26 +579,6 @@ fn search_privacy_rules_and_provider_errors_are_explicit() {
     let (result, _) = r.send(id, "bridge", search(None));
     assert_eq!(result.unwrap_err().code, ErrorCode::CredentialMissing);
     assert_eq!(r.search_requests().len(), before);
-
-    // Local-only mode refuses research before any request or saved turn.
-    let messages = r.engine.get_conversation(id).unwrap().messages.len();
-    r.engine.enable_local_only().unwrap();
-    let (result, _) = r.send(id, "bridge", search(None));
-    let error = result.unwrap_err();
-    assert_eq!(error.code, ErrorCode::PolicyDenied);
-    assert!(error.message.contains("even with a local model"));
-    let (result, _) = r.send(
-        id,
-        "read",
-        json!({"research": {"mode": "page", "url": "https://news.fixture-site.org/"}}),
-    );
-    assert_eq!(result.unwrap_err().code, ErrorCode::PolicyDenied);
-    assert_eq!(
-        r.engine.get_conversation(id).unwrap().messages.len(),
-        messages
-    );
-    assert_eq!(r.search_requests().len(), before);
-    assert!(r.page_requests().is_empty());
 }
 
 #[test]
@@ -776,11 +750,6 @@ fn purili_is_explicit_keyless_transient_and_never_a_fallback() {
     assert!(error.message.starts_with("Purili"));
     assert_eq!(r.search_requests().len(), 2);
     assert_eq!(r.page_requests().len(), 1);
-
-    r.engine.enable_local_only().unwrap();
-    let (result, _) = r.send(id, "Fernhill bridge", options);
-    assert_eq!(result.unwrap_err().code, ErrorCode::PolicyDenied);
-    assert_eq!(r.search_requests().len(), 2);
 }
 
 /// Opt-in live check of one complete research turn through Purili: the real
@@ -814,12 +783,6 @@ fn live_purili_research() {
         ..Default::default()
     }))
     .unwrap();
-    engine
-        .set_intelligence_settings(IntelligenceSettings {
-            local_only: false,
-            active_provider: None,
-        })
-        .unwrap();
     let id = engine.create_conversation().unwrap().id;
     let events: ChatEvents = Arc::new(Recorder::default());
     let options: ChatOptions = serde_json::from_value(
@@ -893,7 +856,6 @@ fn remote_synthesis_requires_its_own_authorization() {
     .unwrap();
     r.engine
         .set_intelligence_settings(IntelligenceSettings {
-            local_only: false,
             active_provider: Some(view.id),
         })
         .unwrap();
@@ -998,19 +960,11 @@ fn live_compatibility_without_credentials() {
         engine.brave_credential_key().unwrap(),
         "synthetic-invalid-key".into(),
     );
-    engine
-        .set_intelligence_settings(IntelligenceSettings {
-            local_only: false,
-            active_provider: None,
-        })
-        .unwrap();
     let consent = crate::network::page::ResearchConsent::new(
-        engine.intelligence_policy(),
         agent_core::inference::Cancellation::default(),
         8,
         Duration::from_secs(60),
-    )
-    .unwrap();
+    );
     let mut records = Vec::new();
     let error = futures_executor::block_on(engine.network().search(
         &consent,
@@ -1137,7 +1091,7 @@ fn visual_search_sends_only_the_reviewed_query_with_its_visual_classes() {
         id,
         "What do web sources say about this?",
         json!({"research": {"mode": "search", "provider": "brave",
-            "queryAttachments": [snapshot]}}),
+            "query": "Fernhill bridge", "reviewedQuery": "Earlier query", "queryAttachments": [snapshot]}}),
     );
     assert_eq!(unreviewed.unwrap_err().code, ErrorCode::InvalidConfig);
     assert_eq!(r.search_requests().len(), 2);
@@ -1145,7 +1099,7 @@ fn visual_search_sends_only_the_reviewed_query_with_its_visual_classes() {
         id,
         "What do web sources say about this?",
         json!({"research": {"mode": "search", "provider": "brave",
-            "query": "Fernhill bridge", "queryAttachments": [snapshot]}}),
+            "query": "Fernhill bridge", "reviewedQuery": "Fernhill bridge", "queryAttachments": [snapshot]}}),
     );
     let message = result.unwrap();
     let request = r.search_requests().pop().unwrap();
@@ -1168,22 +1122,4 @@ fn visual_search_sends_only_the_reviewed_query_with_its_visual_classes() {
     for class in [ATTACHMENT_TEXT, CAMERA_TEXT, CAMERA_IMAGE, QUERY] {
         assert!(classes.contains(class.id), "{} in {classes}", class.id);
     }
-
-    // Local-only mode blocks visual search entirely.
-    r.engine
-        .set_intelligence_settings(IntelligenceSettings {
-            local_only: true,
-            active_provider: None,
-        })
-        .unwrap();
-    let before = r.search_requests().len();
-    let refused = futures_executor::block_on(r.engine.visual_search(
-        "CAMERA TEST 42",
-        Some(SearchProviderKind::Brave),
-        labels,
-        Cancellation::default(),
-    ))
-    .unwrap_err();
-    assert_eq!(refused.code, ErrorCode::PolicyDenied);
-    assert_eq!(r.search_requests().len(), before);
 }

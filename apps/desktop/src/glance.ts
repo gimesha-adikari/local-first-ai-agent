@@ -31,7 +31,7 @@ export function languageName(code: string): string {
 }
 
 export type GlanceState = {
-  localAvailable: boolean; localOnly: boolean; memoryEnabled: boolean; providers: GlanceProvider[];
+  localAvailable: boolean; memoryEnabled: boolean; providers: GlanceProvider[];
   documents: { id: number; name: string }[]; ocr?: OcrState;
   /** The configured search provider for visual-assisted search (Stage 04-E). */
   search?: SearchState;

@@ -20,16 +20,15 @@ void (async () => {
   try {
     await click("Models");
     await waitFor(() => document.querySelectorAll(".catalog-card").length === 3, "The three catalog cards did not render");
-    assert(button("Download Qwen3.5 4B (UD-Q4_K_XL)")?.disabled, "Network action is enabled in Local-only mode");
-    const refusal = await invoke("start_model_download", { key, restart: false }).catch((error) => error);
-    assert(refusal?.code === "policy_denied", "The command must refuse Local-only mode");
+    assert(button("Download Qwen3.5 4B (UD-Q4_K_XL)") && !button("Download Qwen3.5 4B (UD-Q4_K_XL)").disabled,
+      "An available catalog entry cannot be downloaded");
     const unknown = await invoke("start_model_download", { key: "https://example.com/model", restart: false }).catch((error) => error);
     assert(unknown?.code === "not_found", "The command accepted an arbitrary model URL");
-    result.steps.push("Three catalog cards, Local-only refusal, curated-only command");
+    result.steps.push("Three catalog cards, enabled direct download, curated-only command");
 
     await click("Downloads");
     await waitFor(() => document.querySelector("progress")?.value === 32, "Interrupted model progress missing");
-    assert(button("Retry…")?.disabled, "Retry enabled in Local-only mode");
+    assert(button("Retry") && !button("Retry").disabled, "Interrupted download cannot be retried");
     await click("Discard partial…");
     await click("Discard partial");
     await waitFor(() => document.body.textContent.includes("No downloads in progress"), "Partial download was not cleared");

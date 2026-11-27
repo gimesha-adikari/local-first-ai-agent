@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     manifest::Artifact,
-    policy::{Connectivity, Denial, Operation, Permission, Policy, Session},
+    policy::{Connectivity, Operation, Permission, Session},
 };
 
 const HUB: &str = "huggingface.co";
@@ -27,7 +27,6 @@ pub(super) const TRANSFER_LIMIT: Duration = Duration::from_secs(6 * 60 * 60);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Binding {
     pub key: &'static str,
-    pub epoch: u64,
     target_sha256: [u8; 32],
 }
 
@@ -57,34 +56,21 @@ impl Target {
 pub(crate) struct DownloadConsent {
     artifact: &'static Artifact,
     session: Session,
-    epoch: u64,
     expires: Instant,
 }
 
 impl DownloadConsent {
-    pub fn new(
-        policy: &Policy,
-        artifact: &'static Artifact,
-        cancel: Cancellation,
-    ) -> Result<Self, Failure> {
-        let epoch = policy.restriction_epoch();
-        if policy.is_local_only() {
-            return Err(Failure::Denied(Denial::Locality));
-        }
-        Ok(Self {
+    pub fn new(artifact: &'static Artifact, cancel: Cancellation) -> Self {
+        Self {
             artifact,
             session: Session::new(cancel),
-            epoch,
             expires: Instant::now() + TRANSFER_LIMIT,
-        })
+        }
     }
 
-    pub fn check(&self, policy: &Policy) -> Result<(), Failure> {
-        if self.session.cancellation().is_cancelled() {
+    pub fn check(&self) -> Result<(), Failure> {
+        if self.session.is_closed() {
             return Err(Failure::Cancelled);
-        }
-        if policy.is_local_only() || self.epoch != policy.restriction_epoch() {
-            return Err(Failure::Denied(Denial::Locality));
         }
         if Instant::now() >= self.expires {
             return Err(Failure::TimedOut);
@@ -235,7 +221,7 @@ impl NetworkBoundary {
             return Err(Failure::Address);
         }
         for hop in 0..=MAX_REDIRECTS {
-            consent.check(&self.policy)?;
+            consent.check()?;
             let host = origin_host(&url)?;
             #[cfg(not(test))]
             let destination = destination(host);
@@ -265,7 +251,6 @@ impl NetworkBoundary {
                 body_len: 0,
                 artifact: Some(Binding {
                     key: artifact.key,
-                    epoch: consent.epoch,
                     target_sha256: target.sha256(),
                 }),
                 page: None,
@@ -333,7 +318,7 @@ impl NetworkBoundary {
 }
 
 #[cfg(test)]
-pub(crate) fn route_fixture(policy: &Policy, port: u16) {
+pub(crate) fn route_fixture(policy: &crate::policy::Policy, port: u16) {
     for host in hosts() {
         let mut dest = destination(host);
         dest.endpoint = Endpoint::parse(&format!("https://{host}:{port}")).unwrap();

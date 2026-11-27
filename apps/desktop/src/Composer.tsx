@@ -29,7 +29,7 @@ export default function Composer({
   attachmentTray?: ReactNode;
   /** Chat-only knowledge selection control. */
   knowledgeControl?: ReactNode;
-  /** Chat-only web research toggle and its disclosure panel. */
+  /** Chat-only web research menu and options. */
   researchControl?: ReactNode;
   researchPanel?: ReactNode;
   /** While an approval is pending, close and disable menus so nothing covers its controls. */
@@ -130,111 +130,112 @@ export default function Composer({
         <textarea id="composer-input" ref={textarea} rows={1} maxLength={mode === "agent" ? 8192 : 65536}
           value={draft} disabled={inputDisabled} placeholder={placeholder} aria-describedby={statusId}
           onChange={(event) => onDraftChange(event.currentTarget.value)} onKeyDown={onKeyDown} />
-        <div className="composer-toolbar" key={lockMenus ? "menus-locked" : "menus-open"}>
-          {mode === "agent" && (
-            <Menu label="Add files or folders" placement="above" trigger={<PlusIcon size={17} />} className="composer-icon-menu" disabled={lockMenus}>
+        <div className="composer-actions">
+          <div className="composer-toolbar" key={lockMenus ? "menus-locked" : "menus-open"}>
+            {mode === "agent" && (
+              <Menu label="Add files or folders" placement="above" trigger={<PlusIcon size={17} />} className="composer-icon-menu" disabled={lockMenus}>
+                {(close) => (
+                  <>
+                    <MenuItem icon={<FileIcon size={15} />} disabled={grantDisabled || scopeAction !== null}
+                      hint="Read-only, this session" onSelect={() => { close(); onGrant("file"); }}>
+                      {scopeAction === "file" ? "Choosing file…" : "Select a file…"}
+                    </MenuItem>
+                    <MenuItem icon={<FolderIcon size={15} />} disabled={grantDisabled || scopeAction !== null}
+                      hint="Read-only, includes subfolders" onSelect={() => { close(); onGrant("directory"); }}>
+                      {scopeAction === "directory" ? "Choosing folder…" : "Select a folder…"}
+                    </MenuItem>
+                    <MenuSeparator />
+                    <MenuItem icon={<LockIcon size={15} />} onSelect={() => { close(); onManageAccess(); }}>Manage access…</MenuItem>
+                  </>
+                )}
+              </Menu>
+            )}
+
+            {mode === "chat" && attachmentControl}
+
+            <Menu label={`Mode: ${mode === "agent" ? "Agent" : "Chat"}`} placement="above" className="composer-pill-menu" disabled={lockMenus}
+              trigger={<>{mode === "agent" ? <AgentIcon size={14} /> : <ChatIcon size={14} />}<span>{mode === "agent" ? "Agent" : "Chat"}</span><ChevronDownIcon size={13} /></>}>
               {(close) => (
                 <>
-                  <MenuItem icon={<FileIcon size={15} />} disabled={grantDisabled || scopeAction !== null}
-                    hint="Read-only, this session" onSelect={() => { close(); onGrant("file"); }}>
-                    {scopeAction === "file" ? "Choosing file…" : "Select a file…"}
-                  </MenuItem>
-                  <MenuItem icon={<FolderIcon size={15} />} disabled={grantDisabled || scopeAction !== null}
-                    hint="Read-only, includes subfolders" onSelect={() => { close(); onGrant("directory"); }}>
-                    {scopeAction === "directory" ? "Choosing folder…" : "Select a folder…"}
-                  </MenuItem>
-                  <MenuSeparator />
-                  <MenuItem icon={<LockIcon size={15} />} onSelect={() => { close(); onManageAccess(); }}>Manage access…</MenuItem>
+                  <MenuItem checked={mode === "chat"} icon={<ChatIcon size={15} />} hint="Talk with the local model"
+                    onSelect={() => { close(); onModeChange("chat"); }}>Chat</MenuItem>
+                  <MenuItem checked={mode === "agent"} icon={<AgentIcon size={15} />} disabled={!agentAvailable}
+                    hint={agentAvailable ? "Use approved tools on this device" : agentUnavailable ?? "Unavailable"}
+                    onSelect={() => { close(); onModeChange("agent"); }}>Agent</MenuItem>
                 </>
               )}
             </Menu>
-          )}
 
-          {mode === "chat" && attachmentControl}
+            <Menu label="Model" placement="above" className="composer-pill-menu" disabled={lockMenus}
+              trigger={<>
+                {modelBusy ? <Spinner size={12} /> : <CubeIcon size={14} />}
+                <span className="pill-text">{modelBusy ?? (active ? modelLabel(active.fileName) : "No model")}</span>
+                <ChevronDownIcon size={13} />
+              </>}>
+              {(close) => (
+                <>
+                  {models.length === 0 && <p className="menu-empty">No models imported yet.</p>}
+                  {models.map((model) => (
+                    <MenuItem key={model.id} checked={model.id === activeModelId} disabled={modelBusy !== null || modelLocked || inputDisabled}
+                      icon={<CubeIcon size={15} />} hint={model.id === activeModelId ? "Loaded" : "Load this model"}
+                      onSelect={() => { close(); if (model.id !== activeModelId) onSelectModel(model.id); }}>
+                      {modelLabel(model.fileName)}
+                    </MenuItem>
+                  ))}
+                  <MenuSeparator />
+                  <MenuItem icon={<SlidersIcon size={15} />} onSelect={() => { close(); onManageModels(); }}>Manage models…</MenuItem>
+                </>
+              )}
+            </Menu>
 
-          <Menu label={`Mode: ${mode === "agent" ? "Agent" : "Chat"}`} placement="above" className="composer-pill-menu" disabled={lockMenus}
-            trigger={<>{mode === "agent" ? <AgentIcon size={14} /> : <ChatIcon size={14} />}<span>{mode === "agent" ? "Agent" : "Chat"}</span><ChevronDownIcon size={13} /></>}>
-            {(close) => (
-              <>
-                <MenuItem checked={mode === "chat"} icon={<ChatIcon size={15} />} hint="Talk with the local model"
-                  onSelect={() => { close(); onModeChange("chat"); }}>Chat</MenuItem>
-                <MenuItem checked={mode === "agent"} icon={<AgentIcon size={15} />} disabled={!agentAvailable}
-                  hint={agentAvailable ? "Use approved tools on this device" : agentUnavailable ?? "Unavailable"}
-                  onSelect={() => { close(); onModeChange("agent"); }}>Agent</MenuItem>
-              </>
+            {mode === "chat" && knowledgeControl}
+
+            {mode === "chat" && researchControl}
+
+            {mode === "chat" && thinkingSupported && (
+              <button type="button" className="composer-pill" aria-pressed={thinking}
+                title={thinking ? "Thinking is on for your next message" : "Direct answer. Turn on to let the model think first"}
+                onClick={() => onThinkingChange(!thinking)}>
+                <ThinkIcon size={14} /><span>Thinking</span>
+              </button>
             )}
-          </Menu>
 
-          <Menu label="Model" placement="above" className="composer-pill-menu" disabled={lockMenus}
-            trigger={<>
-              {modelBusy ? <Spinner size={12} /> : <CubeIcon size={14} />}
-              <span className="pill-text">{modelBusy ?? (active ? modelLabel(active.fileName) : "No model")}</span>
-              <ChevronDownIcon size={13} />
-            </>}>
-            {(close) => (
-              <>
-                {models.length === 0 && <p className="menu-empty">No models imported yet.</p>}
-                {models.map((model) => (
-                  <MenuItem key={model.id} checked={model.id === activeModelId} disabled={modelBusy !== null || modelLocked || inputDisabled}
-                    icon={<CubeIcon size={15} />} hint={model.id === activeModelId ? "Loaded" : "Load this model"}
-                    onSelect={() => { close(); if (model.id !== activeModelId) onSelectModel(model.id); }}>
-                    {modelLabel(model.fileName)}
-                  </MenuItem>
-                ))}
-                <MenuSeparator />
-                <MenuItem icon={<SlidersIcon size={15} />} onSelect={() => { close(); onManageModels(); }}>Manage models…</MenuItem>
-              </>
-            )}
-          </Menu>
+            <Popover label="Response options" placement="above" disabled={lockMenus} triggerClassName={`icon-button${optionsAttention ? " has-dot" : ""}`}
+              trigger={<SlidersIcon size={16} />}>
+              {mode === "chat" ? (
+                <div className="options-panel">
+                  <label className="field" htmlFor={outputId}>
+                    <span>Output limit for the next reply</span>
+                    <input id={outputId} type="number" inputMode="numeric" min={1} max={4096} step={1}
+                      placeholder={savedMaxTokens ? `${savedMaxTokens} (saved)` : "Saved limit"}
+                      value={outputOverride} aria-invalid={overrideInvalid}
+                      onChange={(event) => onOutputOverride(event.currentTarget.value)} />
+                  </label>
+                  <p className="hint">
+                    Leave blank to use the model's saved limit{savedMaxTokens ? ` of ${savedMaxTokens} tokens` : ""}.
+                    Must be 1–4096{contextLength ? ` and below the ${contextLength}-token context` : ""}.
+                  </p>
+                  {overrideInvalid && <p className="error-text">Enter a whole number in the allowed range.</p>}
+                  {savedMaxTokens !== null && lowOutputLimit({ maxTokens: savedMaxTokens }) && (
+                    <p className="hint">The saved limit is below {shortOutputLimit} tokens, so longer replies may be cut off.</p>
+                  )}
+                  <button type="button" className="link-button" onClick={onOpenModelSettings}>Model settings…</button>
+                </div>
+              ) : (
+                <div className="options-panel">
+                  <label className="field" htmlFor={timeoutId}>
+                    <span>Task time limit (seconds)</span>
+                    <input id={timeoutId} type="number" inputMode="numeric" min={1} max={maxTaskTimeoutSeconds} step={1}
+                      value={timeout} aria-invalid={timeoutInvalid}
+                      onChange={(event) => onTimeoutChange(event.currentTarget.value)} />
+                  </label>
+                  <p className="hint">Covers planning, tools and your approval. 1–{maxTaskTimeoutSeconds} seconds; the default is 300.</p>
+                  {timeoutInvalid && <p className="error-text">Enter a whole number from 1 to {maxTaskTimeoutSeconds}.</p>}
+                </div>
+              )}
+            </Popover>
 
-          {mode === "chat" && knowledgeControl}
-
-          {mode === "chat" && researchControl}
-
-          {mode === "chat" && thinkingSupported && (
-            <button type="button" className="composer-pill" aria-pressed={thinking}
-              title={thinking ? "Thinking is on for your next message" : "Direct answer. Turn on to let the model think first"}
-              onClick={() => onThinkingChange(!thinking)}>
-              <ThinkIcon size={14} /><span>Thinking</span>
-            </button>
-          )}
-
-          <Popover label="Response options" placement="above" disabled={lockMenus} triggerClassName={`icon-button${optionsAttention ? " has-dot" : ""}`}
-            trigger={<SlidersIcon size={16} />}>
-            {mode === "chat" ? (
-              <div className="options-panel">
-                <label className="field" htmlFor={outputId}>
-                  <span>Output limit for the next reply</span>
-                  <input id={outputId} type="number" inputMode="numeric" min={1} max={4096} step={1}
-                    placeholder={savedMaxTokens ? `${savedMaxTokens} (saved)` : "Saved limit"}
-                    value={outputOverride} aria-invalid={overrideInvalid}
-                    onChange={(event) => onOutputOverride(event.currentTarget.value)} />
-                </label>
-                <p className="hint">
-                  Leave blank to use the model's saved limit{savedMaxTokens ? ` of ${savedMaxTokens} tokens` : ""}.
-                  Must be 1–4096{contextLength ? ` and below the ${contextLength}-token context` : ""}.
-                </p>
-                {overrideInvalid && <p className="error-text">Enter a whole number in the allowed range.</p>}
-                {savedMaxTokens !== null && lowOutputLimit({ maxTokens: savedMaxTokens }) && (
-                  <p className="hint">The saved limit is below {shortOutputLimit} tokens, so longer replies may be cut off.</p>
-                )}
-                <button type="button" className="link-button" onClick={onOpenModelSettings}>Model settings…</button>
-              </div>
-            ) : (
-              <div className="options-panel">
-                <label className="field" htmlFor={timeoutId}>
-                  <span>Task time limit (seconds)</span>
-                  <input id={timeoutId} type="number" inputMode="numeric" min={1} max={maxTaskTimeoutSeconds} step={1}
-                    value={timeout} aria-invalid={timeoutInvalid}
-                    onChange={(event) => onTimeoutChange(event.currentTarget.value)} />
-                </label>
-                <p className="hint">Covers planning, tools and your approval. 1–{maxTaskTimeoutSeconds} seconds; the default is 300.</p>
-                {timeoutInvalid && <p className="error-text">Enter a whole number from 1 to {maxTaskTimeoutSeconds}.</p>}
-              </div>
-            )}
-          </Popover>
-
-          <span className="spacer" />
+          </div>
           {showStop ? (
             <button type="button" className="send-button" disabled={!canStop} onClick={onStop}
               aria-label={stopping ? "Stopping" : stopLabel} title={stopLabel}>
@@ -249,7 +250,7 @@ export default function Composer({
         </div>
       </form>
       {scopeError && mode === "agent" && <p className="error-text composer-error" role="alert">{scopeError}</p>}
-      <p id={statusId} className="composer-status">{status}</p>
+      <p id={statusId} className="composer-status" hidden={!status}>{status}</p>
     </div>
   );
 }

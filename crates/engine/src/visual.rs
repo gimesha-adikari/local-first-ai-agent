@@ -56,8 +56,7 @@ impl Engine {
 
     /// Authorize observing one camera snapshot after an explicit gesture.
     /// This covers only taking the frame on this device: it grants no
-    /// processing by a provider, no retention and no sharing. Local-only
-    /// mode allows it, because nothing leaves the device.
+    /// processing by a provider, no retention and no sharing.
     pub fn authorize_camera_snapshot(
         &self,
         cancellation: Cancellation,
@@ -146,13 +145,5 @@ mod tests {
         let cancelled = Cancellation::default();
         cancelled.cancel();
         assert!(engine.authorize_camera_snapshot(cancelled).is_err());
-
-        // Local-only mode still allows on-device capture.
-        policy.set_local_only(true);
-        assert!(
-            engine
-                .authorize_camera_snapshot(Cancellation::default())
-                .is_ok()
-        );
     }
 }

@@ -22,6 +22,7 @@ use crate::{
     credentials::NoSecureStorage,
     fixture::{Authority, Fixture, Handler},
     network::{BoundaryConfig, Limits, NetworkScope, ResolveFuture, Resolver, TrustAnchors},
+    policy::Policy,
 };
 
 struct Fixed(HashMap<String, Vec<IpAddr>>);
@@ -61,7 +62,6 @@ fn pages(handler: Option<Handler>, answers: &[(&str, &[&str])]) -> Pages {
         CapabilityRegistry::new([GENERATE, WEB_PAGE, WEB_SEARCH]),
         DataClasses::default(),
         [],
-        false,
     ));
     let boundary = NetworkBoundary::new(
         Arc::clone(&policy),
@@ -115,13 +115,7 @@ fn routes(table: &[(&'static str, String)]) -> Handler {
 
 impl Pages {
     fn consent(&self, requests: usize) -> ResearchConsent {
-        ResearchConsent::new(
-            &self.policy,
-            Cancellation::default(),
-            requests,
-            Duration::from_secs(30),
-        )
-        .unwrap()
+        ResearchConsent::new(Cancellation::default(), requests, Duration::from_secs(30))
     }
 
     fn fetch(
@@ -403,7 +397,7 @@ fn unsupported_restricted_and_oversized_responses_are_reported() {
 }
 
 #[test]
-fn budget_cancellation_and_local_only_stop_research_requests() {
+fn budget_cancellation_and_session_closure_stop_research_requests() {
     let p = pages(
         Some(routes(&[
             ("GET /moved", redirect("/final")),
@@ -422,8 +416,7 @@ fn budget_cancellation_and_local_only_stop_research_requests() {
     let accepted = p.requests().len();
 
     let cancel = Cancellation::default();
-    let consent =
-        ResearchConsent::new(&p.policy, cancel.clone(), 8, Duration::from_secs(30)).unwrap();
+    let consent = ResearchConsent::new(cancel.clone(), 8, Duration::from_secs(30));
     cancel.cancel();
     assert_eq!(
         p.fetch(&consent, "https://news.fixture-site.org/final")
@@ -433,33 +426,12 @@ fn budget_cancellation_and_local_only_stop_research_requests() {
     );
 
     let consent = p.consent(8);
-    p.policy.set_local_only(true);
+    consent.session().close();
     assert_eq!(
         p.fetch(&consent, "https://news.fixture-site.org/final")
             .0
             .err(),
-        Some(PageError::Network(Failure::Denied(Denial::Locality)))
-    );
-    assert!(matches!(
-        ResearchConsent::new(
-            &p.policy,
-            Cancellation::default(),
-            8,
-            Duration::from_secs(30)
-        ),
-        Err(Failure::Denied(Denial::Locality))
-    ));
-    // Turning Local-only off again does not revive the earlier consent.
-    p.policy.set_local_only(false);
-    assert!(
-        p.policy
-            .allow_remote_if_current(p.policy.restriction_epoch())
-    );
-    assert_eq!(
-        p.fetch(&consent, "https://news.fixture-site.org/final")
-            .0
-            .err(),
-        Some(PageError::Network(Failure::Denied(Denial::Locality)))
+        Some(PageError::Network(Failure::Cancelled))
     );
     assert_eq!(p.requests().len(), accepted);
 }
@@ -476,7 +448,6 @@ fn the_policy_refuses_any_widened_page_operation() {
         body_len: 0,
         artifact: None,
         page: Some(Binding {
-            epoch: consent.epoch,
             target_sha256: sha256(path.as_bytes()),
         }),
     };
@@ -517,8 +488,8 @@ fn the_policy_refuses_any_widened_page_operation() {
     let with_key = public.clone().with_credential("anything");
     let mut loopback = public.clone();
     loopback.scope = NetworkScope::Pinned(vec!["10.0.0.1".parse().unwrap()]);
-    let mut stale = binding("/a");
-    stale.page.as_mut().unwrap().epoch += 1;
+    let mut unbound = binding("/a");
+    unbound.page = None;
     let mut post = binding("/a");
     post.method = Method::Post;
     for (case, op) in [
@@ -551,8 +522,8 @@ fn the_policy_refuses_any_widened_page_operation() {
             operation(WEB_PAGE, "web-page", web.clone(), loopback, binding("/a")),
         ),
         (
-            "stale epoch",
-            operation(WEB_PAGE, "web-page", web.clone(), public.clone(), stale),
+            "missing page binding",
+            operation(WEB_PAGE, "web-page", web.clone(), public.clone(), unbound),
         ),
         (
             "method",

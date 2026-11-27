@@ -116,7 +116,6 @@ export function SettingsDialog({
           {category === "chat" && <ChatPanel snapshot={snapshot} onManageAccess={onManageAccess} onModels={() => onCategory("models")} />}
           {category === "models" && (
             <ModelManager initialInstalled={snapshot.models.some((model) => model.available !== false)}
-              localOnly={snapshot.intelligence.localOnly}
               operationsBusy={models.operationLocked || modelAction !== null || knowledge.holdsLease}
               onSelectModel={models.onSelect} onImportChat={models.onImport}
               onImportEmbedding={knowledge.chooseModel} onUnloadEmbedding={knowledge.unloadModel}
@@ -398,9 +397,7 @@ function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
       <section className="settings-section">
         <h4>On this computer</h4>
         <ul className="privacy-list">
-          <li>{snapshot.intelligence.localOnly
-            ? "Local-only mode is on: the app makes no outbound connections. Chat, Agent, Knowledge, Memory and the contextual panel, including screen capture and text recognition, run on this computer, and model downloads are blocked."
-            : "Local-only mode is off. Chat and the contextual panel send requests only to the provider you select, after showing what will be shared. Agent, Knowledge, Memory, screen capture and text recognition still run locally, and model downloads require your approval."}</li>
+          <li>Local models, Agent, Knowledge, Memory and text recognition run on this computer. Chat shows the selected provider, and web search and model downloads connect when you request them.</li>
           <li>The contextual panel reads the clipboard or the screen only when you ask. Each screen capture asks your desktop for permission again, holds one frame in memory, and keeps only the region you confirm until the panel closes. Nothing from the panel is saved unless you choose Remember.</li>
           <li>Provider API keys are kept in your system keyring, never in the database or this window.</li>
           <li>Conversations, imported document text, semantic indexes and saved memories are encrypted on disk. Your system keyring unlocks the database.</li>

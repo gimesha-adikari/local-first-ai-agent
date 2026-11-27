@@ -39,7 +39,6 @@ void (async () => {
     }
     await until(() => document.visibilityState === "visible" && button("Camera"), "panel visible");
     await sleep(300);
-    const localOnly = /Local-only mode is on/.test(document.body.textContent);
     await click("Camera");
     const image = await until(() => { const img = document.querySelector(".snapshot-review img"); return img?.complete && img.naturalWidth ? img : null; },
       "panel snapshot preview");
@@ -72,20 +71,12 @@ void (async () => {
 
     await click("Search the web");
     const box = await until(() => document.querySelector(".glance-search")?.textContent, "search composer");
-    if (localOnly) {
-      // Local-only: capture and recognition work, web search stays off.
-      assert(/Local-only mode is on\. Web search needs internet access/.test(box), `local-only search ${box}`);
-      assert(!button("Search once") && !document.getElementById("glance-query"), "search offered in Local-only mode");
-      await shot("panel-search-local-only");
-      result.steps.push("in Local-only mode the camera, text extraction and local translation worked while web search was off with an explanation");
-    } else {
-      const query = await until(() => document.getElementById("glance-query")?.value, "prefilled query");
-      assert(/Settings/.test(query), `query ${query}`);
-      assert(/Only the query text above is sent to Brave Search/.test(box) && /not reverse image matching/.test(box), "search disclosure");
-      set(document.getElementById("glance-query"), "Save changes before closing dialog");
-      await shot("panel-search-review");
-      result.steps.push("search query prefilled from the recognized text, editable, with the exact text-only disclosure");
-    }
+    const query = await until(() => document.getElementById("glance-query")?.value, "prefilled query");
+    assert(/Settings/.test(query), `query ${query}`);
+    assert(/Only the query text above is sent to Purili/.test(box) && /not reverse image matching/.test(box), "search disclosure");
+    set(document.getElementById("glance-query"), "Save changes before closing dialog");
+    await shot("panel-search-review");
+    result.steps.push("search query prefilled from the recognized text, editable, with the exact text-only disclosure");
     result.pass = true;
   } catch (error) {
     result.error = String(error?.message ?? error);

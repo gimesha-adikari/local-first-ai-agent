@@ -345,7 +345,7 @@ export default function Glance() {
       {searching && <section className="glance-search" aria-labelledby="search-heading">
         <div className="glance-section-head"><h2 id="search-heading"><GlobeIcon size={15} />Search the web with visual clues</h2>
           <button type="button" className="glance-link" disabled={!!pending} onClick={() => { setSearching(false); setFound(null); }}>Close</button></div>
-        {searchUnavailable(state?.search, !!state?.localOnly) ? <p className="glance-note">{searchUnavailable(state?.search, !!state?.localOnly)}</p> : <>
+        {searchUnavailable(state?.search) ? <p className="glance-note">{searchUnavailable(state?.search)}</p> : <>
           <label htmlFor="glance-query">Search query (edit before searching)</label>
           <textarea id="glance-query" className="glance-query" dir="auto" value={query} readOnly={locked} rows={2}
             onChange={e => setQuery(e.target.value)} placeholder="Words to search for" />
@@ -404,7 +404,6 @@ export default function Glance() {
           </div>
         </details>
       </fieldset>
-      {state?.localOnly && <p className="glance-note">Local-only mode is on: requests stay on this device. Screen capture, camera snapshots and text recognition still work; web search and remote providers are off.</p>}
       {state && !state.localAvailable && !provider && <p className="glance-note">Load a local model in the main window{state.providers.length ? " or choose a configured provider" : ""}.</p>}
       {review && <section className="glance-review" aria-labelledby="review-heading" tabIndex={-1} ref={reviewBox}>
         <h2 id="review-heading"><ShieldIcon size={16} />Review this request</h2>

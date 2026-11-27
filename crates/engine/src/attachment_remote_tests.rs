@@ -93,11 +93,10 @@ fn attached_text_reaches_a_provider_only_with_a_matching_per_request_authorizati
     let body = r.request_bodies().pop().unwrap().to_string();
     assert!(body.contains("SIGN TEXT") && !body.contains("image_url"));
 
-    // Local-only mode stops attachment requests before any connection.
+    // Selecting the local model never falls back to the configured provider.
     r.engine
         .set_intelligence_settings(IntelligenceSettings {
-            local_only: true,
-            active_provider: Some(r.provider),
+            active_provider: None,
         })
         .unwrap();
     let before = r.server.accepted();

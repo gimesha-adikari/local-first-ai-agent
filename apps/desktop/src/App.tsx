@@ -40,10 +40,10 @@ import {
 import { useAgent } from "./useAgent";
 import { useKnowledge } from "./useKnowledge";
 import {
-  type IntelligenceSettings, type ProviderView, activeRemote, disclosure, listProviders, localityLabel, readinessCopy,
+  type IntelligenceSettings, type ProviderView, activeRemote, listProviders, localityLabel, readinessCopy,
 } from "./providers";
-import { Onboarding, RemoteDisclosure } from "./RemoteViews";
-import { ResearchBar, SearchToggle } from "./ResearchControl";
+import { Onboarding } from "./RemoteViews";
+import { ResearchBar, SearchControl } from "./ResearchControl";
 import { AttachButton, AttachmentTray, type VisualActions } from "./AttachmentControl";
 import { useChatCamera } from "./ChatCamera";
 import { suggestQuery } from "./visual";
@@ -151,6 +151,10 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const providerRefresh = useRef(0);
   const [research, setResearch] = useState<ResearchDraft>(emptyResearch);
+  const [draftImageSources, setDraftImageSources] = useState<string[]>([]);
+  useEffect(() => {
+    if (!draft) setDraftImageSources((sources) => sources.length ? [] : sources);
+  }, [draft]);
   const [webResearch, setWebResearch] = useState<WebResearchView | null>(null);
   const [researchStages, setResearchStages] = useState<ReadonlyMap<number, ResearchStage>>(() => new Map());
   const [researching, setResearching] = useState(false);
@@ -384,10 +388,14 @@ export default function App() {
   const remote = activeRemote(snapshot?.intelligence ?? null, providers);
   const remoteReady = remote?.readiness === "ready";
   /** Chat can answer with the loaded local model or the selected provider. */
-  const chatReady = remote ? remoteReady : modelReady;
+  const remoteSelected = snapshot?.intelligence.activeProvider != null;
+  const chatReady = remoteSelected ? remoteReady : modelReady;
+  const searchDraft = research.query === null && draftImageSources.length
+    ? { ...research, queryAttachments: draftImageSources }
+    : research;
   const plan = researchPlan({
-    draft: research, message: draft, view: webResearch,
-    remoteName: remote && remoteReady ? remote.settings.name : null, modelReady: !remote && modelReady,
+    draft: searchDraft, message: draft, view: webResearch,
+    remoteName: remote && remoteReady ? remote.settings.name : null, modelReady: !remoteSelected && modelReady,
   });
   const researchProblem = research.enabled && selection.enabled
     ? "Web search can't be combined with selected documents yet. Turn off Knowledge or Search."
@@ -497,13 +505,16 @@ export default function App() {
   });
   const visualActions: VisualActions = {
     loadText: (id) => invoke<string>("attachment_text", { conversationId: attachmentScope.current, id }),
-    useText: (text) => {
+    useText: (view, text) => {
       setDraft((current) => current.trim() ? `${current}\n\n${text}` : text);
+      setDraftImageSources((current) => [...new Set([...current, view.id])]);
+      setResearch((current) => ({ ...current, reviewedQuery: null }));
       focusComposer();
     },
     translate: (view, target) => {
       includeAttachment(view.id);
       setResearch((current) => ({ ...current, enabled: false }));
+      setDraftImageSources([]);
       setDraft(`Translate the text recognized in “${view.name}” into ${target}. Keep the original line breaks, and say if any part is unclear.`);
       if (camera.visual) void camera.save({ ...camera.visual.settings, translationTarget: target });
       setChatNotice(null);
@@ -667,7 +678,8 @@ export default function App() {
       maxTokens: regenerate.maxTokens ?? (parsedOverride === null ? null : parsedOverride),
       knowledge: knowledgeRequest,
     });
-    const researchRequest = wantsResearch ? researchOptions(research, webResearch) : undefined;
+    if (kind !== "continue") options.expectedTarget = { providerId: snapshot.intelligence.activeProvider };
+    const researchRequest = wantsResearch ? researchOptions(searchDraft, webResearch, content) : undefined;
     if (researchRequest) options.research = researchRequest;
     const attachmentOption = kind === "continue" ? undefined : attachmentRequest(readyForNext, remoteTarget, share);
     if (attachmentOption) options.attachments = attachmentOption;
@@ -709,7 +721,7 @@ export default function App() {
         // Keep edits made while the request was preparing.
         if (event.user && kind === "send") setDraft((current) => (current === content ? "" : current));
         // Search applies to one message; the next one is ordinary Chat again.
-        if (researchRequest) setResearch((current) => ({ ...emptyResearch, mode: current.mode }));
+        if (researchRequest) setResearch(emptyResearch);
         // Sharing is authorized for one message at a time.
         if (attachmentOption?.share) setShare(emptyShare);
         setOutputOverride("");
@@ -1091,8 +1103,7 @@ export default function App() {
 
   useEffect(() => {
     if (snapshot) void refreshWebResearch();
-    // Local-only changes what web research may do.
-  }, [!!snapshot, snapshot?.intelligence.localOnly]);
+  }, [!!snapshot]);
 
   async function refreshProviders() {
     const sequence = ++providerRefresh.current;
@@ -1101,6 +1112,7 @@ export default function App() {
       const intelligence = await invoke<IntelligenceSettings>("intelligence_settings");
       if (sequence !== providerRefresh.current) return;
       setSnapshot((current) => current && { ...current, intelligence });
+      setResearch((current) => current.share ? { ...current, share: false } : current);
       const list = await listProviders();
       if (sequence === providerRefresh.current) setProviders(list);
     } finally {
@@ -1204,14 +1216,14 @@ export default function App() {
         : modelAction ? statusText
           : leaseText ? leaseText
           : attachmentProblem ? attachmentProblem
-          : mode === "chat" && research.enabled ? "Web research uses the internet, even when the answer is written on this device"
-          : mode === "chat" && remote ? (remoteReady ? disclosure(remote)
-            : `${remote.settings.name} isn't ready: ${readinessCopy(remote).label}. Open Providers in Settings.`)
+          : mode === "chat" && research.enabled ? ""
+          : mode === "chat" && remoteSelected ? (remote ? (remoteReady ? ""
+            : `${remote.settings.name} isn’t ready. Open Providers in Settings.`) : "Loading the selected provider…")
           : !modelReady ? (bundled === "checking" && !snapshot.models.length ? "Checking the built-in assistant…"
             : phase === "loading" ? "Loading model…" : "Load a local model, or select a provider in Settings, to start")
             : mode === "agent" ? (agentUnavailable ?? (attachments.length
               ? "Agent doesn't read Chat attachments. Switch to Chat to ask about them."
-              : "Agent uses only tools and files you allow · Local only"))
+              : "Agent runs on this device with the tools and files you allow"))
               : knowledgeBlocked ? `${readiness.blocked!.title}. ${readiness.blocked!.detail}`
               : `Local inference · ${snapshot.preferences.enterToSend ? "Enter to send, Shift+Enter for a new line" : "Use the send button to send"}`;
 
@@ -1234,9 +1246,7 @@ export default function App() {
       <p>
         {mode === "agent"
           ? "The agent can calculate, describe this device, search and read files you select, and find or open applications after you approve."
-          : research.enabled ? (research.mode === "page"
-            ? "Web research reads the page you enter directly from its site over the internet. Nothing else from your conversations is sent."
-            : "Web research sends your search to the selected search service and reads public pages over the internet. Nothing else from your conversations is sent.")
+          : research.enabled ? (research.mode === "page" ? "Ask a question about a public webpage." : "Look up information in public sources.")
           : remote ? `Chat sends your requests to ${remote.settings.name} (${localityLabel(remote).toLowerCase()}). Agent mode stays on this computer.`
             : snapshot && !snapshot.models.length ? "Chat needs a local model or a provider you connect."
             : "Chat runs entirely on this computer with your local model."}
@@ -1285,7 +1295,7 @@ export default function App() {
         <ul className="suggestions" aria-label="Suggestions">
           {(mode === "agent" ? agentSuggestions : chatSuggestions).map((text) => (
             <li key={text}>
-              <button type="button" className="suggestion" onClick={() => { setDraft(text); focusComposer(); }}>
+              <button type="button" className="suggestion" onClick={() => { setDraft(text); setDraftImageSources([]); focusComposer(); }}>
                 {mode === "agent" ? <AgentIcon size={14} /> : <ChatIcon size={14} />}<span>{text}</span>
               </button>
             </li>
@@ -1324,12 +1334,12 @@ export default function App() {
         <header className="topbar">
           <h1 className="topbar-title" title={title}>{title}</h1>
           <span className="spacer" />
-          {remote ? (
+          {mode === "chat" && remoteSelected ? (
             <button type="button" className="status-pill" onClick={() => openModal("settings", "providers")}
-              title="Providers" aria-label={`Chat uses ${remote.settings.name}. Open providers.`}>
+              title="Providers" aria-label={remote ? `Chat uses ${remote.settings.name}. ${localityLabel(remote)}. Open providers.` : "Open the selected provider"}>
               <span className={`status-dot status-${remoteReady ? "ready" : "empty"}`} aria-hidden="true" />
-              <span className="status-pill-label">{remote.settings.locality === "cloud" ? "Cloud" : "Self-hosted"}</span>
-              <span className="status-pill-model">{remote.settings.name} · {remote.settings.model}</span>
+              <span className="status-pill-label">{remote ? (remote.settings.locality === "cloud" ? "Cloud" : "Self-hosted") : "Provider"}</span>
+              <span className="status-pill-model">{remote ? `${remote.settings.name} · ${remote.settings.model}` : "Loading…"}</span>
             </button>
           ) : (
             <button type="button" className="status-pill" onClick={() => openModal("models")}
@@ -1447,9 +1457,6 @@ export default function App() {
               Models shows the recommended settings, which you can review before applying.
             </Callout>
           )}
-          {mode === "chat" && remote && remoteReady && (
-            <RemoteDisclosure provider={remote} onOpen={() => openModal("settings", "providers")} />
-          )}
           <Composer inputRef={composer} mode={mode} onModeChange={setMode}
             agentAvailable={agentAvailable} agentUnavailable={agentUnavailable}
             draft={draft} onDraftChange={setDraft} onSubmit={submit}
@@ -1482,7 +1489,7 @@ export default function App() {
                 onOpenKnowledge={() => openDestination("knowledge")} onOpenMemory={() => openDestination("memory")} />
             )}
             researchControl={(
-              <SearchToggle draft={research} disabled={!!agent.activeApproval || !snapshot}
+              <SearchControl draft={research} disabled={!!agent.activeApproval || !snapshot || generating}
                 onChange={(next) => { setResearch(next); setChatNotice(null); }} />
             )}
             attachmentControl={(
@@ -1510,8 +1517,9 @@ export default function App() {
               </>
             )}
             researchPanel={research.enabled ? (
-              <ResearchBar draft={research} onChange={setResearch} plan={{ ...plan, problem: researchProblem }} view={webResearch}
-                remoteName={remote && remoteReady ? remote.settings.name : null} message={draft} disabled={generating}
+              <ResearchBar draft={searchDraft} onChange={setResearch} plan={{ ...plan, problem: researchProblem }} view={webResearch}
+                remoteName={remote && remoteReady ? remote.settings.name : null} remoteLocality={remote ? localityLabel(remote) : null}
+                message={draft} disabled={generating}
                 onOpenSettings={() => openModal("settings", "web")} />
             ) : null} />
         </div>
@@ -1545,7 +1553,10 @@ export default function App() {
           onOpenMemory={() => { setModal(null); openDestination("memory"); }}
           onManageAccess={() => openModal("access")}
           providers={{ list: providers, intelligence: snapshot.intelligence, busy: providersBusy || chatBusy, onChanged: refreshProviders }}
-          webResearch={{ view: webResearch, busy: chatBusy, onChanged: setWebResearch }} />
+          webResearch={{ view: webResearch, busy: chatBusy, onChanged: (view) => {
+            setWebResearch(view);
+            setResearch((current) => current.reviewedQuery ? { ...current, reviewedQuery: null } : current);
+          } }} />
       )}
       {modal === "access" && (
         <AccessDialog scopes={agent.scopes} remaining={agent.scopeRemaining} action={agent.scopeAction}

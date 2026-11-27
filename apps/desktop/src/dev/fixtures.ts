@@ -52,7 +52,7 @@ let scenario = "default";
 // self-hosted server) and "onboarding" (no models and no providers).
 let providers: { id: number; settings: Json; credential: string }[] = [];
 let nextProvider = 3;
-let intelligence = { localOnly: true, activeProvider: null as number | null };
+let intelligence = { activeProvider: null as number | null };
 const providerViews = () => providers.map((item) => {
   const settings = item.settings as Json & { locality: string; endpoint: string; requiresKey: boolean; retention: string; imageInput: boolean };
   const local = /\/\/(localhost|127\.)/.test(settings.endpoint);
@@ -64,9 +64,9 @@ const providerViews = () => providers.map((item) => {
       ? { requests: 14, reportedTokens: 48_210, estimatedTokens: 1_536, reservedTokens: 0, costMicros: 182_400, unpricedRequests: 0 }
       : { requests: 0, reportedTokens: 0, estimatedTokens: 0, reservedTokens: 0, costMicros: 0, unpricedRequests: 0 },
     modalities: settings.imageInput ? ["text", "image"] : ["text"],
-    readiness: intelligence.localOnly ? "local_only" : settings.retention === "unknown" ? "needs_retention"
+    readiness: settings.retention === "unknown" ? "needs_retention"
       : credential === "missing" ? "needs_credential" : "ready",
-    active: !intelligence.localOnly && intelligence.activeProvider === item.id,
+    active: intelligence.activeProvider === item.id,
   };
 });
 let inference: Json = { phase: "ready", model: qwen35 };
@@ -215,7 +215,7 @@ function webView() {
     settings: structuredClone(webSettings), braveKey,
     searxngOrigin: webSettings.searxngEndpoint || null,
     searxngNetwork: webSettings.searxngEndpoint ? "loopback" : null,
-    searxngError: null, localOnly: intelligence.localOnly,
+    searxngError: null,
   };
 }
 
@@ -272,7 +272,6 @@ async function streamChat(args: Json, regenerate: boolean): Promise<Message> {
   turn.assistants.push({ message: assistant, modelName: activeModelId === 1 ? "Qwen3-0.6B-Q4_K_M.gguf" : MODEL });
   const research = options.research as Json | undefined;
   if (research) {
-    if (intelligence.localOnly) throw { code: "policy_denied", message: "Local-only mode is on. Web research needs internet access, even with a local model." };
     const fixture = researchFixture(research, turn.user.content);
     assistant.context = { coverage: null, memoryEnabled: null, fitted: null, research: fixture.record };
     deliver(args.events, index++, { kind: "started", user, assistant: { ...assistant } });
@@ -504,7 +503,6 @@ async function startTurn(conversationId: number, prompt: string, timeoutSeconds:
 
 export async function installFixtures(name: string) {
   scenario = name;
-  if (name === "research" || name === "researchnomodel") intelligence.localOnly = false;
   if (name === "researchnomodel") { inference = { phase: "empty", model: null }; activeModelId = null; }
   if (name === "nomodel" || bundledScenarios.has(name)) { inference = { phase: "empty", model: null }; activeModelId = null; }
   if (bundledScenarios.has(name)) models.splice(0, models.length);
@@ -524,7 +522,7 @@ export async function installFixtures(name: string) {
         requiresKey: false, retention: "none", retentionSummary: "", sharing: { history: true, memories: true, documents: true },
         pricing: null, budget: { monthlyTokens: null, monthlyCostMicros: null } } },
     ];
-    intelligence = { localOnly: false, activeProvider: 1 };
+    intelligence = { activeProvider: 1 };
   }
   if (name === "light") document.documentElement.dataset.appearance = "light";
   seed();

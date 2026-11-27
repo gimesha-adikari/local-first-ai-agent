@@ -546,6 +546,7 @@ button:disabled { cursor: default; }
 }
 .composer textarea::placeholder { color: var(--text-tertiary); }
 .composer textarea:focus-visible { outline: none; }
+.composer-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 6px; }
 .composer-toolbar { display: flex; align-items: center; gap: 2px; margin-left: -6px; flex-wrap: wrap; row-gap: 4px; }
 .composer-status { margin: 0; text-align: center; font-size: 11.5px; color: var(--text-tertiary); }
 .composer-error { padding: 0 6px; }
@@ -558,7 +559,7 @@ button:disabled { cursor: default; }
 }
 .composer-pill:hover, .composer-pill-menu > .menu-trigger:hover:not(:disabled),
 .composer-pill-menu > .menu-trigger[aria-expanded="true"] { background: var(--surface-hover); color: var(--text); }
-.composer-pill[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
+.composer-pill[aria-pressed="true"], .composer-pill-menu-active > .menu-trigger { background: var(--accent-soft); color: var(--accent-strong); }
 .pill-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-icon-menu > .menu-trigger {
   display: grid; place-items: center; width: 32px; height: 30px; border-radius: var(--radius);
@@ -1143,11 +1144,6 @@ button.citation-chip:hover { background: var(--accent); color: var(--on-accent);
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
 .field-wide { grid-column: 1 / -1; }
 .form-group { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
-.remote-disclosure { display: flex; align-items: flex-start; gap: 10px; margin: 0 auto 8px; max-width: var(--composer-width, 760px); width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-secondary); font-size: 12.5px; }
-.remote-disclosure > svg { flex: none; margin-top: 2px; color: var(--accent-strong); }
-.remote-disclosure > div { flex: 1; min-width: 0; display: grid; gap: 2px; }
-.remote-disclosure p { margin: 0; }
-.remote-disclosure strong { color: var(--text); font-weight: 500; }
 .onboarding { display: grid; gap: 10px; width: 100%; max-width: 640px; margin: 8px auto 0; text-align: left; }
 .onboarding h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .onboarding p { margin: 0; }
@@ -1191,24 +1187,21 @@ button.citation-chip:hover { background: var(--accent); color: var(--on-accent);
 
 /* web research (Stage 04-C) */
 .research-bar {
-  display: grid; gap: 8px; padding: 10px 12px; margin: 0 0 2px -4px;
-  border-radius: var(--radius); background: var(--surface-sunken); border: 1px solid var(--border);
-  font-size: 13px;
+  display: grid; gap: 5px; margin: 0 0 2px;
+  font-size: 12.5px;
 }
-.research-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-.research-row .link-button { font-size: 12.5px; }
-.research-disclosure { display: grid; gap: 5px; }
-.research-disclosure > p { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
-.research-disclosure .hint, .research-answer .hint { margin: 0; }
-.research-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.research-query { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.research-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.research-label { color: var(--text-secondary); font-weight: 500; overflow-wrap: anywhere; }
+.research-privacy { color: var(--text-tertiary); }
+.research-privacy summary { cursor: pointer; }
+.research-privacy[open] { flex-basis: 100%; }
+.research-privacy .hint { margin: 3px 0 0; }
 .research-edit { display: flex; align-items: center; gap: 8px; }
-.research-disclosure input, .research-edit input {
-  flex: 1; width: 100%; min-height: 32px; padding: 5px 10px;
+.research-edit input {
+  flex: 1; width: 100%; min-width: 0; min-height: 30px; padding: 4px 8px;
   border-radius: var(--radius); border: 1px solid var(--border-strong);
   background: var(--surface); color: var(--text);
 }
-.research-answer { display: grid; gap: 4px; padding-top: 6px; border-top: 1px solid var(--border); }
 .research-bar .error-text { margin: 0; }
 .check-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--text); }
 .check-row input { margin-top: 3px; accent-color: var(--accent); }

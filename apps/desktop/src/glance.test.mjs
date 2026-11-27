@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { inputProblem, prepareGlance, recipes } from "./glance.ts";
 
-const state = { localAvailable: true, localOnly: false, memoryEnabled: true, providers: [], documents: [{ id: 3, name: "Notes" }] };
+const state = { localAvailable: true, memoryEnabled: true, providers: [], documents: [{ id: 3, name: "Notes" }] };
 const provider = { id: 7, revision: "exact-revision", sharing: { documents: true, memories: false } };
 
 test("all eight recipes keep the reviewed text intact and begin without a sharing grant", () => {

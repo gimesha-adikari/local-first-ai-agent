@@ -81,8 +81,7 @@ export function queryProblem(query: string): string | null {
 }
 
 /** Why visual-assisted search is unavailable, or `null`. */
-export function searchUnavailable(search: SearchState | undefined, localOnly: boolean): string | null {
-  if (localOnly) return "Local-only mode is on. Web search needs internet access, so it is off. Text recognition still works on this device.";
+export function searchUnavailable(search: SearchState | undefined): string | null {
   if (!search?.provider) return "Choose a search provider in the main window under Settings → Web search to search the web.";
   return null;
 }

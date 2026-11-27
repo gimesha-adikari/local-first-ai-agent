@@ -176,10 +176,6 @@ pub(crate) fn consent(
 pub(crate) fn failure_error(failure: &Failure) -> InferenceError {
     let (code, message): (ErrorCode, Cow<'static, str>) = match failure {
         Failure::Cancelled => (ErrorCode::Cancelled, "The request was cancelled.".into()),
-        Failure::Denied(Denial::Locality) => (
-            ErrorCode::PolicyDenied,
-            "Local-only mode stopped this provider request.".into(),
-        ),
         Failure::Denied(Denial::Revoked | Denial::Expired) => (
             ErrorCode::PolicyDenied,
             "The sharing authorization ended, so the response was discarded.".into(),
@@ -247,8 +243,6 @@ pub enum Readiness {
     CredentialUnavailable,
     /// Provider retention is not disclosed.
     NeedsRetention,
-    /// Local-only mode blocks all providers.
-    LocalOnly,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -327,13 +321,10 @@ fn credential_key(saved: &SavedProvider) -> Result<CredentialKey> {
 }
 
 impl Engine {
-    /// Register saved providers and apply the saved selection. Invalid
+    /// Register saved provider destinations. Invalid
     /// rows stay listed but are never registered.
     pub(crate) fn restore_providers(&self) -> Result<()> {
-        let (providers, settings) = {
-            let db = database(&self.database)?;
-            (db.providers()?, db.intelligence_settings()?)
-        };
+        let providers = database(&self.database)?.providers()?;
         for saved in providers {
             if !saved.deletion_pending
                 && let Ok(destination) = destination(&saved.key, &saved.settings)
@@ -341,61 +332,17 @@ impl Engine {
                 let _ = self.policy.register_destination(destination);
             }
         }
-        self.policy.set_local_only(settings.local_only);
         Ok(())
     }
 
     pub fn intelligence_settings(&self) -> Result<IntelligenceSettings> {
-        effective_settings(&*database(&self.database)?, &self.policy)
+        database(&self.database)?.intelligence_settings()
     }
 
-    /// Restriction is effective before waiting for storage. Preserve the selected
-    /// provider, including a selection changed by another Settings surface.
-    pub fn enable_local_only(&self) -> Result<()> {
-        let _pending = self.policy.begin_restriction();
-        let persist = || {
-            let mut db = database(&self.database)?;
-            let mut settings = db.intelligence_settings()?;
-            settings.local_only = true;
-            db.save_intelligence_settings(settings)
-        };
-        persist().map_err(|_| restriction_storage_error())
-    }
-
-    /// The unrestricted selection can change only while the engine is idle.
+    /// Change the Chat target while no engine operation is using it.
     pub fn set_intelligence_settings(&self, settings: IntelligenceSettings) -> Result<()> {
-        if settings.local_only {
-            self.enable_local_only()?;
-            let mut db = database(&self.database)?;
-            if db.intelligence_settings()?.active_provider == settings.active_provider {
-                return Ok(());
-            }
-            let _operation = self.reserve()?;
-            let mut selection = effective_settings(&db, &self.policy)?;
-            selection.active_provider = settings.active_provider;
-            return db.save_intelligence_settings(selection);
-        }
-        let epoch = self.policy.restriction_epoch();
         let _operation = self.reserve()?;
-        let mut db = database(&self.database)?;
-        let superseded = || {
-            InferenceError::new(
-                ErrorCode::PolicyDenied,
-                "Local-only mode was enabled while changing provider settings.",
-            )
-        };
-        if epoch != self.policy.restriction_epoch() {
-            return Err(superseded());
-        }
-        db.save_intelligence_settings(settings)?;
-        if !self.policy.allow_remote_if_current(epoch) {
-            let mut restricted = db.intelligence_settings()?;
-            restricted.local_only = true;
-            db.save_intelligence_settings(restricted)
-                .map_err(|_| restriction_storage_error())?;
-            return Err(superseded());
-        }
-        Ok(())
+        database(&self.database)?.save_intelligence_settings(settings)
     }
 
     fn saved_provider(&self, id: ProviderId) -> Result<SavedProvider> {
@@ -513,15 +460,13 @@ impl Engine {
             let db = database(&self.database)?;
             (
                 db.usage_summary(saved.id, &period)?,
-                effective_settings(&db, &self.policy)?,
+                db.intelligence_settings()?,
             )
         };
         let readiness = if saved.deletion_pending {
             Readiness::DeletionPending
         } else if destination.is_none() {
             Readiness::InvalidConfiguration
-        } else if intelligence.local_only {
-            Readiness::LocalOnly
         } else if saved.settings.retention == ProviderRetention::Unknown {
             Readiness::NeedsRetention
         } else {
@@ -633,20 +578,11 @@ impl Engine {
     }
 }
 
-pub(crate) fn effective_settings(
-    db: &storage::SqliteStore,
-    policy: &Policy,
-) -> Result<IntelligenceSettings> {
-    let mut settings = db.intelligence_settings()?;
-    settings.local_only = policy.is_local_only();
-    Ok(settings)
-}
-
 pub(crate) fn remote_target(
     db: &std::sync::Mutex<storage::SqliteStore>,
     settings: IntelligenceSettings,
 ) -> Result<Option<(SavedProvider, Destination)>> {
-    let Some(id) = settings.remote() else {
+    let Some(id) = settings.active_provider else {
         return Ok(None);
     };
     let saved = database(db)?.provider(id)?;
@@ -667,11 +603,4 @@ pub fn locality_label(locality: Locality) -> &'static str {
         Locality::SelfHosted => "self-hosted",
         Locality::ThirdParty => "cloud",
     }
-}
-
-fn restriction_storage_error() -> InferenceError {
-    InferenceError::new(
-        ErrorCode::Storage,
-        "Local-only mode is active for this session. Saving it failed. Retry before restarting or the previous setting may return.",
-    )
 }

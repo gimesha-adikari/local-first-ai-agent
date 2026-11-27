@@ -358,8 +358,7 @@ pub struct HostState {
     visual: agent_core::visual::VisualSettings,
 }
 
-/// The configured search provider, for visual-assisted search. Search is
-/// never offered in Local-only mode (see `PanelState::local_only`).
+/// The configured provider for visual-assisted search.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchState {

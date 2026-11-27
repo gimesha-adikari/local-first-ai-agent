@@ -1495,7 +1495,7 @@ fn local_glance_stops_holds_the_chat_gate_and_refuses_to_remember_partial_output
 }
 
 #[test]
-fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work() {
+fn screen_intelligence_stays_on_device_without_remote_authorization() {
     use crate::chat::glance::{Attachment, Origin};
     use agent_core::{
         capability::ImageInput,
@@ -1503,12 +1503,6 @@ fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work()
     };
     let h = harness();
     h.load();
-    h.engine
-        .set_intelligence_settings(agent_core::provider::IntelligenceSettings {
-            local_only: true,
-            active_provider: None,
-        })
-        .unwrap();
     let run = |input: Value, attachment: Option<Attachment>| {
         futures_executor::block_on(h.engine.run_glance(
             serde_json::from_value(input).unwrap(),
@@ -1518,7 +1512,7 @@ fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work()
             Arc::new(Recorder::default()),
         ))
     };
-    // Recognized screen text is processed on this device in Local-only mode.
+    // Recognized screen text is processed on this device.
     let answer = run(
         json!({"text": "Synthetic recognized screen text", "recipe": "translate",
             "language": "French", "share": false, "memory": false, "documents": []}),
@@ -1548,15 +1542,15 @@ fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work()
         refused.err().unwrap().code,
         ErrorCode::UnsupportedCapability
     );
-    // A remote target is refused before anything else in Local-only mode.
+    // A remote target requires authorization even for recognized text.
     let remote = run(
         json!({"text": "Synthetic recognized screen text", "recipe": "explain",
-            "provider": 1, "revision": "r", "share": true, "memory": false, "documents": []}),
+            "provider": 1, "revision": "r", "share": false, "memory": false, "documents": []}),
         None,
     );
     let remote = remote.err().unwrap();
     assert_eq!(remote.code, ErrorCode::PolicyDenied);
-    assert!(remote.message.contains("Local-only mode is on"));
+    assert!(remote.message.contains("Allow this request to be shared"));
 }
 
 #[path = "attachment_tests.rs"]

@@ -28,9 +28,8 @@ test("suggested queries collapse whitespace and respect the search limits", () =
 });
 
 test("search is explained when unavailable and the disclosure is exact", () => {
-  assert.match(searchUnavailable({ provider: "brave", name: "Brave Search", personalUseOnly: false }, true), /Local-only mode/);
-  assert.match(searchUnavailable({ provider: null, name: null, personalUseOnly: false }, false), /Settings → Web search/);
-  assert.equal(searchUnavailable({ provider: "brave", name: "Brave Search", personalUseOnly: false }, false), null);
+  assert.match(searchUnavailable({ provider: null, name: null, personalUseOnly: false }), /Settings → Web search/);
+  assert.equal(searchUnavailable({ provider: "brave", name: "Brave Search", personalUseOnly: false }), null);
   const purili = searchDisclosure({ provider: "purili", name: "Purili", personalUseOnly: true }, true);
   assert.match(purili, /Only the query text above is sent to Purili/);
   assert.match(purili, /No screenshot, camera image, document, memory or conversation is sent/);

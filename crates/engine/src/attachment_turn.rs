@@ -152,8 +152,7 @@ impl ChatRuntime {
 
         // The saved selection decides the target. There is no fallback in
         // either direction.
-        let selection =
-            crate::providers::effective_settings(&*database(&self.database)?, &self.policy)?;
+        let selection = database(&self.database)?.intelligence_settings()?;
         let remote = crate::providers::remote_target(&self.database, selection)?;
         let (context_tokens, model_name, recipe) = match &remote {
             Some((saved, _)) => {

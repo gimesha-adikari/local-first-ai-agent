@@ -3,7 +3,7 @@ import { useEffect, useId, useState } from "react";
 import { LockIcon, Spinner } from "./icons";
 import { errorMessage } from "./inference";
 import type { SearchProviderKind, WebResearchSettings, WebResearchView } from "./research";
-import { Callout, Segmented, Switch } from "./ui";
+import { Segmented, Switch } from "./ui";
 
 type Choice = "none" | SearchProviderKind;
 
@@ -28,7 +28,7 @@ export function WebSearchPanel({ view, busy, onChanged }: {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => setEndpoint(view?.settings.searxngEndpoint ?? ""), [view?.settings.searxngEndpoint]);
-  // Key status and Local-only can change elsewhere: refresh when the panel opens.
+  // Key status can change elsewhere: refresh when the panel opens.
   useEffect(() => {
     invoke<WebResearchView>("web_research_settings").then(onChanged).catch(() => {});
   }, []);
@@ -59,12 +59,6 @@ export function WebSearchPanel({ view, busy, onChanged }: {
 
   return (
     <>
-      {view.localOnly && (
-        <Callout tone="warning" title="Local-only mode is on">
-          Web research needs internet access, even when the answer is written by a local model, so it is unavailable until
-          Local-only mode is turned off in Providers.
-        </Callout>
-      )}
       <section className="settings-section">
         <h4>Search provider</h4>
         <p className="hint">Used when you turn on Search for a Chat message. Reading a specific webpage needs no provider.</p>

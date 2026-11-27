@@ -161,8 +161,8 @@ impl Engine {
     }
 
     /// Create the engine with the host's secure storage and the network
-    /// boundary configuration. Saved providers are registered and the saved
-    /// local-only mode is applied before the engine is returned.
+    /// boundary configuration. Saved destinations are registered before the
+    /// engine is returned. The transport starts on the first admitted request.
     pub fn with_network(
         platform: Arc<dyn Platform>,
         worker: Arc<InferenceWorker>,
@@ -270,7 +270,7 @@ impl Engine {
             models,
             active_model_id: self.active_model(),
             inference: self.worker.status()?,
-            intelligence: providers::effective_settings(&db, &self.policy)?,
+            intelligence: db.intelligence_settings()?,
         })
     }
 

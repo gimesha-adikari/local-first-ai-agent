@@ -99,6 +99,7 @@ mod tests {
             db.connection
                 .execute_batch(
                     "ALTER TABLE chat_attachments DROP COLUMN origin;
+                     ALTER TABLE intelligence_settings ADD COLUMN local_only INTEGER NOT NULL DEFAULT 1 CHECK (local_only IN (0, 1));
                      DROP TABLE visual_settings; PRAGMA user_version = 18;",
                 )
                 .unwrap();

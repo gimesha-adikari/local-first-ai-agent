@@ -221,30 +221,11 @@ impl ProviderSettings {
 }
 
 /// Which intelligence answers Chat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IntelligenceSettings {
-    /// No outbound connections at all; Chat uses the local model.
-    pub local_only: bool,
-    /// The provider Chat uses when local-only mode is off. `None` means the
-    /// local model.
+    /// The provider Chat uses. `None` means the local model.
     pub active_provider: Option<ProviderId>,
-}
-
-impl Default for IntelligenceSettings {
-    fn default() -> Self {
-        Self {
-            local_only: true,
-            active_provider: None,
-        }
-    }
-}
-
-impl IntelligenceSettings {
-    /// The provider that receives Chat requests, if any.
-    pub fn remote(self) -> Option<ProviderId> {
-        (!self.local_only).then_some(self.active_provider).flatten()
-    }
 }
 
 #[cfg(test)]
@@ -355,22 +336,6 @@ mod tests {
         ] {
             assert!(all.contains(&class));
         }
-        assert_eq!(IntelligenceSettings::default().remote(), None);
-        assert_eq!(
-            IntelligenceSettings {
-                local_only: true,
-                active_provider: Some(3)
-            }
-            .remote(),
-            None
-        );
-        assert_eq!(
-            IntelligenceSettings {
-                local_only: false,
-                active_provider: Some(3)
-            }
-            .remote(),
-            Some(3)
-        );
+        assert_eq!(IntelligenceSettings::default().active_provider, None);
     }
 }

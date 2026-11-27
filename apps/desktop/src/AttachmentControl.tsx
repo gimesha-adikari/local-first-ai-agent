@@ -28,7 +28,7 @@ export function AttachButton({ disabled, busy, count, onAttach }: {
  * offers, carried out by Chat's own attachment and research pipelines. */
 export type VisualActions = {
   loadText: (id: string) => Promise<string>;
-  useText: (text: string) => void;
+  useText: (view: AttachmentView, text: string) => void;
   translate: (view: AttachmentView, target: string) => void;
   ask: (view: AttachmentView) => void;
   search: (view: AttachmentView, text: string) => void;
@@ -86,7 +86,7 @@ function ImageActions({ view, disabled, actions }: { view: AttachmentView; disab
               <textarea readOnly dir="auto" value={text} rows={4} aria-label={`Text recognized in ${view.name}`}
                 onSelect={(event) => setSelected(event.currentTarget.value.slice(event.currentTarget.selectionStart, event.currentTarget.selectionEnd))} />
               <div className="attachment-actions">
-                <button type="button" className="link-button" disabled={disabled} onClick={() => actions.useText(selected || text)}>Use {selected ? "selection" : "text"} in message</button>
+                <button type="button" className="link-button" disabled={disabled} onClick={() => actions.useText(view, selected || text)}>Use {selected ? "selection" : "text"} in message</button>
                 <span className="hint">{view.recognition ? `Recognized on this device: ${view.recognition}` : "Recognized on this device"}</span>
               </div>
             </> : <span className="hint">No text was recognized in this image.</span>}

@@ -280,7 +280,7 @@ struct Pack {
 
 #[derive(Debug, PartialEq)]
 enum Abort {
-    /// Cancellation, Local-only mode or an expired authorization.
+    /// Cancellation, session closure or an expired authorization.
     Stopped(Failure),
     Deadline,
     Protocol(&'static str),
@@ -397,7 +397,7 @@ fn search(
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let mut report = Report::default();
     // Nothing starts without a live authorization.
-    if let Err(failure) = consent.check(boundary.authority()) {
+    if let Err(failure) = consent.check() {
         return (report, Err(Abort::Stopped(failure)));
     }
     let filter = std::env::temp_dir().join(format!(
@@ -462,7 +462,7 @@ fn search(
         let mut used = BTreeSet::new();
         let mut messages = 0;
         let outcome = loop {
-            if let Err(failure) = consent.check(boundary.authority()) {
+            if let Err(failure) = consent.check() {
                 break Err(Abort::Stopped(failure));
             }
             if started.elapsed() >= deadline {
@@ -571,8 +571,7 @@ fn search(
     report.stderr = diagnostics.join().unwrap_or_default();
     let _ = std::fs::remove_file(&filter);
     // A revocation that raced with the last message still wins.
-    let outcome =
-        outcome.and_then(|()| consent.check(boundary.authority()).map_err(Abort::Stopped));
+    let outcome = outcome.and_then(|()| consent.check().map_err(Abort::Stopped));
     if outcome.is_ok() {
         // The existing SearXNG normalization: public HTTPS URLs only,
         // de-duplicated, cleaned and bounded.
@@ -618,7 +617,6 @@ impl Resolver for Fixed {
 }
 
 struct Host {
-    policy: Arc<Policy>,
     boundary: NetworkBoundary,
     server: Option<Fixture>,
 }
@@ -628,7 +626,6 @@ fn policy() -> Arc<Policy> {
         CapabilityRegistry::new([WEB_SEARCH]),
         DataClasses::default(),
         [],
-        false,
     ))
 }
 
@@ -673,15 +670,11 @@ fn host(handler: Option<Handler>, answer: Option<&str>) -> Host {
             limits: Limits::default(),
         },
     );
-    Host {
-        policy,
-        boundary,
-        server,
-    }
+    Host { boundary, server }
 }
 
-fn consent(policy: &Policy, cancel: Cancellation, requests: usize) -> ResearchConsent {
-    ResearchConsent::new(policy, cancel, requests, Duration::from_secs(60)).unwrap()
+fn consent(cancel: Cancellation, requests: usize) -> ResearchConsent {
+    ResearchConsent::new(cancel, requests, Duration::from_secs(60))
 }
 
 fn probe_directory() -> PathBuf {
@@ -792,7 +785,7 @@ fn hostile_worker_is_contained_and_brokered() {
         Some(always(ok(OK_JSON, "application/json"), Duration::ZERO)),
         None,
     );
-    let consent = consent(&host.policy, Cancellation::default(), 2);
+    let consent = consent(Cancellation::default(), 2);
     let (report, outcome) = search(
         &host.boundary,
         &consent,
@@ -880,7 +873,7 @@ fn hostile_worker_is_contained_and_brokered() {
 fn private_addresses_are_never_contacted() {
     for address in ["10.0.0.5", "127.0.0.1", "169.254.169.254", "::1"] {
         let host = host(None, Some(address));
-        let consent = consent(&host.policy, Cancellation::default(), 1);
+        let consent = consent(Cancellation::default(), 1);
         let (report, outcome) = search(
             &host.boundary,
             &consent,
@@ -903,8 +896,8 @@ fn private_addresses_are_never_contacted() {
 
 #[test]
 #[ignore = "needs user namespaces, bubblewrap and the system Python"]
-fn local_only_and_cancellation_stop_the_worker_and_its_requests() {
-    for local_only in [true, false] {
+fn session_closure_and_cancellation_stop_the_worker_and_its_requests() {
+    for close_session in [true, false] {
         let host = host(
             Some(always(
                 ok(OK_JSON, "application/json"),
@@ -913,7 +906,7 @@ fn local_only_and_cancellation_stop_the_worker_and_its_requests() {
             None,
         );
         let cancel = Cancellation::default();
-        let consent = consent(&host.policy, cancel.clone(), 4);
+        let consent = consent(cancel.clone(), 4);
         let pack = hostile("hang");
         let marker = pack.arguments[1].clone();
         let (report, outcome, stopped_after) = std::thread::scope(|scope| {
@@ -922,8 +915,8 @@ fn local_only_and_cancellation_stop_the_worker_and_its_requests() {
                 assert_eq!(seen.len(), 1, "the first request reached the fixture");
                 assert!(processes_with(&marker) > 0);
                 let at = Instant::now();
-                if local_only {
-                    host.policy.set_local_only(true);
+                if close_session {
+                    consent.session().close();
                 } else {
                     cancel.cancel();
                 }
@@ -941,12 +934,7 @@ fn local_only_and_cancellation_stop_the_worker_and_its_requests() {
             (report, outcome, at.elapsed())
         });
         println!("stopped {outcome:?} after {stopped_after:?}");
-        let expected = if local_only {
-            Failure::Denied(Denial::Locality)
-        } else {
-            Failure::Cancelled
-        };
-        assert_eq!(outcome, Err(Abort::Stopped(expected)));
+        assert_eq!(outcome, Err(Abort::Stopped(Failure::Cancelled)));
         assert!(stopped_after < Duration::from_secs(1));
         assert_eq!(report.records.len(), 1);
         assert_eq!(report.records[0].transmission, Transmission::Sent);
@@ -979,7 +967,7 @@ fn runaway_workers_are_bounded() {
         ("spin", Some(Abort::Deadline)),
         ("exit", Some(Abort::Worker("the worker exited".into()))),
     ] {
-        let consent = consent(&host.policy, Cancellation::default(), 1);
+        let consent = consent(Cancellation::default(), 1);
         let pack = hostile(mode);
         let marker = pack.arguments[1].clone();
         let (report, outcome) = search(
@@ -1038,7 +1026,7 @@ fn upstream_answers() -> Handler {
 #[ignore = "needs AGENT_MANAGED_SEARCH_PACK"]
 fn real_searxng_is_brokered_against_fixtures() {
     let host = host(Some(upstream_answers()), None);
-    let consent = consent(&host.policy, Cancellation::default(), ALL.len());
+    let consent = consent(Cancellation::default(), ALL.len());
     let (report, outcome) = search(
         &host.boundary,
         &consent,
@@ -1076,7 +1064,7 @@ fn real_searxng_is_brokered_against_fixtures() {
     );
     // A second engine set: only what was authorized is asked.
     let narrow = host_requests(&host);
-    let consent = self::consent(&host.policy, Cancellation::default(), 1);
+    let consent = self::consent(Cancellation::default(), 1);
     let (report, outcome) = search(
         &host.boundary,
         &consent,
@@ -1122,7 +1110,7 @@ fn live_managed_search() {
             // arXiv asks for at most one request every three seconds.
             std::thread::sleep(Duration::from_secs(4));
         }
-        let consent = consent(&policy, Cancellation::default(), ALL.len());
+        let consent = consent(Cancellation::default(), ALL.len());
         let (report, outcome) = search(
             &boundary,
             &consent,

@@ -26,7 +26,7 @@ export type ProviderSettings = {
 };
 
 export type CredentialStatus = "stored" | "missing" | "locked" | "unavailable";
-export type Readiness = "ready" | "deletion_pending" | "invalid_configuration" | "needs_credential" | "credential_unavailable" | "needs_retention" | "local_only";
+export type Readiness = "ready" | "deletion_pending" | "invalid_configuration" | "needs_credential" | "credential_unavailable" | "needs_retention";
 
 export type UsageSummary = {
   requests: number;
@@ -51,7 +51,7 @@ export type ProviderView = {
   active: boolean;
 };
 
-export type IntelligenceSettings = { localOnly: boolean; activeProvider: number | null };
+export type IntelligenceSettings = { activeProvider: number | null };
 export type ProviderTest = { status: number; models: string[]; modelListed: boolean | null; elapsedMs: number };
 export type EntryOutcome = "stored" | "cancelled";
 
@@ -89,7 +89,7 @@ export function newProvider(locality: ProviderLocality): ProviderSettings {
 
 /** The provider Chat sends to, if any. */
 export function activeRemote(settings: IntelligenceSettings | null, providers: ProviderView[]): ProviderView | null {
-  if (!settings || settings.localOnly || settings.activeProvider === null) return null;
+  if (!settings || settings.activeProvider === null) return null;
   return providers.find((provider) => provider.id === settings.activeProvider) ?? null;
 }
 
@@ -214,19 +214,15 @@ export function readinessCopy(view: ProviderView): ReadinessCopy {
         : { tone: "error", label: "Secure storage unavailable", detail: "No keyring service is available, so providers that need a key stay off. Local models still work." };
     case "needs_retention":
       return { tone: "warning", label: "Retention not declared", detail: "Say how the provider retains requests before anything can be sent." };
-    case "local_only":
-      return { tone: "muted", label: "Off · local-only mode", detail: null };
   }
 }
 
-/** The one-line disclosure shown with the composer before a remote request. */
+/** The Chat target’s sharing disclosure in provider settings. */
 export function disclosure(view: ProviderView): string {
   const { shared, withheld } = sharingSummary(view.settings.sharing);
-  const parts = [
-    `Sends ${listText(shared)} to ${view.settings.name} (${localityLabel(view).toLowerCase()})`,
-    withheld.length ? `not ${listText(withheld)}` : null,
-  ].filter(Boolean);
-  return `${parts.join("; ")}.`;
+  const destination = `${view.settings.name} (${localityLabel(view).toLowerCase()})`;
+  const sharing = `Sends ${listText(shared)} to ${destination}.`;
+  return withheld.length ? `${sharing} Withholds ${listText(withheld)}.` : sharing;
 }
 
 /** Client-side hints for the draft. The backend validates authoritatively. */

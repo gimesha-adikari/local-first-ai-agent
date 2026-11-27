@@ -19,10 +19,10 @@ void (async () => {
   const result = { pass: false, steps: [] };
   try {
     const boot = await ipc.invoke("bootstrap");
-    assert(boot.intelligence.localOnly === true && boot.intelligence.activeProvider === null, "New profile is not local-only");
+    assert(boot.intelligence.activeProvider === null, "New profile has a remote Chat target");
     assert(boot.models.length === 0 && boot.inference.model === null, "Profile has a local model");
     assert((await ipc.invoke("provider_list")).length === 0, "Unexpected providers");
-    result.steps.push("local-only profile without models");
+    result.steps.push("new profile selects the local model");
 
     const settings = {
       name: "Fixture server",
@@ -49,31 +49,31 @@ void (async () => {
     assert(insecure.code === "invalid_config", "A cloud provider over http was accepted");
     const view = await ipc.invoke("provider_save", { id: null, settings });
     assert(view.settings.endpoint === "http://127.0.0.1:__PORT__/v1", "Endpoint was not canonicalized");
-    assert(view.readiness === "local_only" && view.network === "loopback" && view.credential === null, "Unexpected provider status");
+    assert(view.readiness === "ready" && view.network === "loopback" && view.credential === null, "Unexpected provider status");
     assert(!JSON.stringify(view).includes("sk-"), "Provider view contains a credential");
     result.steps.push("provider saved without credential fields");
 
     const thread = await ipc.invoke("create_conversation");
     const blocked = await failure(ipc.invoke("send_message", { id: thread.id, content: "Hello", events: channel([]) }));
-    assert(blocked.code === "no_model", "Local-only Chat did not stay local");
-    const denied = await failure(ipc.invoke("provider_test", { id: view.id }));
-    assert(denied.code === "policy_denied", "Local-only mode allowed a provider test");
-    result.steps.push("local-only refused remote work");
-
-    await ipc.invoke("set_intelligence_settings", { settings: { localOnly: false, activeProvider: view.id } });
+    assert(blocked.code === "no_model", "Unselected provider received Chat");
+    await ipc.invoke("set_intelligence_settings", { settings: { activeProvider: view.id } });
+    const stale = await failure(ipc.invoke("send_message", {
+      id: thread.id, content: "Stale local target", options: { expectedTarget: { providerId: null } }, events: channel([]),
+    }));
+    assert(stale.code === "invalid_config", "An outdated local target was routed to the server");
     const test = await ipc.invoke("provider_test", { id: view.id });
     assert(test.modelListed === true, "Discovery did not list the model");
-    assert(test.models.includes("seen-0"), `Requests reached the fixture during local-only mode: ${test.models}`);
+    assert(test.models.includes("seen-0"), `Requests reached the fixture before the explicit connection test: ${test.models}`);
     result.steps.push("discovery through the boundary; zero earlier requests");
 
     const events = [];
-    const answer = await ipc.invoke("send_message", { id: thread.id, content: "Cloud-only hello", events: channel(events) });
+    const answer = await ipc.invoke("send_message", { id: thread.id, content: "Remote hello", options: { expectedTarget: { providerId: view.id } }, events: channel(events) });
     assert(answer.content === "Remote fixture answer" && answer.state === "complete", `Unexpected answer ${answer.content}`);
     assert(events.some((event) => event.kind === "delta"), "Remote answer did not stream");
     assert(answer.stats.promptTokens === 21 && answer.stats.generatedTokens === 3, "Provider usage was not reported");
     const listed = (await ipc.invoke("provider_list"))[0];
     assert(listed.usage.reportedTokens === 24 && listed.usage.reservedTokens === 0, "Usage was not reconciled");
-    result.steps.push("cloud-only Chat completed without a local model");
+    result.steps.push("configured remote Chat completed without a local model");
 
     let firstDelta;
     const waiting = new Promise((resolve) => { firstDelta = resolve; });
@@ -84,17 +84,19 @@ void (async () => {
     await waiting;
     const busyDelete = await failure(ipc.invoke("provider_delete", { id: view.id }));
     assert(busyDelete.code === "busy", "Deletion was admitted during a turn");
-    await ipc.invoke("set_intelligence_settings", { settings: { localOnly: true, activeProvider: view.id } });
-    assert((await ipc.invoke("intelligence_settings")).localOnly && (await ipc.invoke("bootstrap")).intelligence.localOnly, "Effective mode differs across commands");
-    assert((await ipc.invoke("provider_list"))[0].readiness === "local_only", "Provider readiness did not update");
+    const busySelection = await failure(ipc.invoke("set_intelligence_settings", { settings: { activeProvider: null } }));
+    assert(busySelection.code === "busy", "Chat target changed while the turn was active");
+    assert(await ipc.invoke("stop_generation"), "Stop was not accepted");
     const stopped = await held;
-    assert(["policy_denied", "cancelled"].includes(stopped.code), "Remote turn did not terminate on restriction");
-    result.steps.push("in-flight Chat revoked from main-window IPC, mode and readiness agree");
+    assert(stopped.code === "cancelled", "Stop did not cancel the remote turn");
+    await ipc.invoke("set_intelligence_settings", { settings: { activeProvider: null } });
+    assert((await ipc.invoke("intelligence_settings")).activeProvider === null, "Local selection was not saved");
     const again = await failure(ipc.invoke("send_message", { id: thread.id, content: "Stay local", events: channel([]) }));
-    assert(again.code === "no_model", "Switching back to local-only did not stop remote Chat");
+    assert(again.code === "no_model", "Local selection did not keep Chat local");
+    result.steps.push("Stop cancels remote Chat, and choosing the local target keeps Chat on-device");
     await ipc.invoke("provider_delete", { id: view.id });
     assert((await ipc.invoke("provider_list")).length === 0, "Provider was not removed");
-    result.steps.push("local-only restored and provider removed");
+    result.steps.push("local target saved and provider removed");
     result.pass = true;
   } catch (error) {
     result.error = String(error?.message ?? JSON.stringify(error));

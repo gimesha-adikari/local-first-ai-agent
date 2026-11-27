@@ -1,9 +1,8 @@
-//! Main-window model library commands. Network consent is presented natively
-//! for the exact catalog entry before the engine can open a connection.
+//! Main-window model library commands for the curated model catalog.
 
 use agent_core::inference::Result;
 use engine::{downloads::ModelCatalog, semantic::EmbeddingModelStatus};
-use tauri::{State, WebviewWindow};
+use tauri::State;
 
 use crate::commands::Desktop;
 
@@ -15,38 +14,10 @@ pub fn model_catalog(state: State<'_, Desktop>) -> Result<ModelCatalog> {
 #[tauri::command]
 pub async fn start_model_download(
     state: State<'_, Desktop>,
-    window: WebviewWindow,
     key: &str,
     restart: bool,
-) -> Result<bool> {
-    let artifact = state.engine.model_download_offer(key)?;
-    let action = if restart {
-        "Restart download"
-    } else {
-        "Download model"
-    };
-    let mut message = format!(
-        "{}\n{} bytes · {}\nLicense terms: {}\n\nThe app will contact Hugging Face and its artifact CDN to retrieve this exact model. It sends no Chat, Knowledge or other personal content.",
-        artifact.name, artifact.bytes, artifact.license, artifact.license_url,
-    );
-    if artifact == &engine::manifest::LFM25 {
-        message.push_str("\n\nThe LFM license restricts some commercial uses.");
-    }
-    let answer = rfd::AsyncMessageDialog::new()
-        .set_parent(&window)
-        .set_title(action)
-        .set_description(message)
-        .set_buttons(rfd::MessageButtons::OkCancelCustom(
-            action.into(),
-            "Cancel".into(),
-        ))
-        .show()
-        .await;
-    if answer != rfd::MessageDialogResult::Custom(action.into()) {
-        return Ok(false);
-    }
-    state.engine.start_model_download(key, restart)?;
-    Ok(true)
+) -> Result<()> {
+    state.engine.start_model_download(key, restart)
 }
 
 #[tauri::command]

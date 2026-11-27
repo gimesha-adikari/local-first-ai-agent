@@ -882,6 +882,7 @@ fn schema_fourteen_memories_upgrade_without_provenance_and_panel_memories_keep_t
             "DROP TABLE visual_settings; DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
              ALTER TABLE personal_memories DROP COLUMN provenance;
              ALTER TABLE personal_memories DROP COLUMN classification;
+             ALTER TABLE intelligence_settings ADD COLUMN local_only INTEGER NOT NULL DEFAULT 1 CHECK (local_only IN (0, 1));
              PRAGMA user_version=14;",
         )
         .unwrap();

@@ -192,12 +192,12 @@ pub struct RequestBinding {
 }
 
 impl RequestBinding {
-    pub(crate) fn artifact_epoch(&self) -> Option<u64> {
-        self.artifact.as_ref().map(|artifact| artifact.epoch)
+    pub(crate) fn has_artifact_binding(&self) -> bool {
+        self.artifact.is_some()
     }
 
-    pub(crate) fn page_epoch(&self) -> Option<u64> {
-        self.page.as_ref().map(|page| page.epoch)
+    pub(crate) fn has_page_binding(&self) -> bool {
+        self.page.is_some()
     }
 
     pub(crate) fn is_bodiless_get(&self) -> bool {
@@ -485,7 +485,7 @@ pub struct Failed {
 }
 
 /// The single network boundary. The transport worker starts on the first
-/// admitted request, so local-only operation never creates it.
+/// admitted request.
 pub struct NetworkBoundary {
     policy: Arc<Policy>,
     credentials: Arc<dyn CredentialSource>,

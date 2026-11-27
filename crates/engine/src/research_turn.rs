@@ -29,13 +29,9 @@ use super::{
 use crate::{
     chat_session::ChatSession,
     database,
-    network::{
-        Failure,
-        page::{PageError, PublicUrl, ResearchConsent},
-    },
+    network::page::{PageError, PublicUrl, ResearchConsent},
     research::{
-        DiscoveredView, ResearchOptions, Transient, TransientSource, extract, local_only_error,
-        page_limitation, rank,
+        DiscoveredView, ResearchOptions, Transient, TransientSource, extract, page_limitation, rank,
     },
 };
 
@@ -104,8 +100,7 @@ impl ChatRuntime {
             crate::network::Destination,
         )>,
     )> {
-        let selection =
-            crate::providers::effective_settings(&*database(&self.database)?, &self.policy)?;
+        let selection = database(&self.database)?.intelligence_settings()?;
         let remote = crate::providers::remote_target(&self.database, selection)?;
         let none = |reason: &str, model_name| Target {
             synthesis: Synthesis::None,
@@ -200,12 +195,7 @@ impl ChatRuntime {
                 "Use 1–32768 output tokens.",
             ));
         }
-        if self.policy.is_local_only() {
-            return Err(local_only_error());
-        }
-        if !research.query_attachments.is_empty()
-            && (research.mode != ResearchMode::Search || research.query.is_none())
-        {
+        if !research.query_attachments.is_empty() && research.mode != ResearchMode::Search {
             return Err(InferenceError::new(
                 ErrorCode::InvalidConfig,
                 "Review the query from the attached image before searching.",
@@ -215,6 +205,7 @@ impl ChatRuntime {
         // Validate everything the user authorized before anything is saved.
         let (query, page_url, provider) = match research.mode {
             ResearchMode::Search => {
+                settings.validate()?;
                 let provider = settings.provider.ok_or_else(|| {
                     InferenceError::new(
                         ErrorCode::InvalidConfig,
@@ -228,6 +219,15 @@ impl ChatRuntime {
                     ));
                 }
                 let query = SearchQuery::new(research.query.as_deref().unwrap_or(&question))?;
+                if !research.query_attachments.is_empty()
+                    && (research.query.is_none()
+                        || research.reviewed_query.as_deref() != Some(query.as_str()))
+                {
+                    return Err(InferenceError::new(
+                        ErrorCode::InvalidConfig,
+                        "Review the exact query from the attached image before searching.",
+                    ));
+                }
                 (Some(query), None, Some(provider))
             }
             ResearchMode::Page => {
@@ -508,15 +508,10 @@ impl ChatRuntime {
         };
         // One search plus each page with its redirects: the disclosed bound.
         let consent = ResearchConsent::new(
-            &self.policy,
             cancellation.clone(),
             1 + pages * (1 + MAX_REDIRECTS),
             CONSENT_LIFETIME,
-        )
-        .map_err(|failure| match failure {
-            Failure::Denied(_) => local_only_error(),
-            other => crate::providers::failure_error(&other),
-        })?;
+        );
         let mut details = Transient::default();
         type Targets = Vec<(PublicUrl, Labels, Option<usize>)>;
         let (results, targets): (Vec<SearchResult>, Targets) = match (query, provider, page_url) {
@@ -595,9 +590,6 @@ impl ChatRuntime {
         external.extend(records.into_inner().unwrap_or_default());
         drop(consent);
         check_chat_cancellation(&cancellation)?;
-        if self.policy.is_local_only() {
-            return Err(local_only_error());
-        }
 
         self.research_event(events, message_id, ResearchStage::Ranking);
         let budget = if context_tokens == 0 {
