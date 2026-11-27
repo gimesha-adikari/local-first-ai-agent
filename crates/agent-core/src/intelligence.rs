@@ -21,6 +21,8 @@ pub enum SourceKind {
     Prompt,
     Clipboard,
     ManualText,
+    ScreenText,
+    ScreenImage,
     SystemPrompt,
     History,
     Knowledge,

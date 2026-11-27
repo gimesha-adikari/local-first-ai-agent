@@ -25,6 +25,15 @@ pub struct DataClass {
 
 pub const USER_INPUT: DataClass = personal("core.user-input/1");
 pub const CLIPBOARD_TEXT: DataClass = personal("core.clipboard-text/1");
+/// A user-selected crop of one captured screen frame. Full frames never
+/// leave the desktop host and have no class of their own.
+pub const SCREEN_IMAGE: DataClass = DataClass {
+    id: "core.screen-image/1",
+    sensitivity: Sensitivity::RawSensor,
+};
+/// Text recognized from a screen crop. It also carries the crop's labels:
+/// recognition does not declassify.
+pub const SCREEN_TEXT: DataClass = personal("core.screen-text/1");
 pub const HISTORY: DataClass = personal("core.history/1");
 pub const MEMORY: DataClass = personal("core.memory/1");
 pub const LIBRARY: DataClass = personal("core.library/1");
@@ -64,6 +73,8 @@ impl Default for DataClasses {
         Self::new([
             USER_INPUT,
             CLIPBOARD_TEXT,
+            SCREEN_IMAGE,
+            SCREEN_TEXT,
             HISTORY,
             MEMORY,
             LIBRARY,

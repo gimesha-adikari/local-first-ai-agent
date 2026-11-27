@@ -19,5 +19,7 @@ pub mod agent;
 pub mod knowledge;
 
 pub mod provider;
+/// One captured screen frame: conversion, regions and settling.
+pub mod screen;
 
 pub mod semantic;
