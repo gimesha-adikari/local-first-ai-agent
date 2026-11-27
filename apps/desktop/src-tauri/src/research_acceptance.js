@@ -74,6 +74,23 @@ void (async () => {
     await waitFor(() => document.body.textContent.includes("Brave Search API"), "Web search settings did not render");
     await waitFor(() => document.body.textContent.includes("http://127.0.0.1:8888 · This computer"), "Saved SearXNG address not shown");
     result.steps.push("Settings show the provider configuration");
+
+    await click("Purili (experimental)");
+    await waitFor(() => document.querySelector(".error-text[role=alert]")?.textContent.includes("non-commercial"),
+      "Selecting Purili without confirmation was not refused");
+    assert((await invoke("web_research_settings")).settings.provider === "searxng", "A refused selection replaced the provider");
+    const consent = await waitFor(() => [...document.querySelectorAll("[role=switch]")].find(
+      (item) => item.labels?.[0]?.textContent.includes("only for personal, non-commercial")), "Purili confirmation switch missing");
+    consent.click();
+    await waitFor(() => consent.getAttribute("aria-checked") === "true" && !button("Purili (experimental)")?.disabled,
+      "The confirmation was not saved");
+    await click("Purili (experimental)");
+    await waitFor(() => button("Purili (experimental)")?.getAttribute("aria-checked") === "true", "Purili was not selected");
+    const chosen = (await invoke("web_research_settings")).settings;
+    assert(chosen.provider === "purili" && chosen.puriliPersonalUse === true, "Purili settings were not stored");
+    consent.click();
+    await waitFor(() => button("None")?.getAttribute("aria-checked") === "true", "Withdrawing the confirmation kept Purili selected");
+    result.steps.push("Purili needs the personal-use confirmation and is deselected when it is withdrawn");
     result.pass = true;
   } catch (error) {
     result.error = error?.message || String(error);
