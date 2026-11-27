@@ -203,6 +203,14 @@ impl ChatRuntime {
         if self.policy.is_local_only() {
             return Err(local_only_error());
         }
+        if !research.query_attachments.is_empty()
+            && (research.mode != ResearchMode::Search || research.query.is_none())
+        {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "Review the query from the attached image before searching.",
+            ));
+        }
         let settings = database(&self.database)?.web_research_settings()?;
         // Validate everything the user authorized before anything is saved.
         let (query, page_url, provider) = match research.mode {
@@ -234,6 +242,9 @@ impl ChatRuntime {
         };
         let (target, remote_target) =
             self.research_target(&research, model_id, options.enable_thinking)?;
+        let query_labels = self
+            .attachments
+            .query_labels(id, &research.query_attachments)?;
 
         let record = ResearchRecord {
             version: 1,
@@ -281,6 +292,7 @@ impl ChatRuntime {
             .gather(
                 &research,
                 query.as_ref(),
+                &query_labels,
                 page_url,
                 provider,
                 &question,
@@ -479,6 +491,7 @@ impl ChatRuntime {
         &self,
         research: &ResearchOptions,
         query: Option<&SearchQuery>,
+        query_labels: &Labels,
         page_url: Option<PublicUrl>,
         provider: Option<SearchProviderKind>,
         question: &str,
@@ -511,7 +524,7 @@ impl ChatRuntime {
                 self.research_event(events, message_id, ResearchStage::Searching);
                 let results = self
                     .boundary
-                    .search(&consent, provider, query, external)
+                    .search(&consent, provider, query, query_labels, external)
                     .await?;
                 // Prefer distinct sites, in provider order.
                 let mut chosen: Vec<usize> = Vec::new();

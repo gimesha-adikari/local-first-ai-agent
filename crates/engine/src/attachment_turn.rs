@@ -288,6 +288,7 @@ impl ChatRuntime {
                     id: item.id.clone(),
                     name: item.name.clone(),
                     kind: item.kind,
+                    origin: item.origin,
                     retention: item.retention,
                     total_passages: item.content.passages.len() as u32,
                     pages: item.content.pages,
@@ -332,7 +333,9 @@ impl ChatRuntime {
             .map(|&(attachment, _)| ContextSource {
                 kind: SourceKind::Attachment,
                 record: None,
-                labels: resolved[attachment].kind.text_labels(),
+                labels: resolved[attachment]
+                    .origin
+                    .text_labels(resolved[attachment].kind),
             })
             .collect();
         let mut images = Vec::new();
@@ -352,7 +355,7 @@ impl ChatRuntime {
             image_sources.push(ContextSource {
                 kind: SourceKind::AttachmentImage,
                 record: None,
-                labels: agent_core::attachment::AttachmentKind::image_labels(),
+                labels: item.origin.image_labels(),
             });
         }
         let prompt_task = EvidenceTask::Attachment(AttachmentPrompt {

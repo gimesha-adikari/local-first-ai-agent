@@ -607,3 +607,103 @@ fn kept_attachments_reopen_after_restart_and_temporary_ones_do_not() {
     drop(engine);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A synthetic camera snapshot: a synthetic image with the camera origin.
+pub(crate) struct CameraSnapshot(pub(crate) Box<Synthetic>);
+
+impl AttachmentFile for CameraSnapshot {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn kind(&self) -> AttachmentKind {
+        self.0.kind()
+    }
+
+    fn origin(&self) -> agent_core::attachment::AttachmentOrigin {
+        agent_core::attachment::AttachmentOrigin::Camera
+    }
+
+    fn file_bytes(&self) -> u64 {
+        self.0.file_bytes()
+    }
+
+    fn prepare(
+        self: Box<Self>,
+        stage: &dyn Fn(Stage),
+        check: &dyn Fn() -> AgentResult<()>,
+    ) -> AgentResult<PreparedContent> {
+        self.0.prepare(stage, check)
+    }
+}
+
+#[test]
+fn camera_snapshots_keep_their_classes_through_answers_text_and_search_queries() {
+    use agent_core::classification::{ATTACHMENT_TEXT, CAMERA_IMAGE, CAMERA_TEXT, USER_INPUT};
+    let h = harness();
+    h.load();
+    let id = h.conversation();
+    let other = h.conversation();
+    let snapshot = attach_ready(
+        &h.engine,
+        Some(id),
+        AttachmentRetention::Temporary,
+        Box::new(CameraSnapshot(Synthetic::image(
+            "Camera snapshot 10:15",
+            Some("CAMERA TEST 42"),
+        ))),
+    );
+    let view = serde_json::to_value(
+        views(&h.engine, Some(id))
+            .into_iter()
+            .find(|view| view.id == snapshot)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(view["origin"], "camera");
+    assert_eq!(view["retention"], "temporary");
+
+    // Recognized text is readable only in its own scope.
+    assert_eq!(
+        h.engine.attachment_text(Some(id), &snapshot).unwrap(),
+        "CAMERA TEST 42"
+    );
+    for scope in [None, Some(other)] {
+        assert!(h.engine.attachment_text(scope, &snapshot).is_err());
+    }
+
+    // A search query built from the snapshot's text carries its classes;
+    // another conversation cannot borrow them.
+    let labels = h
+        .engine
+        .attachments
+        .query_labels(id, std::slice::from_ref(&snapshot))
+        .unwrap();
+    for class in [USER_INPUT, ATTACHMENT_TEXT, CAMERA_TEXT, CAMERA_IMAGE] {
+        assert!(labels.contains(class), "{}", class.id);
+    }
+    assert!(
+        h.engine
+            .attachments
+            .query_labels(other, std::slice::from_ref(&snapshot))
+            .is_err()
+    );
+    assert!(
+        h.engine
+            .attachments
+            .query_labels(id, &[format!("a{}", "9".repeat(32))])
+            .is_err()
+    );
+
+    // An answer from the snapshot's text is labelled with camera classes.
+    let message = send(
+        &h,
+        id,
+        "Translate the text in the snapshot into French.",
+        json!({"attachments": {"ids": [snapshot]}}),
+    )
+    .unwrap();
+    assert!(message.labels.contains(CAMERA_TEXT), "{:?}", message.labels);
+    let seen = h.script.seen().pop().unwrap();
+    assert!(seen.evidence.unwrap()[0].contains("CAMERA TEST 42"));
+}

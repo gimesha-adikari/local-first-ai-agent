@@ -74,6 +74,16 @@ pub const ATTACHMENT_TEXT: DataClass = personal("core.attachment-text/1");
 /// A validated, metadata-stripped image representation of an attachment.
 /// It is user-chosen file content, not a sensor capture.
 pub const ATTACHMENT_IMAGE: DataClass = personal("core.attachment-image/1");
+/// A camera snapshot the user explicitly captured and confirmed (Stage
+/// 04-E). Like a screen crop it is a raw sensor capture: it may show
+/// people, places and documents, and it never declassifies.
+pub const CAMERA_IMAGE: DataClass = DataClass {
+    id: "core.camera-image/1",
+    sensitivity: Sensitivity::RawSensor,
+};
+/// Text recognized from a camera snapshot. It also carries the snapshot's
+/// labels: recognition does not declassify.
+pub const CAMERA_TEXT: DataClass = personal("core.camera-text/1");
 pub const SECRET: DataClass = DataClass {
     id: "core.secret/1",
     sensitivity: Sensitivity::Secret,
@@ -112,6 +122,8 @@ impl Default for DataClasses {
             ATTACHMENT,
             ATTACHMENT_TEXT,
             ATTACHMENT_IMAGE,
+            CAMERA_IMAGE,
+            CAMERA_TEXT,
             SECRET,
         ])
     }

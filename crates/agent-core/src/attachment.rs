@@ -7,7 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::classification::{ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, Labels};
+use crate::classification::{
+    ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, CAMERA_IMAGE, CAMERA_TEXT, Labels,
+};
 
 /// Attachments in one composer draft or conversation at the same time.
 pub const MAX_SCOPE_ATTACHMENTS: usize = 6;
@@ -93,6 +95,54 @@ impl AttachmentKind {
     /// Labels of a validated image representation.
     pub fn image_labels() -> Labels {
         Labels::derived([Labels::from_source(ATTACHMENT)], ATTACHMENT_IMAGE)
+    }
+}
+
+/// Where an attachment's content came from. The origin only ever adds
+/// labels: a camera snapshot keeps its raw-sensor class wherever it goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentOrigin {
+    /// A file the user chose with the native picker.
+    #[default]
+    File,
+    /// A camera snapshot the user captured, previewed and confirmed.
+    Camera,
+}
+
+impl AttachmentOrigin {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Camera => "camera",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "file" => Self::File,
+            "camera" => Self::Camera,
+            _ => return None,
+        })
+    }
+
+    /// Labels of text derived from an attachment of `kind` from this origin.
+    pub fn text_labels(self, kind: AttachmentKind) -> Labels {
+        let mut labels = kind.text_labels();
+        if self == Self::Camera {
+            labels.insert(CAMERA_IMAGE);
+            labels.insert(CAMERA_TEXT);
+        }
+        labels
+    }
+
+    /// Labels of the validated image representation from this origin.
+    pub fn image_labels(self) -> Labels {
+        let mut labels = AttachmentKind::image_labels();
+        if self == Self::Camera {
+            labels.insert(CAMERA_IMAGE);
+        }
+        labels
     }
 }
 
@@ -192,6 +242,8 @@ pub struct AttachmentUse {
     pub id: String,
     pub name: String,
     pub kind: AttachmentKind,
+    #[serde(default)]
+    pub origin: AttachmentOrigin,
     pub retention: AttachmentRetention,
     /// Readable passages the attachment has.
     pub total_passages: u32,
@@ -244,7 +296,6 @@ impl AttachmentRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classification::ATTACHMENT_IMAGE;
 
     #[test]
     fn identifiers_kinds_and_labels() {
@@ -271,6 +322,35 @@ mod tests {
         assert!(AttachmentKind::Png.text_labels().contains(ATTACHMENT_IMAGE));
         assert!(!AttachmentKind::Pdf.text_labels().contains(ATTACHMENT_IMAGE));
         assert!(AttachmentKind::image_labels().contains(ATTACHMENT));
+        // A camera origin adds its sensor classes; a file origin adds none.
+        let camera = AttachmentOrigin::Camera.text_labels(AttachmentKind::Png);
+        for class in [
+            ATTACHMENT,
+            ATTACHMENT_IMAGE,
+            ATTACHMENT_TEXT,
+            CAMERA_IMAGE,
+            CAMERA_TEXT,
+        ] {
+            assert!(camera.contains(class), "{}", class.id);
+        }
+        assert!(
+            AttachmentOrigin::Camera
+                .image_labels()
+                .contains(CAMERA_IMAGE)
+        );
+        assert_eq!(
+            AttachmentOrigin::File.text_labels(AttachmentKind::Png),
+            AttachmentKind::Png.text_labels()
+        );
+        for origin in [AttachmentOrigin::File, AttachmentOrigin::Camera] {
+            assert_eq!(AttachmentOrigin::parse(origin.as_str()), Some(origin));
+        }
+        // Records saved before Stage 04-E have no origin and read as files.
+        let legacy: AttachmentUse = serde_json::from_str(
+            r#"{"id":"a","name":"n","kind":"png","retention":"temporary","totalPassages":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.origin, AttachmentOrigin::File);
     }
 
     #[test]
@@ -282,6 +362,7 @@ mod tests {
                 id: format!("a{}", "1".repeat(32)),
                 name: "report.pdf".into(),
                 kind: AttachmentKind::Pdf,
+                origin: AttachmentOrigin::File,
                 retention: AttachmentRetention::Temporary,
                 total_passages: 9,
                 pages: Some(PageCoverage {

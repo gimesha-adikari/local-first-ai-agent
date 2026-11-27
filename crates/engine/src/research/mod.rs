@@ -55,6 +55,11 @@ pub struct ResearchOptions {
     /// message itself is the query.
     #[serde(default)]
     pub query: Option<String>,
+    /// Attachments whose recognized or extracted text the query was built
+    /// from (visual-assisted search, Stage 04-E). Their classes are added to
+    /// the query's labels; nothing of the attachments themselves is sent.
+    #[serde(default)]
+    pub query_attachments: Vec<String>,
     /// The public page to read in page mode.
     #[serde(default)]
     pub url: Option<String>,
@@ -272,12 +277,15 @@ pub(crate) fn page_limitation(host: &str, error: &PageError) -> String {
 
 impl NetworkBoundary {
     /// Run one search under `consent`. Only the validated query is sent; it
-    /// carries the user's input classes. Every attempt is reported.
+    /// carries the classes of everything it was derived from (`sources`:
+    /// the user's input, and recognized screen, camera or attachment text
+    /// when the query came from them). Every attempt is reported.
     pub(crate) async fn search(
         &self,
         consent: &ResearchConsent,
         provider: SearchProviderKind,
         query: &SearchQuery,
+        sources: &Labels,
         records: &mut Vec<EgressRecord>,
     ) -> Result<Vec<SearchResult>> {
         let policy = self.authority();
@@ -302,15 +310,20 @@ impl NetworkBoundary {
             })
         })?;
         let request = providers::request(provider, query);
+        let purpose = if sources.ids().any(|id| id != USER_INPUT.id) {
+            crate::policy::VISUAL_SEARCH_PURPOSE
+        } else {
+            "web-search"
+        };
         let outbound = Outbound::new(
             consent.session(),
             WEB_SEARCH,
-            "web-search",
+            purpose,
             destination.locality(),
             destination,
             request.method,
             request.route,
-            Classified::derived(request.body, [&Labels::from_source(USER_INPUT)], QUERY),
+            Classified::derived(request.body, [sources], QUERY),
             Retention::ProviderDeclared,
         )
         .with_content_type(request.content_type);
@@ -367,6 +380,38 @@ impl NetworkBoundary {
     }
 }
 
+/// One result of a visual-assisted search. Untrusted provider data, held
+/// only by the panel session that asked for it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisualSearchResult {
+    pub title: String,
+    pub url: String,
+    pub host: String,
+    pub snippet: String,
+    pub published: Option<String>,
+}
+
+/// A visual-assisted text search (Stage 04-E): the reviewed query, the
+/// results and the transport records of the one request that was made.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisualSearch {
+    pub provider: SearchProviderKind,
+    pub provider_name: &'static str,
+    pub query: String,
+    pub results: Vec<VisualSearchResult>,
+    pub egress: Vec<EgressRecord>,
+}
+
+/// A link from a search result, revalidated as a public HTTPS URL before
+/// the host opens it.
+pub fn validated_link(url: &str) -> Result<String> {
+    PublicUrl::parse(url)
+        .map(|url| url.as_str().to_owned())
+        .map_err(|error| InferenceError::new(ErrorCode::InvalidConfig, error.to_string()))
+}
+
 /// Register the fixed Brave and Purili destinations and any configured
 /// SearXNG instance. Registration grants nothing by itself.
 pub(crate) fn register(policy: &Policy, settings: &WebResearchSettings) {
@@ -393,6 +438,68 @@ fn brave_key(policy: &Policy) -> Option<CredentialKey> {
 }
 
 impl Engine {
+    /// Search the web with a query the user reviewed and authorized for
+    /// this one request. `sources` are the classes of what the query was
+    /// built from (recognized screen or camera text, a model's description).
+    /// Only the query text is sent: never an image, document, memory or
+    /// conversation. One search, no page reads and no model.
+    pub async fn visual_search(
+        &self,
+        query: &str,
+        provider_seen: Option<SearchProviderKind>,
+        sources: Labels,
+        cancellation: agent_core::inference::Cancellation,
+    ) -> Result<VisualSearch> {
+        if self.policy.is_local_only() {
+            return Err(local_only_error());
+        }
+        let settings = database(&self.database)?.web_research_settings()?;
+        let provider = settings.provider.ok_or_else(|| {
+            invalid("Choose a search provider in Settings → Web search to search the web.")
+        })?;
+        if provider_seen != Some(provider) {
+            return Err(invalid(
+                "The search provider changed. Review the search and authorize it again.",
+            ));
+        }
+        let query = SearchQuery::new(query)?;
+        let consent = ResearchConsent::new(
+            &self.policy,
+            cancellation,
+            1,
+            std::time::Duration::from_secs(120),
+        )
+        .map_err(|failure| match failure {
+            Failure::Denied(_) => local_only_error(),
+            other => crate::providers::failure_error(&other),
+        })?;
+        let mut egress = Vec::new();
+        let results = self
+            .boundary
+            .search(&consent, provider, &query, &sources, &mut egress)
+            .await;
+        let results = results?
+            .into_iter()
+            .filter_map(|result| {
+                let url = PublicUrl::parse(&result.url).ok()?;
+                Some(VisualSearchResult {
+                    host: url.host().to_owned(),
+                    url: url.as_str().to_owned(),
+                    title: result.title,
+                    snippet: result.snippet,
+                    published: result.published,
+                })
+            })
+            .collect();
+        Ok(VisualSearch {
+            provider,
+            provider_name: provider.label(),
+            query: query.as_str().to_owned(),
+            results,
+            egress,
+        })
+    }
+
     pub async fn web_research(&self) -> Result<WebResearchView> {
         let settings = database(&self.database)?.web_research_settings()?;
         let brave_key = match brave_key(&self.policy) {

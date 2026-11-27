@@ -388,3 +388,112 @@ fn registering_a_data_class_does_not_grant_existing_workflow_access() {
         Ok(())
     );
 }
+
+#[test]
+fn search_requests_admit_visual_query_classes_but_never_history_memory_or_documents() {
+    use crate::policy::VISUAL_SEARCH_PURPOSE;
+    use agent_core::{
+        capability::WEB_SEARCH,
+        classification::{
+            ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, CAMERA_IMAGE, CAMERA_TEXT, HISTORY,
+            LIBRARY, MODEL_OUTPUT, PDF_EXCERPT, QUERY, SCREEN_TEXT, SYSTEM_TEXT, TEXT_EXCERPT,
+        },
+    };
+    let search = destination("search/fixture", "https://search.example/res");
+    let authority = Policy::new(
+        CapabilityRegistry::new([WEB_SEARCH]),
+        DataClasses::default(),
+        [search.clone()],
+        false,
+    );
+    let session = Session::new(Cancellation::default());
+    let query = |purpose, sources: &[DataClass]| {
+        let mut labels = Labels::from_source(USER_INPUT);
+        for class in sources {
+            labels.insert(*class);
+        }
+        Outbound::new(
+            &session,
+            WEB_SEARCH,
+            purpose,
+            Locality::ThirdParty,
+            search.clone(),
+            Method::Post,
+            Route::new("/res"),
+            Classified::derived(b"q=synthetic".to_vec(), [&labels], QUERY),
+            Retention::ProviderDeclared,
+        )
+    };
+    for visual in [
+        &[SCREEN_TEXT][..],
+        &[CAMERA_TEXT, CAMERA_IMAGE],
+        &[ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT],
+        &[CAMERA_TEXT, CAMERA_IMAGE, MODEL_OUTPUT, SYSTEM_TEXT],
+    ] {
+        let request = query(VISUAL_SEARCH_PURPOSE, visual);
+        assert!(
+            authority
+                .grant(Permission::Share, request.operation(), future())
+                .is_ok(),
+            "{visual:?}"
+        );
+        let ordinary = query("web-search", visual);
+        assert_eq!(
+            authority.grant(Permission::Share, ordinary.operation(), future()),
+            Err(Denial::Scope),
+            "{visual:?}"
+        );
+    }
+    for private in [HISTORY, MEMORY, LIBRARY, PDF_EXCERPT, TEXT_EXCERPT] {
+        let request = query(
+            VISUAL_SEARCH_PURPOSE,
+            &[
+                CAMERA_TEXT,
+                CAMERA_IMAGE,
+                MODEL_OUTPUT,
+                SYSTEM_TEXT,
+                private,
+            ],
+        );
+        assert_eq!(
+            authority.grant(Permission::Share, request.operation(), future()),
+            Err(Denial::Scope),
+            "{}",
+            private.id
+        );
+    }
+    let document = query(
+        VISUAL_SEARCH_PURPOSE,
+        &[CAMERA_TEXT, ATTACHMENT, ATTACHMENT_TEXT],
+    );
+    assert_eq!(
+        authority.grant(Permission::Share, document.operation(), future()),
+        Err(Denial::Scope)
+    );
+    for classes in [
+        &[CAMERA_IMAGE, SYSTEM_TEXT][..],
+        &[MODEL_OUTPUT, SYSTEM_TEXT],
+    ] {
+        let request = query(VISUAL_SEARCH_PURPOSE, classes);
+        assert_eq!(
+            authority.grant(Permission::Share, request.operation(), future()),
+            Err(Denial::Scope)
+        );
+    }
+    // A search request must carry the query class.
+    let bare = Outbound::new(
+        &session,
+        WEB_SEARCH,
+        VISUAL_SEARCH_PURPOSE,
+        Locality::ThirdParty,
+        search.clone(),
+        Method::Post,
+        Route::new("/res"),
+        Classified::from_source(b"q=synthetic".to_vec(), CAMERA_TEXT),
+        Retention::ProviderDeclared,
+    );
+    assert_eq!(
+        authority.grant(Permission::Share, bare.operation(), future()),
+        Err(Denial::Scope)
+    );
+}

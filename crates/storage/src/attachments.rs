@@ -7,9 +7,9 @@
 
 use agent_core::{
     attachment::{
-        AttachmentKind, AttachmentRecord, MAX_ATTACHMENT_SOURCES, MAX_IMAGE_FILE_BYTES,
-        MAX_RETAINED_PER_CONVERSATION, MAX_TEXT_FILE_BYTES, PageCoverage, PassageSource,
-        valid_attachment_id,
+        AttachmentKind, AttachmentOrigin, AttachmentRecord, MAX_ATTACHMENT_SOURCES,
+        MAX_IMAGE_FILE_BYTES, MAX_RETAINED_PER_CONVERSATION, MAX_TEXT_FILE_BYTES, PageCoverage,
+        PassageSource, valid_attachment_id,
     },
     chat::{ConversationId, MessageId},
     chat_context::{AttemptContext, cited_flags},
@@ -53,6 +53,7 @@ pub struct RetainedAttachment {
     pub conversation_id: ConversationId,
     pub name: String,
     pub kind: AttachmentKind,
+    pub origin: AttachmentOrigin,
     pub file_bytes: u64,
     pub fingerprint: [u8; 32],
     pub pages: Option<PageCoverage>,
@@ -79,6 +80,7 @@ impl RetainedAttachment {
             || self.file_bytes > self.kind.max_file_bytes() as u64
             || text > MAX_TEXT_FILE_BYTES
             || self.image.is_some() != self.kind.is_image()
+            || (self.origin == AttachmentOrigin::Camera && !self.kind.is_image())
             || self.image.as_ref().is_some_and(|image| {
                 image.bytes.is_empty() || image.bytes.len() > MAX_IMAGE_FILE_BYTES
             })
@@ -149,8 +151,8 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO chat_attachments
                 (public_id,conversation_id,name,kind,file_bytes,fingerprint,pages,passages,
-                 image,image_width,image_height,recognition,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                 image,image_width,image_height,recognition,created_at,origin)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
              ON CONFLICT(public_id) DO UPDATE SET name=excluded.name, passages=excluded.passages,
                  pages=excluded.pages, image=excluded.image, image_width=excluded.image_width,
                  image_height=excluded.image_height, recognition=excluded.recognition",
@@ -168,6 +170,7 @@ impl SqliteStore {
                 image.map(|image| image.height),
                 attachment.recognition,
                 created,
+                attachment.origin.as_str(),
             ],
         )
         .map_err(sql_error)?;
@@ -183,7 +186,7 @@ impl SqliteStore {
             .connection
             .prepare(
                 "SELECT public_id,conversation_id,name,kind,file_bytes,fingerprint,pages,passages,
-                    image,image_width,image_height,recognition
+                    image,image_width,image_height,recognition,origin
                  FROM chat_attachments WHERE conversation_id=?1 ORDER BY id",
             )
             .map_err(sql_error)?;
@@ -207,6 +210,7 @@ impl SqliteStore {
                     passages,
                     image.zip(width).zip(height),
                     row.get::<_, Option<String>>(11)?,
+                    row.get::<_, String>(12)?,
                 ))
             })
             .map_err(sql_error)?
@@ -225,12 +229,14 @@ impl SqliteStore {
                     passages,
                     image,
                     recognition,
+                    origin,
                 )| {
                     Ok(RetainedAttachment {
                         public_id,
                         conversation_id,
                         name,
                         kind: AttachmentKind::parse(&kind).ok_or_else(storage_error)?,
+                        origin: AttachmentOrigin::parse(&origin).ok_or_else(storage_error)?,
                         file_bytes: u64::try_from(bytes).map_err(|_| storage_error())?,
                         fingerprint: fingerprint.try_into().map_err(|_| storage_error())?,
                         pages: pages
@@ -391,6 +397,7 @@ mod tests {
             conversation_id: conversation,
             name: format!("synthetic-{n}.pdf"),
             kind: AttachmentKind::Pdf,
+            origin: AttachmentOrigin::File,
             file_bytes: 2048,
             fingerprint: [n; 32],
             pages: Some(PageCoverage {
@@ -437,7 +444,13 @@ mod tests {
             height: 3,
         });
         image.pages = None;
+        // Camera provenance is kept with the snapshot and only for images.
+        image.origin = AttachmentOrigin::Camera;
         db.retain_attachment(&image).unwrap();
+        assert_eq!(db.retained_attachments(first).unwrap()[1], image);
+        let mut camera_pdf = snapshot(first, 99);
+        camera_pdf.origin = AttachmentOrigin::Camera;
+        assert!(db.retain_attachment(&camera_pdf).is_err());
         assert_eq!(db.retained_attachments(first).unwrap().len(), 2);
         for n in 3..=(MAX_RETAINED_PER_CONVERSATION as u8) {
             db.retain_attachment(&snapshot(first, n)).unwrap();
@@ -481,6 +494,7 @@ mod tests {
                 id: id(7),
                 name: "notes.md".into(),
                 kind: AttachmentKind::Markdown,
+                origin: AttachmentOrigin::File,
                 retention: AttachmentRetention::Temporary,
                 total_passages: 3,
                 pages: None,

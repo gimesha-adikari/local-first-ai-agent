@@ -59,10 +59,13 @@ pub(super) struct RemoteTurn {
 
 /// Classes of attached content, admitted only for a request whose sharing
 /// the user authorized for those exact attachments.
-pub(crate) const ATTACHMENT_CLASSES: [agent_core::classification::DataClass; 3] = [
+/// A camera snapshot attached to Chat keeps its sensor classes (Stage 04-E).
+pub(crate) const ATTACHMENT_CLASSES: [agent_core::classification::DataClass; 5] = [
     agent_core::classification::ATTACHMENT,
     agent_core::classification::ATTACHMENT_TEXT,
     agent_core::classification::ATTACHMENT_IMAGE,
+    agent_core::classification::CAMERA_IMAGE,
+    agent_core::classification::CAMERA_TEXT,
 ];
 
 fn denied(message: impl Into<String>) -> InferenceError {
@@ -179,7 +182,13 @@ impl ChatRuntime {
         let ephemeral = self.glance_receipt.is_some();
         let mut allowed = settings.sharing.allowed_classes();
         if ephemeral {
-            allowed.extend([CLIPBOARD_TEXT, SCREEN_TEXT, SCREEN_IMAGE]);
+            allowed.extend([
+                CLIPBOARD_TEXT,
+                SCREEN_TEXT,
+                SCREEN_IMAGE,
+                agent_core::classification::CAMERA_TEXT,
+                agent_core::classification::CAMERA_IMAGE,
+            ]);
         }
         if web {
             allowed.push(agent_core::classification::PUBLIC_WEB);

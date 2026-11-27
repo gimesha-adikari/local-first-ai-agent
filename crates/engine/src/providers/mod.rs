@@ -136,7 +136,13 @@ pub(crate) fn consent(
     // where every remote request carries a per-request confirmation of the
     // exact text, and for images, the exact crop.
     if operation.purpose() == "glance" {
-        allowed.extend([CLIPBOARD_TEXT, SCREEN_TEXT, SCREEN_IMAGE]);
+        allowed.extend([
+            CLIPBOARD_TEXT,
+            SCREEN_TEXT,
+            SCREEN_IMAGE,
+            agent_core::classification::CAMERA_TEXT,
+            agent_core::classification::CAMERA_IMAGE,
+        ]);
     }
     // Public web evidence is admitted only for a research answer whose
     // sharing the user authorized for that one request.

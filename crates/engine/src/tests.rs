@@ -1370,7 +1370,7 @@ fn glance(
 ) -> Result<crate::chat::glance::Answer> {
     futures_executor::block_on(h.engine.run_glance(
         serde_json::from_value(input).unwrap(),
-        crate::chat::glance::Origin::EditedClipboard,
+        crate::chat::glance::Origin::CLIPBOARD,
         None,
         cancellation,
         Arc::new(Recorder::default()),
@@ -1512,7 +1512,7 @@ fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work()
     let run = |input: Value, attachment: Option<Attachment>| {
         futures_executor::block_on(h.engine.run_glance(
             serde_json::from_value(input).unwrap(),
-            Origin::Screen,
+            Origin::SCREEN,
             attachment,
             Cancellation::default(),
             Arc::new(Recorder::default()),

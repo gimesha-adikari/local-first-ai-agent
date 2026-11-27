@@ -123,7 +123,9 @@ impl WebResearchSettings {
 }
 
 /// A validated search query: the user's own question or their explicit
-/// edit of it, never model-generated and never augmented with context.
+/// edit of it, never augmented with context. A visual-assisted search may
+/// start from recognized text or a suggested description, but only the text
+/// the user reviewed and authorized becomes the query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchQuery(String);
 

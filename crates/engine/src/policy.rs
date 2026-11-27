@@ -12,14 +12,15 @@ use std::{
 
 use agent_core::{
     capability::{
-        AGENT_DECISION, CapabilityId, CapabilityRegistry, DISCOVER, DOWNLOAD_MODEL, EMBED,
-        GENERATE, IMPORT, Locality, RETRIEVE, Retention, WEB_PAGE, WEB_SEARCH,
+        AGENT_DECISION, CAMERA_SNAPSHOT, CapabilityId, CapabilityRegistry, DISCOVER,
+        DOWNLOAD_MODEL, EMBED, GENERATE, IMPORT, Locality, RETRIEVE, Retention, WEB_PAGE,
+        WEB_SEARCH,
     },
     classification::{
-        AGENT_CONTEXT, ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, CLIPBOARD_TEXT, DataClasses,
-        EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY, MODEL_ARTIFACT, MODEL_OUTPUT, PDF_EXCERPT,
-        PUBLIC_WEB, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT, Sensitivity, TEXT_EXCERPT,
-        USER_INPUT,
+        AGENT_CONTEXT, ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, CAMERA_IMAGE, CAMERA_TEXT,
+        CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY, MODEL_ARTIFACT,
+        MODEL_OUTPUT, PDF_EXCERPT, PUBLIC_WEB, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT,
+        Sensitivity, TEXT_EXCERPT, USER_INPUT,
     },
     inference::Cancellation,
 };
@@ -212,6 +213,25 @@ impl Drop for PendingRestriction<'_> {
     }
 }
 
+pub(crate) const VISUAL_SEARCH_PURPOSE: &str = "visual-search";
+
+/// Classes a reviewed visual-assisted search query may carry besides the
+/// user's input (Stage 04-E): text recognized from, or written by a model
+/// about, a screen region, camera snapshot or attached image, and clipboard
+/// text. Only the query text is ever sent; these classes record where it
+/// came from. History, memories, library documents and document excerpts
+/// are never admitted into a search request.
+const VISUAL_QUERY_CLASSES: [agent_core::classification::DataClass; 8] = [
+    CLIPBOARD_TEXT,
+    SCREEN_TEXT,
+    SCREEN_IMAGE,
+    CAMERA_TEXT,
+    CAMERA_IMAGE,
+    ATTACHMENT,
+    ATTACHMENT_TEXT,
+    ATTACHMENT_IMAGE,
+];
+
 impl Default for Policy {
     fn default() -> Self {
         Self::new(
@@ -225,6 +245,7 @@ impl Default for Policy {
                 DOWNLOAD_MODEL,
                 WEB_SEARCH,
                 WEB_PAGE,
+                CAMERA_SNAPSHOT,
             ]),
             DataClasses::default(),
             crate::network::artifact::destinations(),
@@ -427,18 +448,33 @@ impl Policy {
         {
             return Err(Denial::Scope);
         }
-        if operation.capability == WEB_SEARCH
-            && (operation.purpose != "web-search"
-                || !operation
-                    .labels
-                    .ids()
-                    .all(|id| id == USER_INPUT.id || id == QUERY.id)
+        if operation.capability == WEB_SEARCH {
+            let visual = operation.purpose == VISUAL_SEARCH_PURPOSE;
+            let labels = &operation.labels;
+            // A model's visual description also inherits the built-in prompt
+            // class. Keep that label without accepting standalone system text.
+            let description = labels.contains(MODEL_OUTPUT)
+                && [SCREEN_IMAGE, CAMERA_IMAGE, ATTACHMENT_IMAGE]
+                    .into_iter()
+                    .any(|class| labels.contains(class));
+            if (!visual && operation.purpose != "web-search")
+                || !labels.contains(QUERY)
+                || ((labels.contains(ATTACHMENT) || labels.contains(ATTACHMENT_TEXT))
+                    && !labels.contains(ATTACHMENT_IMAGE))
+                || !labels.ids().all(|id| {
+                    id == USER_INPUT.id
+                        || id == QUERY.id
+                        || (visual
+                            && ((description && (id == MODEL_OUTPUT.id || id == SYSTEM_TEXT.id))
+                                || VISUAL_QUERY_CLASSES.iter().any(|class| class.id == id)))
+                })
                 || !operation
                     .destination
                     .as_ref()
-                    .is_some_and(|target| target.id().starts_with("search/")))
-        {
-            return Err(Denial::Scope);
+                    .is_some_and(|target| target.id().starts_with("search/"))
+            {
+                return Err(Denial::Scope);
+            }
         }
         match (
             &operation.destination,
@@ -490,6 +526,9 @@ impl Policy {
             ATTACHMENT,
             ATTACHMENT_TEXT,
             ATTACHMENT_IMAGE,
+            // Admitted for confirmed camera snapshots (Stage 04-E).
+            CAMERA_IMAGE,
+            CAMERA_TEXT,
         ];
         if labels.ids().all(|id| {
             allowed.iter().any(|class| {

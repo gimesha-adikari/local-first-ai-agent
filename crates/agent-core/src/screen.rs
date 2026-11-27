@@ -41,6 +41,9 @@ pub enum PixelFormat {
     Abgr,
     Rgb,
     Bgr,
+    /// Packed 4:2:2 YUV (Y0 U Y1 V), the common uncompressed camera format.
+    /// Converted with BT.601 limited-range coefficients.
+    Yuy2,
 }
 
 impl PixelFormat {
@@ -57,6 +60,7 @@ impl PixelFormat {
             14 => Self::Abgr,
             15 => Self::Rgb,
             16 => Self::Bgr,
+            4 => Self::Yuy2,
             _ => return None,
         })
     }
@@ -73,11 +77,14 @@ impl PixelFormat {
             Self::Abgr => 14,
             Self::Rgb => 15,
             Self::Bgr => 16,
+            Self::Yuy2 => 4,
         }
     }
 
+    /// Bytes per pixel in a row (YUY2 packs two pixels into four bytes).
     pub fn bytes_per_pixel(self) -> usize {
         match self {
+            Self::Yuy2 => 2,
             Self::Rgb | Self::Bgr => 3,
             _ => 4,
         }
@@ -90,8 +97,24 @@ impl PixelFormat {
             Self::Bgrx | Self::Bgra | Self::Bgr => (2, 1, 0),
             Self::Xrgb | Self::Argb => (1, 2, 3),
             Self::Xbgr | Self::Abgr => (3, 2, 1),
+            // Converted separately; never indexed as RGB channels.
+            Self::Yuy2 => (0, 0, 0),
         }
     }
+}
+
+/// One BT.601 limited-range YUV sample as BGRA.
+fn yuv_to_bgra(y: u8, u: u8, v: u8) -> [u8; 4] {
+    let c = i32::from(y) - 16;
+    let d = i32::from(u) - 128;
+    let e = i32::from(v) - 128;
+    let clamp = |value: i32| ((value + 128) >> 8).clamp(0, 255) as u8;
+    [
+        clamp(298 * c + 516 * d),
+        clamp(298 * c - 100 * d - 208 * e),
+        clamp(298 * c + 409 * e),
+        255,
+    ]
 }
 
 /// Owned pixel bytes that are overwritten with zeroes when dropped.
@@ -186,8 +209,26 @@ impl Frame {
         if last > raw.len() {
             return Err(FrameError::Layout);
         }
-        let (r, g, b) = format.channels();
         let mut bgra = Vec::with_capacity(bytes);
+        if format == PixelFormat::Yuy2 {
+            // Each four bytes carry two pixels, so the width must be even.
+            if !width.is_multiple_of(2) {
+                return Err(FrameError::Layout);
+            }
+            for y in 0..height as usize {
+                let start = offset + y * stride;
+                for [y0, u, y1, v] in raw[start..start + row].as_chunks::<4>().0.iter().copied() {
+                    bgra.extend_from_slice(&yuv_to_bgra(y0, u, v));
+                    bgra.extend_from_slice(&yuv_to_bgra(y1, u, v));
+                }
+            }
+            return Ok(Self {
+                width,
+                height,
+                bgra: Pixels(bgra),
+            });
+        }
+        let (r, g, b) = format.channels();
         for y in 0..height as usize {
             let start = offset + y * stride;
             for pixel in raw[start..start + row].chunks_exact(bpp) {
@@ -407,6 +448,29 @@ mod tests {
         let rgb = Frame::from_raw(&[255, 0, 0, 0, 0, 255], 2, 1, 6, 0, PixelFormat::Rgb).unwrap();
         assert_eq!(rgb.rgba().as_slice(), [255, 0, 0, 255, 0, 0, 255, 255]);
         assert_eq!(PixelFormat::from_spa(2), None); // I420 is not accepted
+    }
+
+    #[test]
+    fn yuy2_camera_frames_convert_with_bt601_and_reject_odd_widths() {
+        // Limited-range white, black, then BT.601 red (Y 81, U 90, V 240),
+        // one padding byte per row.
+        let raw = [235, 128, 16, 128, 0xAA, 81, 90, 81, 240, 0xAA];
+        let frame = Frame::from_raw(&raw, 2, 2, 5, 0, PixelFormat::Yuy2).unwrap();
+        let px = |i: usize| &frame.bgra()[i * 4..i * 4 + 4];
+        assert_eq!(px(0), [255, 255, 255, 255]);
+        assert_eq!(px(1), [0, 0, 0, 255]);
+        let red = px(2);
+        assert!(red[2] > 250 && red[1] < 5 && red[0] < 5, "{red:?}");
+        assert_eq!(PixelFormat::from_spa(4), Some(PixelFormat::Yuy2));
+        assert_eq!(PixelFormat::Yuy2.bytes_per_pixel(), 2);
+        assert_eq!(
+            Frame::from_raw(&[0; 6], 3, 1, 6, 0, PixelFormat::Yuy2).unwrap_err(),
+            FrameError::Layout
+        );
+        assert_eq!(
+            Frame::from_raw(&[0; 6], 2, 2, 4, 0, PixelFormat::Yuy2).unwrap_err(),
+            FrameError::Layout
+        );
     }
 
     #[test]

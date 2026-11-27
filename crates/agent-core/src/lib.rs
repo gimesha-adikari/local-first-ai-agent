@@ -27,3 +27,5 @@ pub mod research;
 pub mod screen;
 
 pub mod semantic;
+/// Shared visual input settings: OCR languages and translation target.
+pub mod visual;

@@ -1016,6 +1016,7 @@ fn live_compatibility_without_credentials() {
         &consent,
         SearchProviderKind::Brave,
         &agent_core::research::SearchQuery::new("compatibility check").unwrap(),
+        &agent_core::classification::Labels::from_source(agent_core::classification::USER_INPUT),
         &mut records,
     ))
     .unwrap_err();
@@ -1035,4 +1036,154 @@ fn live_compatibility_without_credentials() {
     eprintln!("page: {:?} {:?}", extracted.title, extracted.blocks.first());
     assert_eq!(extracted.title.as_deref(), Some("Example Domain"));
     assert!(!extracted.blocks.is_empty());
+}
+
+#[test]
+fn visual_search_sends_only_the_reviewed_query_with_its_visual_classes() {
+    use agent_core::{
+        attachment::AttachmentRetention,
+        classification::{
+            ATTACHMENT_TEXT, CAMERA_IMAGE, CAMERA_TEXT, MODEL_OUTPUT, QUERY, SYSTEM_TEXT,
+            USER_INPUT,
+        },
+        inference::Cancellation,
+    };
+    let r = research(respond(json_response(200, &brave_results())));
+    let labels = crate::chat::glance::prompt_labels(crate::chat::glance::Origin::CAMERA);
+    let found = futures_executor::block_on(r.engine.visual_search(
+        "  CAMERA   TEST 42 ",
+        Some(SearchProviderKind::Brave),
+        labels.clone(),
+        Cancellation::default(),
+    ))
+    .unwrap();
+    assert_eq!(found.query, "CAMERA TEST 42");
+    assert!(!found.results.is_empty());
+    assert_eq!(found.egress.len(), 1);
+    for class in [USER_INPUT, QUERY, CAMERA_TEXT, CAMERA_IMAGE] {
+        assert!(found.egress[0].labels.contains(class), "{}", class.id);
+    }
+    let requests = r.search_requests();
+    assert_eq!(requests.len(), 1);
+    // Only the query: no image bytes, no page reads, no model request.
+    let body: Value = serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["q"], "CAMERA TEST 42");
+    assert!(!requests[0].contains("PNG") && requests[0].len() < 2048);
+    assert!(r.page_requests().is_empty());
+    assert!(r.script.seen().is_empty());
+
+    // A changed provider is refused before anything is sent.
+    assert!(
+        futures_executor::block_on(r.engine.visual_search(
+            "CAMERA TEST 42",
+            Some(SearchProviderKind::Purili),
+            labels.clone(),
+            Cancellation::default(),
+        ))
+        .is_err()
+    );
+    assert_eq!(r.search_requests().len(), 1);
+
+    // A real Glance result also carries the built-in prompt class. Reuse
+    // its receipt as the host does, while sending only the edited query.
+    r.load();
+    let answer = futures_executor::block_on(
+        r.engine.run_glance(
+            serde_json::from_value(json!({
+            "recipe": "explain", "text": "CAMERA SOURCE PRIVATE-NOTE-8",
+            "share": false, "memory": false, "documents": []
+            }))
+            .unwrap(),
+            crate::chat::glance::Origin::CAMERA,
+            None,
+            Cancellation::default(),
+            Arc::new(Recorder::default()),
+        ),
+    )
+    .unwrap();
+    assert!(answer.error.is_none());
+    let reviewed = answer.text.trim_end_matches('.');
+    let described = futures_executor::block_on(r.engine.visual_search(
+        reviewed,
+        Some(SearchProviderKind::Brave),
+        answer.receipt.unwrap().output_labels,
+        Cancellation::default(),
+    ))
+    .unwrap();
+    for class in [CAMERA_TEXT, CAMERA_IMAGE, MODEL_OUTPUT, SYSTEM_TEXT, QUERY] {
+        assert!(described.egress[0].labels.contains(class), "{}", class.id);
+    }
+    let requests = r.search_requests();
+    assert_eq!(requests.len(), 2);
+    let body: Value = serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["q"], reviewed);
+    assert!(!requests[1].contains("PRIVATE-NOTE-8"));
+
+    // A Chat search query built from a camera snapshot's text carries the
+    // snapshot's classes; the snapshot's other text is not sent.
+    let id = r.engine.create_conversation().unwrap().id;
+    let snapshot = crate::tests::attachment_tests::attach_ready(
+        &r.engine,
+        Some(id),
+        AttachmentRetention::Temporary,
+        Box::new(crate::tests::attachment_tests::CameraSnapshot(
+            crate::tests::attachment_tests::Synthetic::image(
+                "Camera snapshot 10:15",
+                Some("Fernhill bridge PRIVATE-NOTE-7"),
+            ),
+        )),
+    );
+    let (unreviewed, _) = r.send(
+        id,
+        "What do web sources say about this?",
+        json!({"research": {"mode": "search", "provider": "brave",
+            "queryAttachments": [snapshot]}}),
+    );
+    assert_eq!(unreviewed.unwrap_err().code, ErrorCode::InvalidConfig);
+    assert_eq!(r.search_requests().len(), 2);
+    let (result, _) = r.send(
+        id,
+        "What do web sources say about this?",
+        json!({"research": {"mode": "search", "provider": "brave",
+            "query": "Fernhill bridge", "queryAttachments": [snapshot]}}),
+    );
+    let message = result.unwrap();
+    let request = r.search_requests().pop().unwrap();
+    let body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["q"], "Fernhill bridge");
+    assert!(!request.contains("PRIVATE-NOTE-7"));
+    let receipts = r.receipts(message.id);
+    let search = receipts
+        .iter()
+        .flat_map(|receipt| receipt["external"].as_array().cloned().unwrap_or_default())
+        .find(|record| record["destination"] == "core.brave-search")
+        .or_else(|| {
+            receipts
+                .iter()
+                .flat_map(|receipt| receipt["external"].as_array().cloned().unwrap_or_default())
+                .next()
+        })
+        .expect("search egress record");
+    let classes = search["labels"].to_string();
+    for class in [ATTACHMENT_TEXT, CAMERA_TEXT, CAMERA_IMAGE, QUERY] {
+        assert!(classes.contains(class.id), "{} in {classes}", class.id);
+    }
+
+    // Local-only mode blocks visual search entirely.
+    r.engine
+        .set_intelligence_settings(IntelligenceSettings {
+            local_only: true,
+            active_provider: None,
+        })
+        .unwrap();
+    let before = r.search_requests().len();
+    let refused = futures_executor::block_on(r.engine.visual_search(
+        "CAMERA TEST 42",
+        Some(SearchProviderKind::Brave),
+        labels,
+        Cancellation::default(),
+    ))
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::PolicyDenied);
+    assert_eq!(r.search_requests().len(), before);
 }

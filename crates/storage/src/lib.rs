@@ -29,12 +29,13 @@ pub mod profile;
 pub mod providers;
 pub mod research;
 pub mod semantic;
+mod visual;
 pub use continuation::ContinuationPlan;
 pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 const MODEL_COLUMNS: &str = "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic', artifact_key";
 const NEW_TITLE: &str = "New conversation";
 
@@ -184,6 +185,11 @@ impl SqliteStore {
         if version < 18 {
             transaction
                 .execute_batch(include_str!("../migrations/018_chat_attachments.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 19 {
+            transaction
+                .execute_batch(include_str!("../migrations/019_visual_intelligence.sql"))
                 .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)

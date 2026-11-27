@@ -893,7 +893,7 @@ fn glance_uses_the_gateway_without_chat_history_or_persisting_text() {
     let run = |input: Value| {
         futures_executor::block_on(fixture.engine.run_glance(
             serde_json::from_value::<Input>(input).unwrap(),
-            Origin::Clipboard,
+            Origin::CLIPBOARD,
             None,
             Default::default(),
             Arc::new(Recorder::default()),
@@ -974,7 +974,7 @@ fn screen_crops_reach_only_image_providers_with_confirmation_and_text_keeps_scre
     let run = |fixture: &Remote, input: Input, attachment: Option<Attachment>| {
         futures_executor::block_on(fixture.engine.run_glance(
             input,
-            Origin::Screen,
+            Origin::SCREEN,
             attachment,
             Default::default(),
             Arc::new(Recorder::default()),
@@ -1011,7 +1011,7 @@ fn screen_crops_reach_only_image_providers_with_confirmation_and_text_keeps_scre
     assert_eq!(vision.server.accepted(), 0);
     let estimate = vision
         .engine
-        .estimate_glance(&input(&vision, true, true), Origin::Screen, Some(&crop()))
+        .estimate_glance(&input(&vision, true, true), Origin::SCREEN, Some(&crop()))
         .unwrap();
     let estimate = serde_json::to_value(estimate).unwrap();
     assert_eq!(estimate["imageTokens"], 85 + 170);
@@ -1092,7 +1092,7 @@ fn local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_ac
     let turn = std::thread::spawn(move || {
         futures_executor::block_on(runner.engine.run_glance(
             input,
-            Origin::Screen,
+            Origin::SCREEN,
             None,
             Default::default(),
             events,

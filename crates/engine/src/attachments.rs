@@ -19,7 +19,7 @@ use std::{
 use agent_core::{
     agent::{AgentError, AgentErrorCode, AgentResult},
     attachment::{
-        ATTACHMENT_ID_LEN, AttachmentKind, AttachmentRetention, AttachmentTask,
+        ATTACHMENT_ID_LEN, AttachmentKind, AttachmentOrigin, AttachmentRetention, AttachmentTask,
         MAX_ATTACHMENT_SOURCES, MAX_SCOPE_ATTACHMENTS, MAX_SESSION_ATTACHMENTS, MAX_SESSION_BYTES,
         PREPARE_DEADLINE_SECONDS, PageCoverage, PassageSource, TEMPORARY_IDLE_SECONDS,
         valid_attachment_id,
@@ -122,6 +122,10 @@ impl PreparedContent {
 pub trait AttachmentFile: Send + 'static {
     fn name(&self) -> &str;
     fn kind(&self) -> AttachmentKind;
+    /// Where the content came from; only a camera snapshot says otherwise.
+    fn origin(&self) -> AttachmentOrigin {
+        AttachmentOrigin::File
+    }
     fn file_bytes(&self) -> u64;
     /// Read, validate and extract, reporting each stage and calling `check`
     /// between bounded steps.
@@ -183,6 +187,7 @@ struct Entry {
     id: String,
     name: String,
     kind: AttachmentKind,
+    origin: AttachmentOrigin,
     file_bytes: u64,
     cancellation: Cancellation,
     data: Mutex<EntryData>,
@@ -210,6 +215,7 @@ pub struct AttachmentView {
     pub id: String,
     pub name: String,
     pub kind: AttachmentKind,
+    pub origin: AttachmentOrigin,
     pub file_bytes: u64,
     pub retention: AttachmentRetention,
     /// Kept in the encrypted profile with the conversation.
@@ -264,6 +270,7 @@ pub(crate) struct Resolved {
     pub id: String,
     pub name: String,
     pub kind: AttachmentKind,
+    pub origin: AttachmentOrigin,
     pub retention: AttachmentRetention,
     pub content: Arc<PreparedContent>,
 }
@@ -344,6 +351,7 @@ impl AttachmentStore {
             id: entry.id.clone(),
             name: entry.name.clone(),
             kind: entry.kind,
+            origin: entry.origin,
             file_bytes: entry.file_bytes,
             retention: data.retention,
             saved: data.saved,
@@ -432,11 +440,38 @@ impl AttachmentStore {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
                 kind: entry.kind,
+                origin: entry.origin,
                 retention: data.retention,
                 content,
             });
         }
         Ok((resolved, bind))
+    }
+
+    /// The classes a search query built from these attachments' text
+    /// carries: the user's input plus each attachment's text classes. Every
+    /// attachment must be in the draft or in `conversation`; nothing is
+    /// bound, read or sent.
+    pub(crate) fn query_labels(&self, conversation: ConversationId, ids: &[String]) -> Res<Labels> {
+        if ids.len() > MAX_SCOPE_ATTACHMENTS {
+            return Err(unavailable());
+        }
+        let mut labels = Labels::from_source(agent_core::classification::USER_INPUT);
+        for id in ids {
+            let entry = self.find(id)?.ok_or_else(unavailable)?;
+            let scope = entry.data()?.scope;
+            if !matches!(scope, Scope::Draft) && scope != Scope::Conversation(conversation) {
+                return Err(unavailable());
+            }
+            // Visual-assisted search starts only from images.
+            if !entry.kind.is_image() {
+                return Err(limit(
+                    "A search query can start only from an attached image's recognized text.",
+                ));
+            }
+            labels.inherit(&entry.origin.text_labels(entry.kind));
+        }
+        Ok(labels)
     }
 
     /// The text of one passage of an attachment owned by `conversation`.
@@ -458,6 +493,32 @@ impl AttachmentStore {
             .as_ref()
             .and_then(|content| content.passages.get(ordinal as usize))
             .map(|passage| passage.text.clone()))
+    }
+
+    /// The readable text of a ready attachment in `scope`, joined in order
+    /// and bounded, for showing recognized text and starting a reviewed
+    /// search query. Local only: nothing is sent or stored.
+    pub(crate) fn text(&self, scope: Option<ConversationId>, id: &str) -> Res<String> {
+        const MAX_CHARS: usize = 20_000;
+        let entry = self.find(id)?.ok_or_else(unavailable)?;
+        let mut data = entry.data()?;
+        if data.scope != Scope::from(scope) {
+            return Err(unavailable());
+        }
+        let content = data.content.clone().ok_or_else(unavailable)?;
+        data.last_used = Instant::now();
+        let mut text = String::new();
+        for passage in &content.passages {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(&passage.text);
+            if text.chars().count() >= MAX_CHARS {
+                text = text.chars().take(MAX_CHARS).collect();
+                break;
+            }
+        }
+        Ok(text)
     }
 
     /// The validated image bytes and media type of a ready image attachment.
@@ -487,6 +548,7 @@ fn snapshot(
         conversation_id: conversation,
         name: entry.name.clone(),
         kind: entry.kind,
+        origin: entry.origin,
         file_bytes: entry.file_bytes,
         fingerprint: content.fingerprint(),
         pages: content.pages,
@@ -530,9 +592,9 @@ fn retain(
     content: &PreparedContent,
 ) -> Res<()> {
     let session = Session::new(Cancellation::default());
-    let mut labels = entry.kind.text_labels();
+    let mut labels = entry.origin.text_labels(entry.kind);
     if entry.kind.is_image() {
-        labels.inherit(&AttachmentKind::image_labels());
+        labels.inherit(&entry.origin.image_labels());
     }
     let operation = Operation::local(
         &session,
@@ -583,7 +645,10 @@ fn prepare_one(
         &session,
         IMPORT,
         "attachment",
-        Labels::from_source(ATTACHMENT),
+        match entry.origin {
+            AttachmentOrigin::File => Labels::from_source(ATTACHMENT),
+            AttachmentOrigin::Camera => entry.origin.image_labels(),
+        },
         Retention::Session,
     );
     let observe = policy
@@ -596,7 +661,7 @@ fn prepare_one(
         &session,
         IMPORT,
         "attachment",
-        entry.kind.text_labels(),
+        entry.origin.text_labels(entry.kind),
         Retention::Session,
     );
     let process = policy
@@ -795,6 +860,7 @@ impl Engine {
                     id: new_id()?,
                     name: file.name().to_owned(),
                     kind: file.kind(),
+                    origin: file.origin(),
                     file_bytes: file.file_bytes(),
                     cancellation: Cancellation::default(),
                     data: Mutex::new(EntryData {
@@ -871,6 +937,7 @@ impl Engine {
                     id: row.public_id,
                     name: row.name,
                     kind: row.kind,
+                    origin: row.origin,
                     file_bytes: row.file_bytes,
                     cancellation: Cancellation::default(),
                     data: Mutex::new(EntryData {
@@ -1044,6 +1111,12 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// The readable text of a ready attachment in the draft (`None`) or an
+    /// open conversation.
+    pub fn attachment_text(&self, conversation: Option<ConversationId>, id: &str) -> Res<String> {
+        self.attachments.text(conversation, id)
     }
 
     /// The text of a supplied attachment passage of `message`, if the

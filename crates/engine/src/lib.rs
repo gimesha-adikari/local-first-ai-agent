@@ -45,6 +45,7 @@ pub mod providers;
 pub mod research;
 pub mod semantic;
 pub mod usage;
+pub mod visual;
 
 use credentials::{CredentialSource, NoSecureStorage};
 use knowledge::KnowledgeImports;

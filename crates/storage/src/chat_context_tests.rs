@@ -324,7 +324,7 @@ fn encrypts_populated_schema_seven_without_changing_saved_state() {
     .unwrap();
     db.connection
         .execute_batch(
-            "DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
+            "DROP TABLE visual_settings; DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
          DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
         DROP TABLE chat_source_references; DROP TABLE chat_context_attempts;
@@ -549,7 +549,7 @@ fn schema_eight_citation_remains_available_without_invented_historical_coverage(
     .unwrap();
     db.connection
         .execute_batch(
-            "DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
+            "DROP TABLE visual_settings; DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
          ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
          DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;

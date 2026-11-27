@@ -35,6 +35,11 @@ pub enum SourceKind {
     /// A validated image attached to the conversation, sent to a provider
     /// that accepts image input.
     AttachmentImage,
+    /// Text recognized from a confirmed camera snapshot.
+    CameraText,
+    /// A confirmed camera snapshot crop sent to a provider that accepts
+    /// image input.
+    CameraImage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
