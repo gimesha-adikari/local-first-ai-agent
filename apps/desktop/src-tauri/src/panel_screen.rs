@@ -86,7 +86,8 @@ fn capture_error(error: CaptureError) -> InferenceError {
         CaptureError::Cancelled => ErrorCode::Cancelled,
         CaptureError::Timeout => ErrorCode::TimedOut,
         CaptureError::Unavailable | CaptureError::Unsupported => ErrorCode::UnsupportedCapability,
-        CaptureError::Failed => ErrorCode::InvalidConfig,
+        CaptureError::Failed | CaptureError::Interrupted => ErrorCode::GenerationFailed,
+        CaptureError::Busy => ErrorCode::Busy,
     };
     InferenceError::new(code, error.message())
 }

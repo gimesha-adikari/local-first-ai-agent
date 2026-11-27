@@ -244,7 +244,9 @@ pub(super) fn start(app: &AppHandle, interactive: bool, reply: Option<Reply>) {
             // A declined configuration dialog does not remove an existing binding.
             Err(_) if previous.state == "active" => previous,
             Err(Failure::Denied) => ShortcutStatus::new("denied"),
-            Err(Failure::Unavailable | Failure::Cancelled) => ShortcutStatus::new("unavailable"),
+            Err(Failure::Unavailable | Failure::Cancelled | Failure::Interrupted) => {
+                ShortcutStatus::new("unavailable")
+            }
         };
         *app.state::<PlatformState>().status.lock().unwrap() = status.clone();
         if let Some(reply) = reply {

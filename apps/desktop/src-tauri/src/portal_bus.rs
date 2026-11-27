@@ -31,6 +31,9 @@ pub(crate) enum Failure {
     Denied,
     /// The caller stopped waiting; the portal request was closed.
     Cancelled,
+    /// The portal ended the request without a user decision (response 2)
+    /// or did not reply in time. Nothing was granted; retrying is safe.
+    Interrupted,
 }
 
 pub(crate) fn unique(prefix: &str) -> String {
@@ -60,7 +63,17 @@ pub(crate) async fn call(
         5000,
     )
     .await
-    .map_err(|_| Failure::Unavailable)
+    .map_err(|error| failure(&error))
+}
+
+/// No reply in time means the portal is busy or stalled, which is
+/// transient; any other call error means the call cannot work here.
+fn failure(error: &glib::Error) -> Failure {
+    if error.matches(gio::IOErrorEnum::TimedOut) {
+        Failure::Interrupted
+    } else {
+        Failure::Unavailable
+    }
 }
 
 /// A call whose reply carries file descriptors (OpenPipeWireRemote).
@@ -84,7 +97,7 @@ pub(crate) async fn call_with_fds(
             gio::UnixFDList::NONE,
         )
         .await
-        .map_err(|_| Failure::Unavailable)?;
+        .map_err(|error| failure(&error))?;
     Ok((reply, fds))
 }
 
@@ -181,13 +194,14 @@ pub(crate) async fn request(
                 return match response {
                     Some((0, result)) => Ok(result),
                     Some((1, _)) => Err(Failure::Denied),
-                    _ => Err(Failure::Unavailable),
+                    Some(_) => Err(Failure::Interrupted),
+                    None => Err(Failure::Unavailable),
                 };
             }
             let stop = if cancelled() {
                 Some(Failure::Cancelled)
             } else if Instant::now() >= deadline {
-                Some(Failure::Unavailable)
+                Some(Failure::Interrupted)
             } else {
                 None
             };

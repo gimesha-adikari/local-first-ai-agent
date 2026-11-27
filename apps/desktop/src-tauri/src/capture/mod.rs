@@ -6,7 +6,10 @@ mod pipewire;
 mod portal;
 mod spa;
 
-use std::time::Instant;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 use agent_core::{
     inference::Cancellation,
@@ -32,13 +35,17 @@ pub(crate) enum CaptureError {
     /// No frame arrived in time.
     Timeout,
     Failed,
+    /// The desktop ended the request or a portal call failed mid-way.
+    Interrupted,
+    /// Another capture in this app has not finished tearing down.
+    Busy,
 }
 
 impl CaptureError {
     pub(crate) fn message(self) -> &'static str {
         match self {
             Self::Unavailable => {
-                "Screen capture needs the desktop's ScreenCast portal (version 4 or later) and PipeWire."
+                "Screen capture needs the desktop's ScreenCast portal (version 4 or later) and PipeWire. Nothing was captured."
             }
             Self::Denied => "Screen sharing was not allowed. Nothing was captured.",
             Self::Cancelled => "Screen capture was cancelled.",
@@ -47,6 +54,12 @@ impl CaptureError {
             }
             Self::Timeout => "The screen did not deliver a frame in time. Nothing was captured.",
             Self::Failed => "Screen capture failed. Nothing was captured.",
+            Self::Interrupted => {
+                "The desktop could not start screen sharing. Nothing was captured. Try again."
+            }
+            Self::Busy => {
+                "Another screen capture is still finishing. Nothing was captured. Try again in a moment."
+            }
         }
     }
 }
@@ -65,7 +78,47 @@ pub(crate) struct CaptureRecord {
     pub consent_ms: u64,
     pub stream: StreamRecord,
     pub session_closed_ms: u64,
+    /// The portal confirmed the session no longer exists.
+    pub session_close_confirmed: bool,
     pub monitor: Option<(i32, i32, i32, i32)>,
+}
+
+/// Whether a capture holds the process's single capture slot.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// The single capture slot of this process. It is held from before the
+/// consent request until the portal session is closed (and confirmed gone
+/// or timed out) and the PipeWire stream, connection and thread are
+/// destroyed, so no capture can overlap another's setup or teardown.
+pub(crate) struct Permit {
+    _private: (),
+}
+
+impl Permit {
+    /// Take the slot, or refuse at once if another capture holds it. Never
+    /// queues or retries: a second gesture is refused, not repeated later.
+    pub(crate) fn acquire() -> Result<Self, CaptureError> {
+        ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self { _private: () })
+            .map_err(|_| CaptureError::Busy)
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+fn open_error(error: portal::OpenError) -> CaptureError {
+    match (error.failure, error.step) {
+        (Failure::Denied, _) => CaptureError::Denied,
+        (Failure::Cancelled, _) => CaptureError::Cancelled,
+        (Failure::Interrupted, _) => CaptureError::Interrupted,
+        (Failure::Unavailable, "connect" | "version") => CaptureError::Unavailable,
+        (Failure::Unavailable, _) => CaptureError::Interrupted,
+    }
 }
 
 pub(crate) struct Snapshot {
@@ -84,11 +137,16 @@ async fn on_main<T: Send + 'static>(
 }
 
 /// Ask the desktop for consent, read one settled frame and close the
-/// session. The session is closed on every path before this returns.
+/// session. The session is closed on every path before this returns, and
+/// only one capture runs at a time (see `Permit`).
 pub(crate) async fn snapshot(
     app: &AppHandle,
     cancellation: Cancellation,
 ) -> Result<Snapshot, CaptureError> {
+    let permit = Permit::acquire()?;
+    if cancellation.is_cancelled() {
+        return Err(CaptureError::Cancelled);
+    }
     let cancel = cancellation.clone();
     let opened = on_main(app, move |reply| {
         gtk::glib::MainContext::default().spawn_local(async move {
@@ -96,11 +154,7 @@ pub(crate) async fn snapshot(
         });
     })
     .await?
-    .map_err(|failure| match failure {
-        Failure::Denied => CaptureError::Denied,
-        Failure::Cancelled => CaptureError::Cancelled,
-        Failure::Unavailable => CaptureError::Unavailable,
-    })?;
+    .map_err(open_error)?;
     let portal::Opened {
         bus,
         session,
@@ -128,14 +182,15 @@ pub(crate) async fn snapshot(
         })
     });
     let closing = Instant::now();
-    let _ = on_main(app, move |reply| {
+    let session_close_confirmed = on_main(app, move |reply| {
         gtk::glib::MainContext::default().spawn_local(async move {
-            portal::close(&bus, &session).await;
-            let _ = reply.send(());
+            let _ = reply.send(portal::close(&bus, &session).await);
         });
     })
-    .await;
+    .await
+    .unwrap_or(false);
     let session_closed_ms = closing.elapsed().as_millis() as u64;
+    drop(permit);
     let (frame, stream) = frame?;
     Ok(Snapshot {
         frame,
@@ -149,6 +204,7 @@ pub(crate) async fn snapshot(
             consent_ms,
             stream,
             session_closed_ms,
+            session_close_confirmed,
             monitor,
         },
     })
@@ -195,6 +251,7 @@ pub(crate) fn fixture_record(width: u32, height: u32) -> CaptureRecord {
             waited_ms: 0,
         },
         session_closed_ms: 0,
+        session_close_confirmed: true,
         monitor: None,
     }
 }
@@ -239,7 +296,13 @@ mod tests {
         let started = Instant::now();
         let denied = context.block_on(portal::open(&|| false));
         assert!(
-            matches!(denied, Err(Failure::Denied)),
+            matches!(
+                denied,
+                Err(portal::OpenError {
+                    failure: Failure::Denied,
+                    ..
+                })
+            ),
             "denied: {:?}",
             denied.err()
         );
@@ -268,7 +331,7 @@ mod tests {
             pipewire::single_frame(remote, node, SettlePolicy::default(), &cancellation)
                 .expect("frame");
         let closing = Instant::now();
-        context.block_on(portal::close(&bus, &session));
+        assert!(context.block_on(portal::close(&bus, &session)));
         report.insert(
             "session_closed_ms".into(),
             (closing.elapsed().as_millis() as u64).into(),
@@ -289,7 +352,7 @@ mod tests {
         let stopped =
             pipewire::single_frame(opened.remote, opened.node, SettlePolicy::default(), &stop);
         assert!(matches!(stopped, Err(StreamError::Cancelled)));
-        context.block_on(portal::close(&opened.bus, &opened.session));
+        assert!(context.block_on(portal::close(&opened.bus, &opened.session)));
         stage("cancelled-acquisition");
 
         // The frozen overlay, opened only after the stream closed.
@@ -326,5 +389,102 @@ mod tests {
         report.insert("ocr_ms".into(), ocr.elapsed_ms.into());
         stage("done");
         println!("CAPTURE-REPORT {}", serde_json::Value::Object(report));
+    }
+
+    #[test]
+    fn only_one_capture_holds_the_slot_and_a_second_is_refused_not_queued() {
+        let first = Permit::acquire().expect("free slot");
+        assert_eq!(Permit::acquire().err(), Some(CaptureError::Busy));
+        drop(first);
+        let again = Permit::acquire().expect("released after teardown");
+        drop(again);
+    }
+
+    fn open_descriptors() -> usize {
+        std::fs::read_dir("/proc/self/fd").map_or(0, |entries| entries.count())
+    }
+
+    fn threads() -> usize {
+        std::fs::read_dir("/proc/self/task").map_or(0, |entries| entries.count())
+    }
+
+    /// Opt-in: repeated captures, each asked for the moment the previous one
+    /// has torn down, through the production capture slot. The driver
+    /// (`capture_loop_driver.py`) approves each consent dialog without
+    /// opening screencasts of its own. `AGENT_CAPTURE_CYCLES` sets the count.
+    #[test]
+    #[ignore = "needs a disposable headless GNOME session with portals, PipeWire and the loop driver"]
+    fn back_to_back_captures_in_a_headless_session() {
+        let out = PathBuf::from(std::env::var_os("AGENT_CAPTURE_OUT").expect("output directory"));
+        let cycles: u32 = std::env::var("AGENT_CAPTURE_CYCLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let stage = |name: &str| std::fs::write(out.join(format!("stage-{name}")), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !out.join("stage-ready").exists() {
+            assert!(Instant::now() < deadline, "driver not ready");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        gtk::init().expect("GTK on the headless Wayland display");
+        let context = gtk::glib::MainContext::default();
+        let mut results = Vec::new();
+        let mut successes = 0;
+        let mut baseline = None;
+        for cycle in 0..cycles {
+            let permit = Permit::acquire().expect("no overlapping capture");
+            assert_eq!(Permit::acquire().err(), Some(CaptureError::Busy));
+            stage(&format!("consent-{cycle}"));
+            let started = Instant::now();
+            let entry = match context.block_on(portal::open(&|| false)) {
+                Ok(opened) => {
+                    let frame = pipewire::single_frame(
+                        opened.remote,
+                        opened.node,
+                        SettlePolicy::default(),
+                        &Cancellation::default(),
+                    );
+                    let closing = Instant::now();
+                    let confirmed = context.block_on(portal::close(&opened.bus, &opened.session));
+                    let closed_ms = closing.elapsed().as_millis() as u64;
+                    match frame {
+                        Ok((frame, stream)) => {
+                            successes += 1;
+                            serde_json::json!({"cycle": cycle, "ok": true,
+                                "consentMs": opened.consent_ms,
+                                "frame": [frame.width(), frame.height()],
+                                "settled": stream.settled, "closeConfirmed": confirmed,
+                                "closedMs": closed_ms})
+                        }
+                        Err(error) => serde_json::json!({"cycle": cycle, "ok": false,
+                            "step": "stream", "error": format!("{error:?}"),
+                            "closeConfirmed": confirmed}),
+                    }
+                }
+                Err(error) => serde_json::json!({"cycle": cycle, "ok": false,
+                    "step": error.step, "error": format!("{:?}", error.failure),
+                    "afterMs": started.elapsed().as_millis() as u64}),
+            };
+            println!("CAPTURE-CYCLE {entry}");
+            results.push(entry);
+            stage(&format!("finished-{cycle}"));
+            drop(permit);
+            // The first cycle loads libpipewire and GLib state once; later
+            // cycles must not add descriptors or threads.
+            if cycle == 0 {
+                baseline = Some((open_descriptors(), threads()));
+            }
+        }
+        stage("done");
+        let (descriptors, thread_count) = baseline.unwrap_or_default();
+        println!(
+            "CAPTURE-LOOP {}",
+            serde_json::json!({"cycles": cycles, "successes": successes,
+                "descriptorsAfterFirst": descriptors, "descriptorsAtEnd": open_descriptors(),
+                "threadsAfterFirst": thread_count, "threadsAtEnd": threads(),
+                "results": results})
+        );
+        assert_eq!(open_descriptors(), descriptors, "descriptor leak");
+        assert_eq!(threads(), thread_count, "thread leak");
     }
 }

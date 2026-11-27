@@ -26,6 +26,31 @@ const MINIMUM_VERSION: u32 = 4;
 const SETUP: Duration = Duration::from_secs(10);
 /// The user may take time to read the consent dialog.
 const CONSENT: Duration = Duration::from_secs(180);
+/// How long `close` waits for the portal to unexport a closed session.
+const CLOSE_CONFIRMATION: Duration = Duration::from_secs(1);
+
+/// Why consent or stream setup stopped, and at which step (for diagnosis).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OpenError {
+    pub failure: Failure,
+    pub step: &'static str,
+}
+
+trait At<T> {
+    fn at(self, step: &'static str) -> Result<T, OpenError>;
+}
+
+impl<T> At<T> for Result<T, Failure> {
+    fn at(self, step: &'static str) -> Result<T, OpenError> {
+        self.map_err(|failure| OpenError { failure, step })
+    }
+}
+
+impl<T> At<T> for Option<T> {
+    fn at(self, step: &'static str) -> Result<T, OpenError> {
+        self.ok_or(Failure::Unavailable).at(step)
+    }
+}
 
 pub(crate) struct Opened {
     pub bus: gio::DBusConnection,
@@ -42,29 +67,32 @@ pub(crate) struct Opened {
 
 /// Ask for consent and open one monitor stream. On any failure after the
 /// session exists, the session is closed before returning.
-pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, Failure> {
-    let bus = connect().await?;
+pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, OpenError> {
+    let bus = connect().await.at("connect")?;
     let version = property(&bus, SCREENCAST, "version")
-        .await?
+        .await
+        .at("version")?
         .get::<u32>()
-        .ok_or(Failure::Unavailable)?;
+        .at("version")?;
     let sources = property(&bus, SCREENCAST, "AvailableSourceTypes")
-        .await?
+        .await
+        .at("version")?
         .get::<u32>()
         .unwrap_or(0);
     let cursors = property(&bus, SCREENCAST, "AvailableCursorModes")
-        .await?
+        .await
+        .at("version")?
         .get::<u32>()
         .unwrap_or(0);
     if version < MINIMUM_VERSION || sources & SOURCE_MONITOR == 0 {
-        return Err(Failure::Unavailable);
+        return Err(Failure::Unavailable).at("version");
     }
     let (cursor_mode, cursor) = if cursors & CURSOR_HIDDEN != 0 {
         (CURSOR_HIDDEN, "hidden")
     } else if cursors & CURSOR_EMBEDDED != 0 {
         (CURSOR_EMBEDDED, "embedded")
     } else {
-        return Err(Failure::Unavailable);
+        return Err(Failure::Unavailable).at("version");
     };
     let created = request(
         &bus,
@@ -80,12 +108,13 @@ pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, Failure
         SETUP,
         cancelled,
     )
-    .await?;
+    .await
+    .at("create-session")?;
     let session = created
         .get("session_handle")
         .and_then(Variant::str)
         .and_then(|path| ObjectPath::try_from(path).ok())
-        .ok_or(Failure::Unavailable)?;
+        .at("create-session")?;
     let started = Instant::now();
     let opened = async {
         request(
@@ -103,7 +132,8 @@ pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, Failure
             CONSENT,
             cancelled,
         )
-        .await?;
+        .await
+        .at("select-sources")?;
         let result = request(
             &bus,
             SCREENCAST,
@@ -112,7 +142,8 @@ pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, Failure
             CONSENT,
             cancelled,
         )
-        .await?;
+        .await
+        .at("start")?;
         let consent_ms = started.elapsed().as_millis() as u64;
         // A backend should not return one with persist_mode 0; if it does, it
         // is dropped here and never stored or reused.
@@ -120,9 +151,9 @@ pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, Failure
         let streams = result
             .get("streams")
             .and_then(|streams| streams.get::<Vec<(u32, Dict)>>())
-            .ok_or(Failure::Unavailable)?;
+            .at("streams")?;
         let [(node, properties)] = streams.as_slice() else {
-            return Err(Failure::Unavailable);
+            return Err(Failure::Unavailable).at("streams");
         };
         let position = properties
             .get("position")
@@ -135,12 +166,13 @@ pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, Failure
             "OpenPipeWireRemote",
             &(&session, Dict::new()).to_variant(),
         )
-        .await?;
+        .await
+        .at("pipewire-remote")?;
         let index = reply
             .get::<(gtk::glib::variant::Handle,)>()
             .map(|(handle,)| handle.0)
-            .ok_or(Failure::Unavailable)?;
-        let raw = fds.get(index).map_err(|_| Failure::Unavailable)?;
+            .at("pipewire-remote")?;
+        let raw = fds.get(index).ok().at("pipewire-remote")?;
         // SAFETY: g_unix_fd_list_get returns a new duplicate we now own.
         let remote = unsafe { OwnedFd::from_raw_fd(raw) };
         Ok(Opened {
@@ -162,9 +194,31 @@ pub(crate) async fn open(cancelled: &dyn Fn() -> bool) -> Result<Opened, Failure
     opened
 }
 
-/// End the session (stopping the stream and the desktop's indicator) and
-/// drop the private connection, which also ends anything left on it.
-pub(crate) async fn close(bus: &gio::DBusConnection, session: &ObjectPath) {
+/// End the session (stopping the stream and the desktop's indicator), wait
+/// a bounded time until the portal no longer exports it, and drop the private
+/// connection, which also ends anything left on it. Returns whether the
+/// session object was confirmed gone.
+pub(crate) async fn close(bus: &gio::DBusConnection, session: &ObjectPath) -> bool {
     let _ = call(bus, session.as_str(), SESSION, "Close", &().to_variant()).await;
+    let deadline = Instant::now() + CLOSE_CONFIRMATION;
+    let confirmed = loop {
+        let exported = call(
+            bus,
+            session.as_str(),
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            &(SESSION, "version").to_variant(),
+        )
+        .await
+        .is_ok();
+        if !exported {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        gtk::glib::timeout_future(Duration::from_millis(20)).await;
+    };
     let _ = bus.close_future().await;
+    confirmed
 }
