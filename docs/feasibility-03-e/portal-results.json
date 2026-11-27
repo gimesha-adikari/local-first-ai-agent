@@ -1,0 +1,360 @@
+{
+ "registry": "registered",
+ "cycles": [
+  {
+   "plan": {
+    "persist": 0,
+    "action": "share"
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 5.0
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 3.6
+   },
+   "dialog_visible_ms": 709.7,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 6761.2
+   },
+   "response_after_click_ms": 2.5,
+   "streams": [
+    [
+     61,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": false,
+   "remote_to_frame_ms": 45.6,
+   "remote_to_clean_frame_ms": 112.2,
+   "frames_discarded_for_dialog": 3,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 21.1
+  },
+  {
+   "plan": {
+    "persist": 0,
+    "action": "cancel"
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.2
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 3.6
+   },
+   "dialog_visible_ms": 142.4,
+   "start": {
+    "code": 1,
+    "ms_including_dialog": 782.6
+   },
+   "response_after_click_ms": 129.3
+  },
+  {
+   "plan": {
+    "persist": 0,
+    "action": "share"
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.1
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 3.6
+   },
+   "dialog_visible_ms": 188.1,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 700.7
+   },
+   "response_after_click_ms": 1.6,
+   "streams": [
+    [
+     59,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": false,
+   "remote_to_frame_ms": 35.3,
+   "remote_to_clean_frame_ms": 70.6,
+   "frames_discarded_for_dialog": 1,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 18.3
+  },
+  {
+   "plan": {
+    "persist": 0,
+    "action": "share"
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.1
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 3.4
+   },
+   "dialog_visible_ms": 187.5,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 701.0
+   },
+   "response_after_click_ms": 1.6,
+   "streams": [
+    [
+     61,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": false,
+   "remote_to_frame_ms": 33.6,
+   "remote_to_clean_frame_ms": 67.7,
+   "frames_discarded_for_dialog": 2,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 19.4
+  },
+  {
+   "plan": {
+    "persist": 0,
+    "action": "share"
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.4
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 3.5
+   },
+   "dialog_visible_ms": 143.6,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 656.2
+   },
+   "response_after_click_ms": 1.7,
+   "streams": [
+    [
+     59,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": false,
+   "remote_to_frame_ms": 34.4,
+   "remote_to_clean_frame_ms": 69.1,
+   "frames_discarded_for_dialog": 2,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 19.1
+  },
+  {
+   "plan": {
+    "persist": 0,
+    "action": "share"
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.1
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 3.4
+   },
+   "dialog_visible_ms": 142.5,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 655.1
+   },
+   "response_after_click_ms": 1.7,
+   "streams": [
+    [
+     61,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": false,
+   "remote_to_frame_ms": 34.4,
+   "remote_to_clean_frame_ms": 68.6,
+   "frames_discarded_for_dialog": 2,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 19.3
+  },
+  {
+   "plan": {
+    "persist": 2,
+    "action": "share"
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.3
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 3.5
+   },
+   "dialog_visible_ms": 195.7,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 708.4
+   },
+   "response_after_click_ms": 1.5,
+   "streams": [
+    [
+     59,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": true,
+   "remote_to_frame_ms": 34.7,
+   "remote_to_clean_frame_ms": 67.8,
+   "frames_discarded_for_dialog": 2,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 19.3
+  },
+  {
+   "plan": {
+    "persist": 2,
+    "action": "share",
+    "restore": true
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.0
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 4.2
+   },
+   "dialog_visible_ms": null,
+   "no_dialog": true,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 39.9
+   },
+   "response_after_click_ms": null,
+   "streams": [
+    [
+     61,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": true,
+   "remote_to_frame_ms": 45.1,
+   "remote_to_clean_frame_ms": 45.8,
+   "frames_discarded_for_dialog": 0,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 18.2
+  },
+  {
+   "plan": {
+    "persist": 2,
+    "action": "share",
+    "restore": true
+   },
+   "create_session": {
+    "code": 0,
+    "ms": 4.0
+   },
+   "select_sources": {
+    "code": 0,
+    "ms": 4.5
+   },
+   "dialog_visible_ms": null,
+   "no_dialog": true,
+   "start": {
+    "code": 0,
+    "ms_including_dialog": 57.4
+   },
+   "response_after_click_ms": null,
+   "streams": [
+    [
+     59,
+     {
+      "id": "0",
+      "source_type": "1",
+      "position": "(0, 0)",
+      "size": "(1280, 800)"
+     }
+    ]
+   ],
+   "restore_token_returned": true,
+   "remote_to_frame_ms": 45.7,
+   "remote_to_clean_frame_ms": 46.3,
+   "frames_discarded_for_dialog": 0,
+   "frame": [
+    1280,
+    800,
+    3072000
+   ],
+   "close_to_node_removed_ms": 16.7
+  }
+ ],
+ "version": 5,
+ "leftover_nodes": [],
+ "permission_store_screencast": "(['41ba9da7-af7f-49f2-89dc-77c0225e5b60'],)"
+}
