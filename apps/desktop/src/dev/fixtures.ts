@@ -203,7 +203,10 @@ fn main() {
 \`\`\``;
 
 // Synthetic web research: settings, transient source views and progress.
-let webSettings = { provider: "brave" as "brave" | "searxng" | null, braveSaveResults: false, searxngEndpoint: "", searxngSaveResults: false };
+let webSettings = {
+  provider: "brave" as "brave" | "searxng" | "purili" | null, braveSaveResults: false, searxngEndpoint: "",
+  searxngSaveResults: false, puriliPersonalUse: false,
+};
 let braveKey: "stored" | "missing" = "stored";
 const researchViews = new Map<number, unknown>();
 
@@ -569,6 +572,7 @@ export async function installFixtures(name: string) {
       case "web_research_save": {
         const next = args.settings as typeof webSettings;
         if (next.searxngEndpoint && !/^https?:\/\//.test(next.searxngEndpoint)) throw { code: "invalid_config", message: "Enter a valid http or https URL." };
+        if (next.provider === "purili" && !next.puriliPersonalUse) throw { code: "invalid_config", message: "Purili allows only personal, non-commercial use. Confirm that below to select it." };
         webSettings = { ...next, searxngEndpoint: next.searxngEndpoint.replace(/\/$/, "") };
         return webView();
       }

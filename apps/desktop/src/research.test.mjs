@@ -6,7 +6,7 @@ import {
 } from "./research.ts";
 
 const view = (patch = {}) => ({
-  settings: { provider: "brave", braveSaveResults: false, searxngEndpoint: "", searxngSaveResults: false },
+  settings: { provider: "brave", braveSaveResults: false, searxngEndpoint: "", searxngSaveResults: false, puriliPersonalUse: false },
   braveKey: "stored",
   searxngOrigin: null,
   searxngNetwork: null,
@@ -65,6 +65,18 @@ test("the plan discloses provider, outgoing query and where the answer is writte
   assert.equal(page.outgoing, null);
 });
 
+test("Purili is named as experimental, needs no key and keeps results to the session", () => {
+  const purili = view({ settings: { ...view().settings, provider: "purili", puriliPersonalUse: true }, braveKey: "missing" });
+  const draft = { ...emptyResearch, enabled: true };
+  const plan = researchPlan({ draft, message: "history of the bicycle", view: purili, remoteName: null, modelReady: true });
+  assert.equal(plan.canSend, true);
+  assert.equal(plan.destination, "Purili (experimental)");
+  assert.deepEqual(researchOptions(draft, purili), { mode: "search", provider: "purili" });
+  const note = historyNote({ transient: false, record: { provider: "purili" }, sources: [{ saved: false }] });
+  assert.match(note, /^Purili results are kept only/);
+  assert.doesNotMatch(note, /storage terms/);
+});
+
 test("options carry only what was authorized for this message", () => {
   assert.equal(researchOptions(emptyResearch, view()), undefined);
   assert.deepEqual(researchOptions({ ...emptyResearch, enabled: true }, view()), { mode: "search", provider: "brave" });
@@ -83,6 +95,6 @@ test("summaries and labels stay honest about what was read and saved", () => {
   assert.equal(supplyLabel({ ...source, cited: true }, "local"), "Cited");
   assert.equal(supplyLabel(source, "none"), "Listed");
   assert.equal(historyNote({ transient: true, sources: [] }), null);
-  assert.match(historyNote({ transient: false, sources: [{ saved: false }] }), /storage terms/);
+  assert.match(historyNote({ transient: false, record, sources: [{ saved: false }] }), /storage terms/);
   assert.equal(stageLabel("reading", "page"), "Reading the page…");
 });

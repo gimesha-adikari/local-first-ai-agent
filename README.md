@@ -95,16 +95,19 @@ build declares these dependencies automatically.
   Knowledge & Memory. When enabled, up to three relevant notes are added to
   later answers as background, separate from document evidence.
 - **Web research** is off until you turn on Search for one message. It uses
-  your own Brave Search API key or a SearXNG instance you configure under
-  Settings → Web search, or reads one public `https://` page you enter. Only
+  your own Brave Search API key, a SearXNG instance you configure, or the
+  experimental Purili provider, all chosen under Settings → Web search, or
+  reads one public `https://` page you enter. Purili needs no account or key,
+  but its terms allow only personal, non-commercial use, which you must
+  confirm before selecting it; its results are never saved. Only
   your message, or the query you edit, goes to the search provider. Up to
   three public pages are read directly, without cookies, sign-in, scripts or
   images, and the answer cites the sources it was given. Searching and
   reading always use the internet, even with a local model, so Local-only
   mode blocks them. A cloud or self-hosted model receives page excerpts only
   when you allow it for that message. Raw results and excerpts stay in
-  memory; cited links are saved only for direct pages or when you mark your
-  search plan as permitting storage.
+  memory; cited links are saved only for direct pages or when you turn on
+  saving for Brave or your SearXNG instance.
 
 ## Known limitations
 
@@ -141,6 +144,9 @@ build declares these dependencies automatically.
   does not read PDFs, run JavaScript or pass sign-in or paywalls. Evidence
   ranking is lexical. Live compatibility with Brave Search and SearXNG has
   been checked only against recorded request and response shapes.
+- Purili is a small independent service with no uptime guarantee. Its index is
+  limited: in a 2026-11-27 check, English and French queries returned relevant
+  results and a Japanese query returned none.
 - Downgrading to v0.1.0 requires the database backup taken before the
   upgrade. The v0.1.0 executable accepts only schema version 5 and below.
 

@@ -212,7 +212,12 @@ pub(crate) fn search_failure(provider: SearchProviderKind, failure: &Failure) ->
         Failure::Cancelled => InferenceError::new(ErrorCode::Cancelled, "Research was stopped."),
         Failure::Resolve | Failure::Connect | Failure::Io => InferenceError::new(
             ErrorCode::NetworkFailed,
-            format!("Couldn't reach {name}. Check your connection or the instance address."),
+            match provider {
+                SearchProviderKind::Searxng => {
+                    format!("Couldn't reach {name}. Check your connection or the instance address.")
+                }
+                _ => format!("Couldn't reach {name}. Check your connection and try again."),
+            },
         ),
         Failure::Address => InferenceError::new(
             ErrorCode::PolicyDenied,
@@ -285,6 +290,7 @@ impl NetworkBoundary {
         let id = match provider {
             SearchProviderKind::Brave => providers::BRAVE_DESTINATION,
             SearchProviderKind::Searxng => providers::SEARXNG_DESTINATION,
+            SearchProviderKind::Purili => providers::PURILI_DESTINATION,
         };
         let destination = policy.registered_destination(id).ok_or_else(|| {
             invalid(match provider {
@@ -292,6 +298,7 @@ impl NetworkBoundary {
                 SearchProviderKind::Searxng => {
                     "Configure your SearXNG instance in Settings → Web search."
                 }
+                SearchProviderKind::Purili => "Purili is not available.",
             })
         })?;
         let request = providers::request(provider, query);
@@ -360,11 +367,16 @@ impl NetworkBoundary {
     }
 }
 
-/// Register the fixed Brave destination and any configured SearXNG
-/// instance. Registration grants nothing by itself.
+/// Register the fixed Brave and Purili destinations and any configured
+/// SearXNG instance. Registration grants nothing by itself.
 pub(crate) fn register(policy: &Policy, settings: &WebResearchSettings) {
     #[cfg(not(test))]
-    let _ = policy.register_destination(providers::brave_destination());
+    for destination in [
+        providers::brave_destination(),
+        providers::purili_destination(),
+    ] {
+        let _ = policy.register_destination(destination);
+    }
     let _ = policy.unregister_destination(providers::SEARXNG_DESTINATION);
     if !settings.searxng_endpoint.trim().is_empty()
         && let Ok(destination) = providers::searxng_destination(&settings.searxng_endpoint)

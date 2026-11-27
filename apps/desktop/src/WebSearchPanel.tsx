@@ -69,8 +69,14 @@ export function WebSearchPanel({ view, busy, onChanged }: {
         <h4>Search provider</h4>
         <p className="hint">Used when you turn on Search for a Chat message. Reading a specific webpage needs no provider.</p>
         <Segmented<Choice> label="Search provider" disabled={disabled} value={settings.provider ?? "none"}
-          options={[{ value: "none", label: "None" }, { value: "brave", label: "Brave Search" }, { value: "searxng", label: "SearXNG" }]}
+          options={[
+            { value: "none", label: "None" }, { value: "brave", label: "Brave Search" },
+            { value: "searxng", label: "SearXNG" }, { value: "purili", label: "Purili (experimental)" },
+          ]}
           onChange={(choice) => void save({ ...settings, provider: choice === "none" ? null : choice })} />
+        {!settings.puriliPersonalUse && (
+          <p className="hint">To select Purili, first confirm personal, non-commercial use in its section below.</p>
+        )}
       </section>
       <section className="settings-section">
         <h4>Brave Search API</h4>
@@ -131,6 +137,24 @@ export function WebSearchPanel({ view, busy, onChanged }: {
         <Switch label="Save result links found through SearXNG" checked={settings.searxngSaveResults} disabled={disabled}
           description="When on, links and titles of cited sources are saved with the conversation. Excerpts are never saved."
           onChange={(value) => void save({ ...settings, searxngSaveResults: value })} />
+      </section>
+      <section className="settings-section">
+        <h4>Purili (experimental)</h4>
+        <p className="hint">
+          A free public search service with its own web index. No account or API key. Its terms (puri.li/terms) allow only
+          personal, non-commercial use.
+        </p>
+        <p className="hint">
+          Your query is sent to puri.li, which says it keeps access logs (IP address, path and time) for up to 7 days. It
+          promises no uptime, its own index may miss things, and some languages may return nothing.
+          Its results are never saved with the conversation.
+        </p>
+        <Switch label="I will use Purili only for personal, non-commercial purposes" checked={settings.puriliPersonalUse}
+          disabled={disabled} description="Required to select Purili. Turning this off also deselects it."
+          onChange={(value) => void save({
+            ...settings, puriliPersonalUse: value,
+            provider: !value && settings.provider === "purili" ? null : settings.provider,
+          })} />
       </section>
       <section className="settings-section">
         <h4>What web research sends</h4>

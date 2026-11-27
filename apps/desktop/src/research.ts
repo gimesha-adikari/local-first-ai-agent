@@ -1,7 +1,7 @@
 // Web research contracts and pure helpers. The Rust engine validates and
 // enforces everything; these helpers only explain and pre-check for the UI.
 
-export type SearchProviderKind = "brave" | "searxng";
+export type SearchProviderKind = "brave" | "searxng" | "purili";
 export type ResearchMode = "search" | "page";
 export type ResearchStage = "searching" | "reading" | "ranking" | "answering" | "done";
 export type CredentialStatus = "stored" | "missing" | "locked" | "unavailable";
@@ -11,6 +11,8 @@ export type WebResearchSettings = {
   braveSaveResults: boolean;
   searxngEndpoint: string;
   searxngSaveResults: boolean;
+  /** The user confirmed personal, non-commercial use of Purili. */
+  puriliPersonalUse: boolean;
 };
 
 export type WebResearchView = {
@@ -96,7 +98,12 @@ export const maxQueryWords = 50;
 export const maxPages = 3;
 
 export function providerLabel(provider: SearchProviderKind | null | undefined): string {
-  return provider === "brave" ? "Brave Search" : provider === "searxng" ? "SearXNG" : "No search provider";
+  switch (provider) {
+    case "brave": return "Brave Search";
+    case "searxng": return "SearXNG";
+    case "purili": return "Purili (experimental)";
+    default: return "No search provider";
+  }
 }
 
 /** Whitespace collapsed exactly as the engine does before sending. */
@@ -240,6 +247,10 @@ export function researchSummary(record: ResearchRecord): string {
 /** What is missing when the session that ran the search has ended. */
 export function historyNote(view: ResearchView): string | null {
   if (view.transient) return null;
+  if (view.record.provider === "purili") {
+    return "Purili results are kept only for the app session that ran them. "
+      + "The [S#] markers refer to sources shown at that time.";
+  }
   if (view.sources.some((source) => !source.saved)) {
     return "Search results are kept only for the app session that ran them, per the search provider's storage terms. "
       + "The [S#] markers refer to sources shown at that time.";

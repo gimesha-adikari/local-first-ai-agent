@@ -680,6 +680,180 @@ fn searxng_without_json_output_gets_a_clear_error() {
     assert!(result.unwrap_err().message.contains("json format"));
 }
 
+#[test]
+fn purili_is_explicit_keyless_transient_and_never_a_fallback() {
+    let body = json!({"results": [
+        {"title": "Fernhill bridge opens", "url": "https://news.fixture-site.org/bridge", "description": "News about the bridge opening.", "source": "crawled"}
+    ], "total": 1, "hasNext": false})
+    .to_string();
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failing = Arc::clone(&fail);
+    let r = research(Arc::new(move |_: &[u8], out: &mut dyn Write| {
+        let response = if failing.load(std::sync::atomic::Ordering::Acquire) {
+            json_response(503, r#"{"error":"down"}"#)
+        } else {
+            json_response(200, &body)
+        };
+        let _ = out.write_all(response.as_bytes());
+    }));
+    // The fixed origin is replaced by a loopback fixture.
+    r.engine
+        .intelligence_policy()
+        .register_destination(
+            Destination::new(
+                providers::PURILI_DESTINATION,
+                Endpoint::parse(&format!("http://127.0.0.1:{}", r.search.port)).unwrap(),
+                Locality::SelfHosted,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    // It cannot be selected without the personal-use confirmation, and the
+    // earlier provider stays in place.
+    let mut settings = WebResearchSettings {
+        provider: Some(SearchProviderKind::Purili),
+        ..Default::default()
+    };
+    let error =
+        futures_executor::block_on(r.engine.save_web_research(settings.clone())).unwrap_err();
+    assert!(error.message.contains("non-commercial"));
+    let view = futures_executor::block_on(r.engine.web_research()).unwrap();
+    assert_eq!(view.settings.provider, Some(SearchProviderKind::Brave));
+    settings.purili_personal_use = true;
+    settings.brave_save_results = true;
+    settings.searxng_save_results = true;
+    futures_executor::block_on(r.engine.save_web_research(settings)).unwrap();
+
+    r.load();
+    let id = r.private_conversation();
+    let options = json!({"research": {"mode": "search", "provider": "purili"}});
+    let (result, _) = r.send(id, "Fernhill bridge opening", options.clone());
+    let message = result.unwrap();
+    let requests = r.search_requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert!(request.starts_with("POST /api/search HTTP/1.1\r\n"));
+    assert!(request.contains("Content-Type: application/json\r\n"));
+    let sent: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        sent,
+        json!({"q": "Fernhill bridge opening", "page": 1, "exact": true})
+    );
+    for private in [
+        KEY,
+        MEMORY,
+        HISTORY,
+        SYSTEM,
+        "Authorization",
+        "Cookie",
+        "X-Subscription-Token",
+    ] {
+        assert!(!request.contains(private), "{private}");
+    }
+    // Pages are read by the existing retrieval; results stay transient even
+    // when other providers may save theirs.
+    assert_eq!(r.page_requests().len(), 1);
+    let view = r.engine.web_research_view(message.id).unwrap().unwrap();
+    assert_eq!(view.record.provider, Some(SearchProviderKind::Purili));
+    assert!(view.record.transient_results);
+    assert!(view.sources.iter().all(|source| !source.saved));
+    let context = serde_json::to_string(&view.record).unwrap();
+    assert!(!context.contains("fixture-site") && !context.contains("Fernhill"));
+    let receipts = r.receipts(message.id);
+    let external = receipts.last().unwrap()["external"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(external[0]["destination"], "search/purili");
+    assert_eq!(external[0]["route"], "/api/search");
+    assert_eq!(external[0]["credential"], false);
+
+    // A failure is reported as Purili's, with no other provider tried.
+    fail.store(true, std::sync::atomic::Ordering::Release);
+    let (result, _) = r.send(id, "Fernhill bridge", options.clone());
+    let error = result.unwrap_err();
+    assert_eq!(error.code, ErrorCode::ProviderUnavailable);
+    assert!(error.message.starts_with("Purili"));
+    assert_eq!(r.search_requests().len(), 2);
+    assert_eq!(r.page_requests().len(), 1);
+
+    r.engine.enable_local_only().unwrap();
+    let (result, _) = r.send(id, "Fernhill bridge", options);
+    assert_eq!(result.unwrap_err().code, ErrorCode::PolicyDenied);
+    assert_eq!(r.search_requests().len(), 2);
+}
+
+/// Opt-in live check of one complete research turn through Purili: the real
+/// boundary, resolver and trust store, one synthetic query and public pages.
+/// The model is scripted. Run with AGENT_LIVE_WEB=1.
+#[test]
+#[ignore = "contacts puri.li and public pages; set AGENT_LIVE_WEB=1"]
+fn live_purili_research() {
+    if std::env::var_os("AGENT_LIVE_WEB").is_none() {
+        return;
+    }
+    let script = Script::default();
+    let provider = script.clone();
+    let worker = InferenceWorker::spawn(move || Scripted(provider)).unwrap();
+    let engine = Engine::with_network(
+        Arc::new(Threads),
+        Arc::new(worker),
+        SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap(),
+        ":memory:".into(),
+        Arc::new(Vault::default()) as Arc<dyn CredentialSource>,
+        BoundaryConfig::default(),
+    )
+    .unwrap();
+    engine
+        .intelligence_policy()
+        .register_destination(providers::purili_destination())
+        .unwrap();
+    futures_executor::block_on(engine.save_web_research(WebResearchSettings {
+        provider: Some(SearchProviderKind::Purili),
+        purili_personal_use: true,
+        ..Default::default()
+    }))
+    .unwrap();
+    engine
+        .set_intelligence_settings(IntelligenceSettings {
+            local_only: false,
+            active_provider: None,
+        })
+        .unwrap();
+    let id = engine.create_conversation().unwrap().id;
+    let events: ChatEvents = Arc::new(Recorder::default());
+    let options: ChatOptions = serde_json::from_value(
+        json!({"research": {"mode": "search", "provider": "purili", "resultsOnly": true}}),
+    )
+    .unwrap();
+    let message = futures_executor::block_on(engine.send_message(
+        id,
+        "sqlite write ahead logging".into(),
+        options,
+        events,
+    ))
+    .unwrap();
+    let view = engine.web_research_view(message.id).unwrap().unwrap();
+    eprintln!("{}", message.content);
+    eprintln!(
+        "discovered {}, pages read {}, unavailable {}",
+        view.record.discovered, view.record.retrieved, view.record.unavailable
+    );
+    for source in &view.sources {
+        eprintln!(
+            "  {} {:?} {}",
+            source.citation_id,
+            source.evidence,
+            source.url.as_deref().unwrap_or_default()
+        );
+    }
+    for limitation in &view.limitations {
+        eprintln!("  limitation: {limitation}");
+    }
+    assert!(view.record.discovered > 0);
+    assert!(view.sources.iter().all(|source| !source.saved));
+}
+
 fn sse(text: &str) -> String {
     let body = format!(
         "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",

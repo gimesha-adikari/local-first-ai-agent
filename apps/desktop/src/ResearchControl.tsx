@@ -73,6 +73,9 @@ export function ResearchBar({ draft, onChange, plan, view, remoteName, message, 
             Only this query is sent. Your conversation, memories and documents are not. Up to 3 public pages are then read
             directly from their sites, without cookies or sign-in.
           </p>
+          {provider === "purili" && (
+            <p className="hint">Experimental provider, for personal and non-commercial use only.</p>
+          )}
         </div>
       ) : (
         <div className="research-disclosure">

@@ -49,6 +49,9 @@ pub enum SearchProviderKind {
     Brave,
     /// A SearXNG instance the user configured, with JSON output enabled.
     Searxng,
+    /// Experimental: Purili's keyless public search API. Its terms limit it
+    /// to personal, non-commercial use, which the user must confirm.
+    Purili,
 }
 
 impl SearchProviderKind {
@@ -56,6 +59,7 @@ impl SearchProviderKind {
         match self {
             Self::Brave => "Brave Search",
             Self::Searxng => "SearXNG",
+            Self::Purili => "Purili",
         }
     }
 }
@@ -80,6 +84,10 @@ pub struct WebResearchSettings {
     /// Save cited links found through SearXNG with the conversation.
     #[serde(default)]
     pub searxng_save_results: bool,
+    /// The user confirmed that their use of Purili is personal and
+    /// non-commercial. Required to select it. Off by default.
+    #[serde(default)]
+    pub purili_personal_use: bool,
 }
 
 impl WebResearchSettings {
@@ -95,6 +103,11 @@ impl WebResearchSettings {
                 "Enter your SearXNG instance URL to use it for search.",
             ));
         }
+        if self.provider == Some(SearchProviderKind::Purili) && !self.purili_personal_use {
+            return Err(invalid(
+                "Purili allows only personal, non-commercial use. Confirm that below to select it.",
+            ));
+        }
         Ok(())
     }
 
@@ -103,6 +116,8 @@ impl WebResearchSettings {
         match provider {
             SearchProviderKind::Brave => self.brave_save_results,
             SearchProviderKind::Searxng => self.searxng_save_results,
+            // Its published pages state no storage permission: transient only.
+            SearchProviderKind::Purili => false,
         }
     }
 }
@@ -333,6 +348,22 @@ mod tests {
         assert!(SearchQuery::new(&"a".repeat(MAX_QUERY_CHARS + 1)).is_err());
         assert!(SearchQuery::new(&"w ".repeat(MAX_QUERY_WORDS + 1)).is_err());
         assert!(SearchQuery::new(&"é".repeat(MAX_QUERY_CHARS)).is_ok());
+    }
+
+    #[test]
+    fn purili_needs_the_personal_use_confirmation_and_is_never_saved() {
+        let mut settings: WebResearchSettings =
+            serde_json::from_str(r#"{"provider":"purili"}"#).unwrap();
+        assert!(settings.validate().is_err());
+        settings.purili_personal_use = true;
+        settings.validate().unwrap();
+        settings.brave_save_results = true;
+        settings.searxng_save_results = true;
+        assert!(!settings.may_save(SearchProviderKind::Purili));
+        // Settings saved before Purili existed stay unconfirmed.
+        let earlier: WebResearchSettings =
+            serde_json::from_str(r#"{"provider":"brave","braveSaveResults":false}"#).unwrap();
+        assert!(!earlier.purili_personal_use);
     }
 
     #[test]
