@@ -1,20 +1,12 @@
 //! GlobalShortcuts over a dedicated, identity-registered local session-bus
 //! connection. The portal owns shortcut choice, consent, and persistence.
 use super::*;
+use crate::portal_bus::{Dict, Failure, ROOT, call, connect, unique};
 use glib::{Variant, variant::ObjectPath};
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
-};
 
-const BUS: &str = "org.freedesktop.portal.Desktop";
-const ROOT: &str = "/org/freedesktop/portal/desktop";
+const BUS: &str = crate::portal_bus::BUS;
 const SHORTCUTS: &str = "org.freedesktop.portal.GlobalShortcuts";
 const ID: &str = "summon";
-const REQUEST: &str = "org.freedesktop.portal.Request";
-type Dict = HashMap<String, Variant>;
 type Bindings = Vec<(String, Dict)>;
 type Reply = tokio::sync::oneshot::Sender<ShortcutStatus>;
 
@@ -34,122 +26,20 @@ impl Drop for Session {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Failure {
-    Unavailable,
-    Denied,
-}
-
-fn unique() -> String {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "summon{}_{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-async fn call(
-    bus: &gio::DBusConnection,
-    path: &str,
-    interface: &str,
-    method: &str,
-    args: &Variant,
-) -> Result<Variant, Failure> {
-    bus.call_future(
-        Some(BUS),
-        path,
-        interface,
-        method,
-        Some(args),
-        None,
-        gio::DBusCallFlags::NONE,
-        5000,
-    )
-    .await
-    .map_err(|_| Failure::Unavailable)
-}
-
-async fn connect() -> Result<gio::DBusConnection, Failure> {
-    let address = gio::dbus_address_get_for_bus_sync(gio::BusType::Session, gio::Cancellable::NONE)
-        .map_err(|_| Failure::Unavailable)?;
-    if !address.split(';').all(|part| part.starts_with("unix:")) {
-        return Err(Failure::Unavailable);
-    }
-    let bus = gio::DBusConnection::for_address_future(
-        &address,
-        gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
-            | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
-        None,
-    )
-    .await
-    .map_err(|_| Failure::Unavailable)?;
-    bus.set_exit_on_close(false);
-    // Do this before all other portal calls. Never let an IDE's identity
-    // silently acquire the shortcut permission.
-    call(
-        &bus,
-        ROOT,
-        "org.freedesktop.host.portal.Registry",
-        "Register",
-        &(APP_ID, Dict::new()).to_variant(),
-    )
-    .await?;
-    Ok(bus)
-}
-
 async fn request(
     bus: &gio::DBusConnection,
     method: &str,
     build: impl FnOnce(Dict) -> Variant,
 ) -> Result<Dict, Failure> {
-    let name = bus.unique_name().ok_or(Failure::Unavailable)?;
-    let sender = name.trim_start_matches(':').replace('.', "_");
-    let handle = unique();
-    let path = format!("{ROOT}/request/{sender}/{handle}");
-    let opts = Dict::from([("handle_token".into(), handle.to_variant())]);
-    // Subscribe before the method call; the response may arrive before its reply.
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    let slot = Rc::new(RefCell::new(Some(reply)));
-    let response = slot.clone();
-    let subscription = bus.signal_subscribe(
-        Some(BUS),
-        Some(REQUEST),
-        Some("Response"),
-        Some(&path),
-        None,
-        gio::DBusSignalFlags::NONE,
-        move |_, _, _, _, _, message| {
-            if let Some(reply) = response.borrow_mut().take() {
-                let _ = reply.send(message.get::<(u32, Dict)>());
-            }
-        },
-    );
-    let result = async {
-        let returned = call(bus, ROOT, SHORTCUTS, method, &build(opts)).await?;
-        if returned
-            .get::<(ObjectPath,)>()
-            .is_none_or(|(p,)| p.as_str() != path)
-        {
-            return Err(Failure::Unavailable);
-        }
-        let timer = glib::timeout_add_local_once(Duration::from_secs(120), move || {
-            slot.borrow_mut().take();
-        });
-        let Ok(response) = answer.await else {
-            let _ = call(bus, &path, REQUEST, "Close", &().to_variant()).await;
-            return Err(Failure::Unavailable);
-        };
-        timer.remove();
-        match response {
-            Some((0, result)) => Ok(result),
-            Some((1, _)) => Err(Failure::Denied),
-            _ => Err(Failure::Unavailable),
-        }
-    }
-    .await;
-    bus.signal_unsubscribe(subscription);
-    result
+    crate::portal_bus::request(
+        bus,
+        SHORTCUTS,
+        method,
+        build,
+        Duration::from_secs(120),
+        &|| false,
+    )
+    .await
 }
 
 fn trigger(bindings: &Bindings) -> Option<String> {
@@ -268,7 +158,7 @@ async fn setup(app: &AppHandle, interactive: bool) -> Result<ShortcutStatus, Fai
     .and_then(|(v,)| v.get::<u32>())
     .ok_or(Failure::Unavailable)?;
     let created = request(&bus, "CreateSession", |mut opts| {
-        opts.insert("session_handle_token".into(), unique().to_variant());
+        opts.insert("session_handle_token".into(), unique("summon").to_variant());
         (opts,).to_variant()
     })
     .await?;
@@ -354,7 +244,7 @@ pub(super) fn start(app: &AppHandle, interactive: bool, reply: Option<Reply>) {
             // A declined configuration dialog does not remove an existing binding.
             Err(_) if previous.state == "active" => previous,
             Err(Failure::Denied) => ShortcutStatus::new("denied"),
-            Err(Failure::Unavailable) => ShortcutStatus::new("unavailable"),
+            Err(Failure::Unavailable | Failure::Cancelled) => ShortcutStatus::new("unavailable"),
         };
         *app.state::<PlatformState>().status.lock().unwrap() = status.clone();
         if let Some(reply) = reply {
@@ -445,7 +335,7 @@ mod tests {
                 let path = ObjectPath::try_from(format!("{ROOT}/request/{sender_id}/{handle}")).unwrap();
                 let bindings = vec![(ID, Dict::from([("trigger_description".into(), "Ctrl+Alt+K".to_variant())]))];
                 let result = Dict::from([("shortcuts".into(), bindings.to_variant())]);
-                bus.emit_signal(Some(sender), &path, REQUEST, "Response", Some(&(0u32, result).to_variant())).unwrap();
+                bus.emit_signal(Some(sender), &path, crate::portal_bus::REQUEST, "Response", Some(&(0u32, result).to_variant())).unwrap();
                 invocation.return_value(Some(&(path,).to_variant()));
             }, |_, _, _, _, _| ().to_variant(), |_, _, _, _, _, _| false).unwrap();
             let session = ObjectPath::try_from("/session/synthetic").unwrap();
