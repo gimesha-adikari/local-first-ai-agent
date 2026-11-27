@@ -326,27 +326,39 @@ unsafe fn read(buffer: &PwBuffer, shared: &Shared) -> Result<Option<Frame>, ()> 
     if chunk.flags & CHUNK_CORRUPTED != 0 || chunk.size == 0 || data.maxsize == 0 {
         return Ok(None);
     }
-    let bpp = format.format.bytes_per_pixel();
-    let stride = if chunk.stride > 0 {
-        chunk.stride as usize
-    } else {
-        format.width as usize * bpp
-    };
-    let offset = (chunk.offset % data.maxsize) as usize;
     let memory =
         unsafe { std::slice::from_raw_parts(data.data as *const u8, data.maxsize as usize) };
-    match Frame::from_raw(
-        memory,
-        format.width,
-        format.height,
-        stride,
-        offset,
-        format.format,
-    ) {
+    let Some(valid) = chunk_bytes(memory, chunk.offset, chunk.size) else {
+        return Err(());
+    };
+    let Some(stride) = stride(chunk.stride, format.width, format.format.bytes_per_pixel()) else {
+        return Err(());
+    };
+    match Frame::from_raw(valid, format.width, format.height, stride, 0, format.format) {
         Ok(frame) => Ok(Some(frame)),
         Err(FrameError::Size | FrameError::Layout | FrameError::Format | FrameError::Region) => {
             Err(())
         }
+    }
+}
+
+/// The bytes the producer filled: `size` bytes at `offset` of the mapped
+/// region. A chunk that does not fit inside the mapping is rejected rather
+/// than wrapped or clamped, so nothing outside the mapping is read and no
+/// stale bytes past the chunk are taken as pixels.
+fn chunk_bytes(memory: &[u8], offset: u32, size: u32) -> Option<&[u8]> {
+    let start = offset as usize;
+    let end = start.checked_add(size as usize)?;
+    memory.get(start..end)
+}
+
+/// Row stride in bytes. Zero means tightly packed rows; a negative stride
+/// (bottom-up rows) is not supported and is rejected, never reinterpreted.
+fn stride(stride: i32, width: u32, bytes_per_pixel: usize) -> Option<usize> {
+    match stride {
+        0 => (width as usize).checked_mul(bytes_per_pixel),
+        positive if positive > 0 => Some(positive as usize),
+        _ => None,
     }
 }
 
@@ -394,7 +406,9 @@ pub(crate) fn single_frame(
             return Err(StreamError::Unavailable);
         }
         (api.loop_lock)(thread_loop);
-        // The remote fd is owned by PipeWire from here (closed on disconnect).
+        // The remote fd is owned by PipeWire from here: closed on disconnect,
+        // or by PipeWire's own error path if connecting fails. Only if core
+        // allocation itself fails could it leak; it is never closed twice.
         let core = (api.connect_fd)(context, remote.into_raw_fd(), ptr::null_mut(), 0);
         let mut shared = Box::new(Shared {
             api,
@@ -513,5 +527,37 @@ unsafe fn wait(
             (shared.api.loop_get_time)(shared.thread_loop, &mut deadline, 25_000_000);
             (shared.api.loop_timed_wait)(shared.thread_loop, &deadline);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunks_outside_the_mapping_and_negative_strides_are_rejected() {
+        let memory = [7u8; 64];
+        assert_eq!(chunk_bytes(&memory, 0, 64).map(<[u8]>::len), Some(64));
+        assert_eq!(chunk_bytes(&memory, 16, 32).map(<[u8]>::len), Some(32));
+        assert!(chunk_bytes(&memory, 60, 8).is_none());
+        assert!(chunk_bytes(&memory, 65, 0).is_none());
+        assert!(chunk_bytes(&memory, u32::MAX, u32::MAX).is_none());
+        assert_eq!(stride(0, 10, 4), Some(40));
+        assert_eq!(stride(48, 10, 4), Some(48));
+        assert_eq!(stride(-40, 10, 4), None);
+        assert_eq!(stride(i32::MIN, 10, 4), None);
+    }
+
+    #[test]
+    fn a_short_chunk_cannot_supply_a_full_frame() {
+        // 4×4 BGRx needs 64 bytes; a 48-byte chunk is refused by the frame
+        // layout check instead of reading past the chunk.
+        let memory = [0u8; 128];
+        let valid = chunk_bytes(&memory, 0, 48).unwrap();
+        assert!(
+            Frame::from_raw(valid, 4, 4, 16, 0, agent_core::screen::PixelFormat::Bgrx).is_err()
+        );
+        let valid = chunk_bytes(&memory, 64, 64).unwrap();
+        assert!(Frame::from_raw(valid, 4, 4, 16, 0, agent_core::screen::PixelFormat::Bgrx).is_ok());
     }
 }

@@ -323,8 +323,11 @@ pub fn map_selection(
 /// stream goes quiet. The first frame may still show the dialog, so a
 /// frame is accepted only after `quiet` without a newer one and at least
 /// `minimum` after the first frame. If the screen keeps changing, the
-/// latest frame is taken at `maximum`. The user then confirms the region on
-/// a preview, which is the final check against any remaining transition.
+/// latest frame is taken at `maximum`. This reduces the chance that the
+/// closing consent dialog appears in the frame; it does not guarantee it
+/// (a compositor may animate longer, or the screen may keep changing). The
+/// user therefore always previews the frozen frame and confirms the region,
+/// which is the mandatory check against any remaining transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettlePolicy {
     pub quiet: Duration,
