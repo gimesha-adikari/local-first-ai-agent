@@ -98,6 +98,13 @@
     "allow-attachment-remove",
     "allow-attachment-set-retention",
     "allow-chat-attachment-evidence",
+    "allow-attachment-text",
+    "allow-camera-capture",
+    "allow-camera-cancel",
+    "allow-camera-discard",
+    "allow-camera-attach",
+    "allow-visual-settings",
+    "allow-visual-settings-save",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

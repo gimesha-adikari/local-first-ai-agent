@@ -38,8 +38,8 @@ pub(super) const DATA_MEM_PTR: u32 = 1;
 pub(super) const DATA_MEM_FD: u32 = 2;
 pub(super) const DATA_DMA_BUF: u32 = 3;
 
-/// Formats offered, most preferred first (the first is the default).
-pub(super) const OFFERED: [PixelFormat; 10] = [
+/// Screen formats offered, most preferred first (the first is the default).
+pub(crate) const SCREEN_FORMATS: [PixelFormat; 10] = [
     PixelFormat::Bgrx,
     PixelFormat::Bgra,
     PixelFormat::Rgbx,
@@ -48,6 +48,19 @@ pub(super) const OFFERED: [PixelFormat; 10] = [
     PixelFormat::Xbgr,
     PixelFormat::Argb,
     PixelFormat::Abgr,
+    PixelFormat::Rgb,
+    PixelFormat::Bgr,
+];
+
+/// Camera formats: packed YUV, which most cameras deliver uncompressed, and
+/// the packed RGB formats virtual and converted sources may offer. Planar
+/// and compressed (MJPEG) formats are not negotiated.
+pub(crate) const CAMERA_FORMATS: [PixelFormat; 7] = [
+    PixelFormat::Yuy2,
+    PixelFormat::Bgrx,
+    PixelFormat::Rgbx,
+    PixelFormat::Bgra,
+    PixelFormat::Rgba,
     PixelFormat::Rgb,
     PixelFormat::Bgr,
 ];
@@ -103,10 +116,10 @@ impl Builder {
     }
 }
 
-/// The EnumFormat parameter: raw video in any offered packed RGB format and
-/// any size. No DMA-BUF modifier is offered, so producers send memory the
-/// CPU can read.
-pub(super) fn enum_format() -> Vec<u8> {
+/// The EnumFormat parameter: raw video in any of `formats` (the first is
+/// the default) and any size, preferring `size`. No DMA-BUF modifier is
+/// offered, so producers send memory the CPU can read.
+pub(super) fn enum_format(formats: &[PixelFormat], size: (u32, u32)) -> Vec<u8> {
     let mut builder = Builder::default();
     builder.pod(OBJECT, |b| {
         b.u32(OBJECT_FORMAT);
@@ -114,8 +127,8 @@ pub(super) fn enum_format() -> Vec<u8> {
         b.property(FORMAT_MEDIA_TYPE, |b| b.id(MEDIA_TYPE_VIDEO));
         b.property(FORMAT_MEDIA_SUBTYPE, |b| b.id(MEDIA_SUBTYPE_RAW));
         b.property(FORMAT_VIDEO_FORMAT, |b| {
-            let mut values = vec![[OFFERED[0].spa()]];
-            values.extend(OFFERED.iter().map(|format| [format.spa()]));
+            let mut values = vec![[formats[0].spa()]];
+            values.extend(formats.iter().map(|format| [format.spa()]));
             let values: Vec<&[u32]> = values.iter().map(|value| value.as_slice()).collect();
             b.choice(CHOICE_ENUM, ID, 4, &values);
         });
@@ -124,7 +137,7 @@ pub(super) fn enum_format() -> Vec<u8> {
                 CHOICE_RANGE,
                 RECTANGLE,
                 8,
-                &[&[1920, 1080], &[1, 1], &[16_384, 16_384]],
+                &[&[size.0, size.1], &[1, 1], &[16_384, 16_384]],
             );
         });
         b.property(FORMAT_VIDEO_FRAMERATE, |b| {
@@ -258,7 +271,7 @@ mod tests {
 
     #[test]
     fn offered_format_object_has_the_documented_layout() {
-        let pod = enum_format();
+        let pod = enum_format(&SCREEN_FORMATS, (1920, 1080));
         assert_eq!(pod.len() % 8, 0);
         assert_eq!(word(&pod, 0).unwrap() as usize, pod.len() - 8);
         assert_eq!(word(&pod, 4), Some(OBJECT));
@@ -289,15 +302,24 @@ mod tests {
         );
         assert!(parse_format(&fixated(12, 10, 10, true)).unwrap().modifier);
         assert!(parse_format(&fixated(2, 10, 10, false)).is_none()); // I420
+        assert_eq!(
+            parse_format(&fixated(4, 640, 480, false)).unwrap().format,
+            PixelFormat::Yuy2
+        );
         let mut truncated = fixated(8, 10, 10, false);
         truncated.truncate(40);
         assert!(parse_format(&truncated).is_none());
         assert!(parse_format(&[0; 4]).is_none());
         // The offered EnumFormat has choices; its first value is the default.
-        let offered = parse_format(&enum_format()).unwrap();
+        let offered = parse_format(&enum_format(&SCREEN_FORMATS, (1920, 1080))).unwrap();
         assert_eq!(
             (offered.format, offered.width, offered.height),
             (PixelFormat::Bgrx, 1920, 1080)
+        );
+        let camera = parse_format(&enum_format(&CAMERA_FORMATS, (1280, 720))).unwrap();
+        assert_eq!(
+            (camera.format, camera.width, camera.height),
+            (PixelFormat::Yuy2, 1280, 720)
         );
     }
 }

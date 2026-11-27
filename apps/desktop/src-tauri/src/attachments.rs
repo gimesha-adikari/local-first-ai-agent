@@ -54,7 +54,7 @@ pub struct Chosen {
 mod source {
     use agent_core::{
         agent::{AgentError, AgentErrorCode, AgentResult},
-        attachment::{AttachmentKind, PageCoverage, PassageSource},
+        attachment::{AttachmentKind, AttachmentOrigin, PageCoverage, PassageSource},
         knowledge::{SourceReference, append_chunks},
     };
     use agent_tools::{
@@ -134,61 +134,134 @@ mod source {
             }
             let image = snapshot.validate_image(check)?;
             drop(snapshot);
-            let mut passages = Vec::new();
-            let mut notes = Vec::new();
-            let mut recognition = None;
-            match recognizer {
-                Some((tesseract, languages)) if !languages.is_empty() => {
-                    stage(Stage::Recognizing);
-                    let outcome = tesseract.recognize_image(&image.bytes, &languages, &|| {
-                        check().map_err(|_| OcrError::cancelled())
-                    });
-                    match outcome {
-                        Ok(output) => {
-                            recognition = Some(format!(
-                                "{} ({})",
-                                output.engine,
-                                output.languages.join(", ")
-                            ));
-                            let mut chunks = Vec::new();
-                            append_chunks(&mut chunks, &output.text, None, check)?;
-                            passages.extend(chunks.into_iter().map(|chunk| PreparedText {
-                                source: PassageSource::ImageText,
-                                text: chunk.text,
-                            }));
-                            if passages.is_empty() {
-                                notes.push("No text was recognized in this image.".to_owned());
-                            }
+            prepare_image(image, recognizer, stage, check)
+        }
+    }
+
+    /// Recognize text in a validated image with the shared OCR languages
+    /// and keep the image for providers that can view it. Shared by picked
+    /// image files and camera snapshots.
+    pub fn prepare_image(
+        image: agent_tools::image::ValidatedImage,
+        recognizer: Option<(Tesseract, Vec<String>)>,
+        stage: &dyn Fn(Stage),
+        check: &dyn Fn() -> AgentResult<()>,
+    ) -> AgentResult<PreparedContent> {
+        let mut passages = Vec::new();
+        let mut notes = Vec::new();
+        if image.orientation_corrected {
+            notes.push("Turned upright using the photo's orientation information.".to_owned());
+        }
+        let mut recognition = None;
+        match recognizer {
+            Some((tesseract, languages)) if !languages.is_empty() => {
+                stage(Stage::Recognizing);
+                let outcome = tesseract.recognize_image(&image.bytes, &languages, &|| {
+                    check().map_err(|_| OcrError::cancelled())
+                });
+                match outcome {
+                    Ok(output) => {
+                        recognition = Some(format!(
+                            "{} ({})",
+                            output.engine,
+                            output.languages.join(", ")
+                        ));
+                        let mut chunks = Vec::new();
+                        append_chunks(&mut chunks, &output.text, None, check)?;
+                        passages.extend(chunks.into_iter().map(|chunk| PreparedText {
+                            source: PassageSource::ImageText,
+                            text: chunk.text,
+                        }));
+                        if passages.is_empty() {
+                            notes.push("No text was recognized in this image.".to_owned());
                         }
-                        Err(error) if error.kind == OcrErrorKind::Cancelled => {
-                            return Err(AgentError::new(
-                                AgentErrorCode::Cancelled,
-                                "Attachment preparation was cancelled.",
-                            ));
-                        }
-                        // The image stays usable for a provider that can view
-                        // it; the limitation is shown on the attachment.
-                        Err(error) => notes.push(error.message.to_owned()),
                     }
+                    Err(error) if error.kind == OcrErrorKind::Cancelled => {
+                        return Err(AgentError::new(
+                            AgentErrorCode::Cancelled,
+                            "Attachment preparation was cancelled.",
+                        ));
+                    }
+                    // The image stays usable for a provider that can view
+                    // it; the limitation is shown on the attachment.
+                    Err(error) => notes.push(error.message.to_owned()),
                 }
-                _ => notes.push(
-                    "Local text recognition isn't available. Install Tesseract with English data (sudo apt install tesseract-ocr tesseract-ocr-eng) to read text in images.".to_owned(),
-                ),
             }
-            Ok(PreparedContent {
-                passages,
-                pages: None,
-                image: Some(PreparedImage {
-                    bytes: image.bytes,
-                    width: image.width,
-                    height: image.height,
-                }),
-                recognition,
-                notes,
-            })
+            _ => notes.push(
+                "Local text recognition isn't available. Install Tesseract with English data (sudo apt install tesseract-ocr tesseract-ocr-eng) to read text in images.".to_owned(),
+            ),
+        }
+        Ok(PreparedContent {
+            passages,
+            pages: None,
+            image: Some(PreparedImage {
+                bytes: image.bytes,
+                width: image.width,
+                height: image.height,
+            }),
+            recognition,
+            notes,
+        })
+    }
+
+    /// A confirmed camera snapshot crop, encoded as PNG in memory (Stage
+    /// 04-E). It is validated like an attached PNG and keeps its camera
+    /// origin, so its text and image carry the camera classes.
+    pub struct CameraSnapshot {
+        name: String,
+        png: zeroize::Zeroizing<Vec<u8>>,
+        recognizer: Option<(Tesseract, Vec<String>)>,
+    }
+
+    impl CameraSnapshot {
+        pub fn new(
+            name: String,
+            png: zeroize::Zeroizing<Vec<u8>>,
+            recognizer: Option<(Tesseract, Vec<String>)>,
+        ) -> Self {
+            Self {
+                name,
+                png,
+                recognizer,
+            }
+        }
+    }
+
+    impl AttachmentFile for CameraSnapshot {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn kind(&self) -> AttachmentKind {
+            AttachmentKind::Png
+        }
+
+        fn origin(&self) -> AttachmentOrigin {
+            AttachmentOrigin::Camera
+        }
+
+        fn file_bytes(&self) -> u64 {
+            self.png.len() as u64
+        }
+
+        fn prepare(
+            self: Box<Self>,
+            stage: &dyn Fn(Stage),
+            check: &dyn Fn() -> AgentResult<()>,
+        ) -> AgentResult<PreparedContent> {
+            let CameraSnapshot {
+                png, recognizer, ..
+            } = *self;
+            stage(Stage::Extracting);
+            let image = agent_tools::image::validate(AttachmentKind::Png, &png, check)?;
+            drop(png);
+            prepare_image(image, recognizer, stage, check)
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+pub use source::CameraSnapshot;
 
 /// What the native picker returns in desktop WebView fixtures (test builds
 /// only): each queued list answers one picker request.
@@ -244,6 +317,7 @@ pub async fn attachment_choose(
     if paths.len() > MAX_SCOPE_ATTACHMENTS {
         return Err(invalid("Attach at most 6 files at a time."));
     }
+    let settings = state.engine.visual_settings()?;
     let pinned = tauri::async_runtime::spawn_blocking(move || {
         let recognizer = paths
             .iter()
@@ -254,7 +328,7 @@ pub async fn attachment_choose(
                         matches!(suffix.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg")
                     })
             })
-            .then(crate::panel::screen::recognizer)
+            .then(|| crate::panel::screen::recognizer(&settings))
             .flatten();
         paths
             .iter()
@@ -352,6 +426,19 @@ pub async fn attachment_set_retention(
         .engine
         .set_attachment_retention(conversation_id, &id, retention)
         .await
+}
+
+/// The recognized or extracted text of a ready attachment in the draft or
+/// open conversation, for showing it and starting a reviewed search query.
+#[tauri::command]
+pub fn attachment_text(
+    state: State<'_, Desktop>,
+    conversation_id: Option<ConversationId>,
+    id: String,
+) -> Result<String> {
+    validate_conversation(conversation_id)?;
+    validate_id(&id)?;
+    state.engine.attachment_text(conversation_id, &id)
 }
 
 /// The text of a supplied attachment passage, while the attachment remains

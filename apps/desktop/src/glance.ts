@@ -1,3 +1,5 @@
+import { visualClassNames, type CameraRecord, type SearchState, type VisualSettings } from "./visual.ts";
+
 /** Only the explicit selections for this run are passed to the native Glance session. */
 export const recipes = {
   explain: "Explain", summarize: "Summarize", rewrite: "Rewrite", improve: "Improve writing",
@@ -31,6 +33,10 @@ export function languageName(code: string): string {
 export type GlanceState = {
   localAvailable: boolean; localOnly: boolean; memoryEnabled: boolean; providers: GlanceProvider[];
   documents: { id: number; name: string }[]; ocr?: OcrState;
+  /** The configured search provider for visual-assisted search (Stage 04-E). */
+  search?: SearchState;
+  /** Shared OCR languages and translation target (Stage 04-E). */
+  visual?: VisualSettings;
 };
 
 export type Region = { x: number; y: number; width: number; height: number };
@@ -42,10 +48,13 @@ export type CaptureRecord = {
 export type RegionRecord = { region: Region; frameWidth: number; frameHeight: number };
 export type CropInfo = {
   id: string; width: number; height: number; bytes: number; imageEligible: boolean;
-  region: RegionRecord; capture: CaptureRecord;
+  region: RegionRecord; source: "screen" | "camera"; capture: CaptureRecord | null; camera: CameraRecord | null;
 };
 export type OcrRecord = { engine: string; languages: string[]; elapsedMs: number; characters: number; sandbox: string };
-export type ScreenReceipt = { capture: CaptureRecord; region: RegionRecord; ocr: OcrRecord | null; imageAttached: boolean; fullFrame: string };
+export type ScreenReceipt = {
+  source: "screen" | "camera"; capture: CaptureRecord | null; camera: CameraRecord | null; region: RegionRecord;
+  ocr: OcrRecord | null; imageAttached: boolean; fullFrame: string;
+};
 export type Estimate = {
   classes: string[]; inputTokens: number; maxOutputTokens: number; costMicros: number | null; currency: string | null; imageTokens: number;
 };
@@ -66,10 +75,7 @@ export type GlanceReceipt = {
 export type GlanceResult = { text: string; receipt: GlanceReceipt | null; error: string | null; screen?: ScreenReceipt | null };
 
 /** Human labels for data classes shown before a provider request. */
-export const classNames: Record<string, string> = {
-  "core.user-input/1": "Your text", "core.clipboard-text/1": "Clipboard text", "core.screen-image/1": "Screen image",
-  "core.screen-text/1": "Text recognized from the screen", "core.memory/1": "Saved memories", "core.library/1": "Knowledge documents",
-};
+export const classNames: Record<string, string> = visualClassNames;
 
 const encoder = new TextEncoder();
 

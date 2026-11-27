@@ -1,4 +1,6 @@
-import { CloseIcon, FileIcon, ImageIcon, LockIcon, PaperclipIcon, Spinner } from "./icons";
+import { useState } from "react";
+import { CameraIcon, CloseIcon, FileIcon, ImageIcon, LanguagesIcon, LockIcon, PaperclipIcon, QuoteIcon, ScanTextIcon, SearchIcon, Spinner } from "./icons";
+import { errorMessage } from "./inference";
 import {
   accepted, formatBytes, isImage, maxAttachments, phaseLabel, preparing, previewUrl,
   type AttachmentView, type SharePlan, type ShareDraft,
@@ -22,7 +24,80 @@ export function AttachButton({ disabled, busy, count, onAttach }: {
   );
 }
 
-function AttachmentCard({ view, included, disabled, onToggle, onCancel, onRemove, onRetention }: {
+/** Shared visual actions for ready images: the same operations the panel
+ * offers, carried out by Chat's own attachment and research pipelines. */
+export type VisualActions = {
+  loadText: (id: string) => Promise<string>;
+  useText: (text: string) => void;
+  translate: (view: AttachmentView, target: string) => void;
+  ask: (view: AttachmentView) => void;
+  search: (view: AttachmentView, text: string) => void;
+  target: string;
+};
+
+function ImageActions({ view, disabled, actions }: { view: AttachmentView; disabled: boolean; actions: VisualActions }) {
+  const [text, setText] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const [translating, setTranslating] = useState(false);
+  const [target, setTarget] = useState(actions.target);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [selected, setSelected] = useState("");
+  const request = () => {
+    if (!target.trim()) return;
+    actions.translate(view, target.trim());
+    setTranslating(false);
+  };
+  async function load() {
+    if (text !== null) return text;
+    try {
+      const value = await actions.loadText(view.id);
+      setText(value);
+      return value;
+    } catch (failure) {
+      setProblem(errorMessage(failure));
+      return null;
+    }
+  }
+  return (
+    <div className="image-actions">
+      <div className="attachment-actions" role="group" aria-label={`Actions for ${view.name}`}>
+        <button type="button" className="link-button" aria-expanded={open} disabled={disabled}
+          onClick={() => { setOpen(!open); void load(); }}><ScanTextIcon size={11} />Text</button>
+        <button type="button" className="link-button" aria-expanded={translating} disabled={disabled || view.passages === 0}
+          title={view.passages === 0 ? "No text was recognized in this image" : "Translate the recognized text"}
+          onClick={() => setTranslating(!translating)}><LanguagesIcon size={11} />Translate</button>
+        <button type="button" className="link-button" disabled={disabled} onClick={() => actions.ask(view)}><QuoteIcon size={11} />Ask</button>
+        <button type="button" className="link-button" disabled={disabled}
+          onClick={() => void load().then((value) => { if (value !== null) actions.search(view, selected || value); })}><SearchIcon size={11} />Search</button>
+      </div>
+      {translating && (
+        // Not a <form>: the card already sits inside the composer's form.
+        <div className="image-translate" role="group" aria-label="Translation target">
+          <label>Translate into <input value={target} maxLength={100} placeholder="e.g. French"
+            onChange={(event) => setTarget(event.currentTarget.value)}
+            onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); request(); } }} /></label>
+          <button type="button" className="link-button" disabled={!target.trim()} onClick={request}>Write request</button>
+        </div>
+      )}
+      {open && (
+        <div className="image-text">
+          {text === null ? <span className="hint"><Spinner size={11} />Loading recognized text…</span>
+            : text ? <>
+              <textarea readOnly dir="auto" value={text} rows={4} aria-label={`Text recognized in ${view.name}`}
+                onSelect={(event) => setSelected(event.currentTarget.value.slice(event.currentTarget.selectionStart, event.currentTarget.selectionEnd))} />
+              <div className="attachment-actions">
+                <button type="button" className="link-button" disabled={disabled} onClick={() => actions.useText(selected || text)}>Use {selected ? "selection" : "text"} in message</button>
+                <span className="hint">{view.recognition ? `Recognized on this device: ${view.recognition}` : "Recognized on this device"}</span>
+              </div>
+            </> : <span className="hint">No text was recognized in this image.</span>}
+        </div>
+      )}
+      {problem && <p className="attachment-note error-text">{problem}</p>}
+    </div>
+  );
+}
+
+function AttachmentCard({ view, included, disabled, onToggle, onCancel, onRemove, onRetention, visual }: {
   view: AttachmentView;
   included: boolean;
   disabled: boolean;
@@ -30,6 +105,7 @@ function AttachmentCard({ view, included, disabled, onToggle, onCancel, onRemove
   onCancel: () => void;
   onRemove: () => void;
   onRetention: (keep: boolean) => void;
+  visual?: VisualActions;
 }) {
   const busy = preparing(view);
   const problem = view.phase === "failed" || view.phase === "expired" || view.phase === "cancelled";
@@ -43,7 +119,8 @@ function AttachmentCard({ view, included, disabled, onToggle, onCancel, onRemove
           : isImage(view.kind) ? <ImageIcon size={18} /> : <FileIcon size={18} />}
       </div>
       <div className="attachment-body">
-        <p className="attachment-name" title={`${view.name} · ${formatBytes(view.fileBytes)}`}>{view.name}</p>
+        <p className="attachment-name" title={`${view.name} · ${formatBytes(view.fileBytes)}`}>
+          {view.origin === "camera" && <CameraIcon size={11} aria-label="Camera snapshot" />}{view.name}</p>
         <p className={`attachment-status${problem ? " error-text" : ""}`} role={busy ? "status" : undefined}>
           {busy && <Spinner size={11} />}
           <span>{phaseLabel(view)}</span>
@@ -64,6 +141,7 @@ function AttachmentCard({ view, included, disabled, onToggle, onCancel, onRemove
             </button>
           </div>
         )}
+        {ready && view.image && visual && <ImageActions view={view} disabled={disabled} actions={visual} />}
       </div>
       {busy ? (
         <button type="button" className="chip-remove" aria-label={`Cancel preparing ${view.name}`} title="Cancel"
@@ -82,7 +160,7 @@ function AttachmentCard({ view, included, disabled, onToggle, onCancel, onRemove
  */
 export function AttachmentTray({
   views, included, disabled, error, rejected, plan, share, remoteName, onShareChange,
-  onToggle, onCancel, onRemove, onRetention, onDismissError,
+  onToggle, onCancel, onRemove, onRetention, onDismissError, visual,
 }: {
   views: AttachmentView[];
   included: (id: string) => boolean;
@@ -98,6 +176,7 @@ export function AttachmentTray({
   onRemove: (id: string) => void;
   onRetention: (id: string, keep: boolean) => void;
   onDismissError: () => void;
+  visual?: VisualActions;
 }) {
   if (views.length === 0 && !error && rejected.length === 0) return null;
   return (
@@ -107,7 +186,7 @@ export function AttachmentTray({
           {views.map((view) => (
             <AttachmentCard key={view.id} view={view} included={included(view.id)} disabled={disabled}
               onToggle={() => onToggle(view.id)} onCancel={() => onCancel(view.id)} onRemove={() => onRemove(view.id)}
-              onRetention={(keep) => onRetention(view.id, keep)} />
+              onRetention={(keep) => onRetention(view.id, keep)} visual={visual} />
           ))}
         </ul>
       )}

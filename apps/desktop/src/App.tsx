@@ -44,7 +44,9 @@ import {
 } from "./providers";
 import { Onboarding, RemoteDisclosure } from "./RemoteViews";
 import { ResearchBar, SearchToggle } from "./ResearchControl";
-import { AttachButton, AttachmentTray } from "./AttachmentControl";
+import { AttachButton, AttachmentTray, type VisualActions } from "./AttachmentControl";
+import { useChatCamera } from "./ChatCamera";
+import { suggestQuery } from "./visual";
 import {
   attachmentRequest, emptyShare, preparing, readyAttachments, sendProblem, sharePlan,
   type AttachmentView, type Chosen, type RemoteTarget, type ShareDraft,
@@ -473,6 +475,56 @@ export default function App() {
     composer.current?.focus();
     window.requestAnimationFrame(() => composer.current?.focus());
   }, []);
+
+  const camera = useChatCamera({
+    scope: () => attachmentScope.current,
+    count: attachments.length,
+    disabled: !!agent.activeApproval || !snapshot || generating,
+    onAttached: (scope) => {
+      setShare((current) => ({ ...current, confirmed: false }));
+      void refreshAttachments(scope);
+    },
+  });
+
+  // The panel's visual operations, carried out by Chat's own pipelines:
+  // recognized text, a translation or question request through attachments,
+  // and a reviewed, editable search query through web research.
+  const includeAttachment = (id: string) => setPausedAttachments((current) => {
+    if (!current.has(id)) return current;
+    const next = new Set(current);
+    next.delete(id);
+    return next;
+  });
+  const visualActions: VisualActions = {
+    loadText: (id) => invoke<string>("attachment_text", { conversationId: attachmentScope.current, id }),
+    useText: (text) => {
+      setDraft((current) => current.trim() ? `${current}\n\n${text}` : text);
+      focusComposer();
+    },
+    translate: (view, target) => {
+      includeAttachment(view.id);
+      setResearch((current) => ({ ...current, enabled: false }));
+      setDraft(`Translate the text recognized in “${view.name}” into ${target}. Keep the original line breaks, and say if any part is unclear.`);
+      if (camera.visual) void camera.save({ ...camera.visual.settings, translationTarget: target });
+      setChatNotice(null);
+      focusComposer();
+    },
+    ask: (view) => {
+      includeAttachment(view.id);
+      setResearch((current) => ({ ...current, enabled: false }));
+      setDraft((current) => current.trim() ? current : `About “${view.name}”: `);
+      focusComposer();
+    },
+    search: (view, text) => {
+      // The image stays out of the message; only the reviewed query is sent.
+      setPausedAttachments((current) => new Set(current).add(view.id));
+      setResearch({ ...emptyResearch, enabled: true, mode: "search", query: suggestQuery(text), queryAttachments: [view.id] });
+      setDraft((current) => current.trim() ? current : "What do web sources say about this?");
+      setChatNotice(null);
+      focusComposer();
+    },
+    target: camera.visual?.settings.translationTarget ?? "",
+  };
 
   /** Read the saved unified thread. Never triggers a native operation. */
   async function loadConversation(id: number) {
@@ -1434,11 +1486,16 @@ export default function App() {
                 onChange={(next) => { setResearch(next); setChatNotice(null); }} />
             )}
             attachmentControl={(
-              <AttachButton disabled={!!agent.activeApproval || !snapshot || generating} busy={attaching}
-                count={attachments.length} onAttach={() => void attachFiles()} />
+              <>
+                <AttachButton disabled={!!agent.activeApproval || !snapshot || generating} busy={attaching}
+                  count={attachments.length} onAttach={() => void attachFiles()} />
+                {camera.button}
+              </>
             )}
             attachmentTray={(
-              <AttachmentTray views={attachments} included={includedAttachment} disabled={generating}
+              <>
+              {camera.panel}
+              <AttachmentTray views={attachments} included={includedAttachment} disabled={generating} visual={visualActions}
                 error={attachmentError} rejected={rejectedFiles} plan={attachmentPlan} share={share}
                 remoteName={remoteTarget?.name ?? null} onShareChange={setShare}
                 onToggle={(id) => setPausedAttachments((current) => {
@@ -1450,6 +1507,7 @@ export default function App() {
                 onRemove={(id) => void changeAttachment("remove", id)}
                 onRetention={(id, keep) => void changeAttachment(keep ? "keep" : "temporary", id)}
                 onDismissError={() => { setAttachmentError(null); setRejectedFiles([]); }} />
+              </>
             )}
             researchPanel={research.enabled ? (
               <ResearchBar draft={research} onChange={setResearch} plan={{ ...plan, problem: researchProblem }} view={webResearch}

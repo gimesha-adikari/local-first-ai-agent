@@ -87,10 +87,14 @@ export type ResearchDraft = {
   resultsOnly: boolean;
   /** Separate consent to send the question and excerpts to the selected provider. */
   share: boolean;
+  /** Attachments whose recognized text the query started from (visual-assisted
+   * search, Stage 04-E). Only their classes travel with the query; the
+   * attachments themselves are not sent. */
+  queryAttachments: string[];
 };
 
 export const emptyResearch: ResearchDraft = {
-  enabled: false, mode: "search", query: null, url: "", resultsOnly: false, share: false,
+  enabled: false, mode: "search", query: null, url: "", resultsOnly: false, share: false, queryAttachments: [],
 };
 
 export const maxQueryChars = 400;
@@ -212,6 +216,7 @@ export function researchOptions(draft: ResearchDraft, view: WebResearchView | nu
     mode: "search" as const,
     provider: view?.settings.provider ?? undefined,
     ...(draft.query !== null ? { query: normalizeQuery(draft.query) } : {}),
+    ...(draft.query !== null && draft.queryAttachments.length ? { queryAttachments: draft.queryAttachments } : {}),
     ...(draft.resultsOnly ? { resultsOnly: true } : {}),
     ...(draft.share ? { shareWithProvider: true } : {}),
   };

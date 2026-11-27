@@ -66,13 +66,19 @@ export function ResearchBar({ draft, onChange, plan, view, remoteName, message, 
               <input id={queryId} type="text" maxLength={maxQueryChars} value={draft.query ?? ""} disabled={disabled}
                 placeholder="Search query" onChange={(event) => onChange({ ...draft, query: event.currentTarget.value })} />
               <button type="button" className="link-button" disabled={disabled}
-                onClick={() => onChange({ ...draft, query: null })}>Use my message</button>
+                onClick={() => onChange({ ...draft, query: null, queryAttachments: [] })}>Use my message</button>
             </div>
           )}
           <p className="hint">
             Only this query is sent. Your conversation, memories and documents are not. Up to 3 public pages are then read
             directly from their sites, without cookies or sign-in.
           </p>
+          {editing && draft.queryAttachments.length > 0 && (
+            <p className="hint">
+              This query starts from text recognized in an attached image. Review it: only the query text is sent, never
+              the image. This is a text search using visual clues, not reverse image matching.
+            </p>
+          )}
           {provider === "purili" && (
             <p className="hint">Experimental provider, for personal and non-commercial use only.</p>
           )}

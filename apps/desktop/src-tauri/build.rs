@@ -15,6 +15,12 @@ fn main() {
         "glance_capture_clear",
         "glance_ocr",
         "glance_estimate",
+        "glance_camera",
+        "glance_camera_confirm",
+        "glance_camera_discard",
+        "glance_search",
+        "glance_search_open",
+        "glance_visual_settings",
         "bootstrap",
         "database_recovery_key",
         "list_conversations",
@@ -105,6 +111,13 @@ fn main() {
         "attachment_remove",
         "attachment_set_retention",
         "chat_attachment_evidence",
+        "attachment_text",
+        "camera_capture",
+        "camera_cancel",
+        "camera_discard",
+        "camera_attach",
+        "visual_settings",
+        "visual_settings_save",
     ]);
     let attributes = tauri_build::Attributes::new().app_manifest(app_manifest);
     tauri_build::try_build(attributes).expect("failed to configure the Tauri application");

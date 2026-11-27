@@ -3,6 +3,7 @@
 mod agent;
 mod attachments;
 mod bundled_model;
+mod camera;
 mod capture;
 mod chat_context;
 mod commands;
@@ -65,6 +66,7 @@ fn run_desktop_instance(
     builder
         .register_uri_scheme_protocol("glance-crop", panel::crop_protocol)
         .register_uri_scheme_protocol("attachment-preview", attachments::preview_protocol)
+        .register_uri_scheme_protocol("camera-preview", camera::preview_protocol)
         .setup(move |app| {
             let path = app
                 .path()
@@ -88,6 +90,7 @@ fn run_desktop_instance(
             );
             app.manage(Desktop { engine, agent });
             app.manage(panel::Panel::default());
+            app.manage(camera::CameraDesk::default());
             app.manage(access);
             let main_config = app
                 .config()
@@ -117,6 +120,12 @@ fn run_desktop_instance(
             panel::screen::glance_capture_clear,
             panel::screen::glance_ocr,
             panel::screen::glance_estimate,
+            panel::screen::glance_camera,
+            panel::screen::glance_camera_confirm,
+            panel::screen::glance_camera_discard,
+            panel::screen::glance_search,
+            panel::screen::glance_search_open,
+            panel::screen::glance_visual_settings,
             bootstrap,
             database_startup::database_recovery_key,
             list_conversations,
@@ -207,6 +216,13 @@ fn run_desktop_instance(
             attachments::attachment_remove,
             attachments::attachment_set_retention,
             attachments::chat_attachment_evidence,
+            attachments::attachment_text,
+            camera::camera_capture,
+            camera::camera_cancel,
+            camera::camera_discard,
+            camera::camera_attach,
+            camera::visual_settings,
+            camera::visual_settings_save,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");

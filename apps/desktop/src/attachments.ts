@@ -12,6 +12,8 @@ export type AttachmentView = {
   id: string;
   name: string;
   kind: AttachmentKind;
+  /** A file from the picker, or a confirmed camera snapshot (Stage 04-E). */
+  origin?: "file" | "camera";
   fileBytes: number;
   retention: AttachmentRetention;
   /** Kept in the encrypted profile with its conversation. */

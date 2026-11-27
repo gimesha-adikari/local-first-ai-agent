@@ -72,3 +72,5 @@ export const ScanTextIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 8.5V6a1
 export const GlobeIcon = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="8.5" /><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5S9.6 5.8 12 3.5z" /></Icon>;
 export const ExternalIcon = (p: IconProps) => <Icon {...p}><path d="M13.5 4.5h6v6M19.5 4.5l-8 8" /><path d="M18 14v4a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V7.5A1.5 1.5 0 0 1 6 6h4" /></Icon>;
 export const PaperclipIcon = (p: IconProps) => <Icon {...p}><path d="m19 11.5-7.1 7.1a4.5 4.5 0 0 1-6.4-6.4l7.4-7.4a3 3 0 0 1 4.2 4.2l-7.3 7.3a1.5 1.5 0 0 1-2.1-2.1l6.6-6.6" /></Icon>;
+export const CameraIcon = (p: IconProps) => <Icon {...p}><path d="M4.5 8A1.5 1.5 0 0 1 6 6.5h2.2l1.4-2h4.8l1.4 2H18A1.5 1.5 0 0 1 19.5 8v9a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 17z" /><circle cx="12" cy="12.5" r="3.3" /></Icon>;
+export const LanguagesIcon = (p: IconProps) => <Icon {...p}><path d="M4 6h8M8 4.5V6c0 3.5-1.7 6.3-4 7.5M5.5 9c1 2 3 3.6 5 4.3" /><path d="m12.5 19.5 3.5-8 3.5 8M13.6 17h4.8" /></Icon>;

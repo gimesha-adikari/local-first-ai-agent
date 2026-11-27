@@ -1266,3 +1266,51 @@ button.citation-chip:hover { background: var(--accent); color: var(--on-accent);
   border-radius: 999px; background: var(--surface-sunken); border: 1px solid var(--border);
   color: var(--text-secondary); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* Visual input (Stage 04-E): camera progress, snapshot review and crop,
+   shared OCR languages, image actions and visual-assisted search. */
+.camera-status {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px;
+  border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--text); font-size: 12.5px;
+}
+.camera-status .link-button { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
+.camera-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); flex: none; }
+.camera-status.is-live { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: var(--danger-soft); }
+.camera-status.is-live .camera-dot { background: var(--danger); animation: camera-pulse 1.2s var(--ease) infinite; }
+@keyframes camera-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .camera-status.is-live .camera-dot { animation: none; } }
+.camera-picker { display: grid; gap: 6px; margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.camera-picker legend { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; padding: 0 4px; }
+.camera-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.camera-actions button { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 6px 10px; border-radius: var(--radius-sm); }
+.snapshot-review { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); }
+.snapshot-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12px; color: var(--text-secondary); }
+.snapshot-head strong { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; }
+.snapshot-frame { position: relative; justify-self: start; max-width: 100%; cursor: crosshair; touch-action: none; user-select: none; line-height: 0; }
+.snapshot-frame.is-disabled { cursor: default; opacity: 0.7; }
+.snapshot-frame img { display: block; max-width: 100%; max-height: 260px; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.snapshot-selection {
+  position: absolute; border: 2px solid var(--accent); border-radius: 2px;
+  box-shadow: 0 0 0 9999px rgb(0 0 0 / 0.35); pointer-events: none;
+}
+.ocr-languages summary { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer; padding: 2px 0; }
+.ocr-language-list { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 0 4px; }
+.ocr-language-list .check-row { font-size: 12.5px; }
+.ocr-languages .hint { font-size: 11.5px; }
+.chat-camera { display: grid; gap: 6px; margin: 0 0 6px -4px; }
+.image-actions { display: grid; gap: 4px; margin-top: 2px; }
+/* An image card with its text or translation open spans the whole tray. */
+.attachment-card:has(.image-text, .image-translate) { grid-column: 1 / -1; }
+.image-actions .link-button { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; }
+.image-text { display: grid; gap: 4px; }
+.image-text textarea {
+  width: 100%; resize: vertical; font: inherit; font-size: 12.5px; padding: 6px 8px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-sunken); color: var(--text);
+}
+.image-translate { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--text-secondary); }
+.image-translate input {
+  width: 9em; font: inherit; font-size: 12.5px; padding: 3px 6px; margin-left: 4px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+}
+.attachment-name svg { vertical-align: -1px; margin-right: 4px; color: var(--text-secondary); }

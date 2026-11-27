@@ -2,7 +2,7 @@
 //! frame in memory, immediate session closure, then a frozen-frame selector.
 //! Platform code stays here; the engine only ever receives a confirmed crop.
 mod overlay;
-mod pipewire;
+pub(crate) mod pipewire;
 mod portal;
 mod spa;
 
@@ -177,7 +177,9 @@ pub(crate) async fn snapshot(
             StreamError::Unavailable => CaptureError::Unavailable,
             StreamError::Unsupported => CaptureError::Unsupported,
             StreamError::Timeout => CaptureError::Timeout,
-            StreamError::Failed => CaptureError::Failed,
+            StreamError::Failed | StreamError::NoCamera | StreamError::Disconnected => {
+                CaptureError::Failed
+            }
             StreamError::Cancelled => CaptureError::Cancelled,
         })
     });
