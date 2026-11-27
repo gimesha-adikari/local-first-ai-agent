@@ -91,7 +91,8 @@ the final code:
 
 One run in seven failed with `Unavailable` on a consent requested within
 milliseconds of the previous session's closure. It failed safely and
-captured nothing.
+captured nothing. The final hardening traced it to the test harness, not to
+session teardown; see [capture reliability](#capture-reliability).
 
 ### Screenshots
 
@@ -166,14 +167,17 @@ Tamil 0.12; Han and mixed 0.20. The English fixture in the normal suite allows
 
 These are synthetic, clean, single-font samples. They do not represent real
 screens, low contrast, unusual fonts or handwriting, and accuracy is not
-equal across scripts. G7 (accepted thresholds) remains with the owner.
+equal across scripts. G7 is decided by D-058: these are initial synthetic
+regression thresholds, not accuracy guarantees.
 
-**Starter set.** The package depends on `tesseract-ocr-eng` (4 MB). It
-recommends spa, fra, deu, por, rus, ara, hin, chi-sim, jpn and kor (about
-19.6 MB), chosen for global coverage and measured quality within the
-thresholds. Optional packs, documented rather than declared because Tauri's
-deb config has no Suggests: chi-tra (unreliable in one sample), vie, tur,
-ind, ukr, heb, ben, tha, sin, tam, and any other installed `tesseract-ocr-*`.
+**Starter set** (G6, decided by D-057; see [OCR decisions](#ocr-decisions-g6-g7)).
+The package depends on `tesseract-ocr-eng` (3.9 MB installed). Spa, fra,
+deu, por, rus, ara, hin, chi-sim, jpn and kor (about 19.3 MB installed) are
+recommended optional packs, chosen for global coverage and measured quality
+within the thresholds; they are documented and suggested in the panel, not
+installed automatically. Other optional packs: chi-tra (unreliable in one
+sample), vie, tur, ind, ukr, heb, ben, tha, sin, tam, and any other installed
+`tesseract-ocr-*`.
 The panel lists installed data, defaults to the locale's language plus
 English, and allows up to four languages.
 
@@ -188,6 +192,13 @@ English, and allows up to four languages.
   `clipboard-text` if the session read the clipboard; editing never removes
   them. Screen classes are admitted to egress only for the panel purpose,
   and only after the per-request review.
+- **Local-only.** Local-only mode allows authorized local capture,
+  sandboxed OCR and on-device processing of the recognized text. It
+  refuses remote image and remote text requests, hides providers in the
+  panel, and revokes live remote grants when turned on, which stops a
+  streaming request. Receipts keep the transmission that had already
+  happened. (An earlier wording said Local-only "blocks screen and image
+  requests"; it blocks only their remote processing.)
 - **Image authorization.** An image is attached only when the request names
   the current crop ID, so a stale or forged ID is refused. Size is capped
   at 3 MiB (an oversized crop is refused, not rescaled). Image tokens are
@@ -231,7 +242,7 @@ The engine's loopback tests cover:
 - refusal before any request for a text-only provider, a missing crop or no
   confirmation;
 - screen-label inheritance;
-- a Local-only block;
+- Local-only refusing remote screen and image requests;
 - no persistence.
 
 The panel fixture's loopback provider decoded the single image it received:
@@ -247,16 +258,27 @@ it measured exactly the crop's size, never the larger frame.
   because the overlay has no activation token after the portal dialog. A
   click focuses it, and the mouse buttons always work. In the harness,
   synthetic-input sessions moved focus.
-- **Back-to-back consent** within milliseconds of a previous session failed
-  once in seven runs (fail-safe).
-- **OCR results are synthetic** (see the quality section); G6 and G7 owner
-  decisions remain.
+- **Portal stalls.** With other screencast clients active in the same
+  session, xdg-desktop-portal once stopped answering for about 70 s. The
+  app cannot correct this; it fails with a retryable message and captures
+  nothing (see [capture reliability](#capture-reliability)).
+- **OCR results are synthetic** (see the quality section). G6 and G7 are
+  decided (D-057, D-058); thresholds are regression gates, not accuracy
+  guarantees. In the final native run the synthetic card's "CARD" was read
+  as "CARE".
+- **Runtime directory.** The single-instance socket (03-D) lives in
+  `XDG_RUNTIME_DIR`; a path longer than about 100 bytes stops startup. The
+  systemd default `/run/user/<uid>` is short; only synthetic test setups hit
+  this.
 - **No remote vision provider was contacted.** Image requests were verified
   only against the loopback fixture.
 - Commit `b5c73e4` does not build on its own (its module declaration landed
   in `ca7e66b`). The branch head builds and passes.
 
 ## Owner acceptance checklist for 03-F
+
+Superseded by the consolidated [v0.3.0 owner acceptance guide](v0.3.0-owner-acceptance.md);
+the list below is kept as the original 03-E record.
 
 1. Install the Debian package on Ubuntu GNOME (Wayland). Confirm that the
    desktop entry, Summon action and portal identity show the app's name.
@@ -285,3 +307,184 @@ it measured exactly the crop's size, never the larger frame.
 8. Main window: Chat, Agent, Knowledge, Memory and Providers still behave as
    in 03-C and 03-D.
 9. KDE Plasma and an X11 session, if support is to be claimed.
+
+## v0.3.0 final hardening
+
+Engineering hardening after provisional 03-E acceptance. No new product
+capability. Same machine and headless environments as above.
+
+### Capture reliability
+
+**Investigation.** A repeated-capture fixture
+(`capture::tests::back_to_back_captures_in_a_headless_session`) asks for
+each new consent the moment the previous capture has torn down, and reports
+the failing step of any failure. Its driver
+(`docs/feasibility-03-e/probe/capture_loop_driver.py`) finds each dialog in
+the GNOME portal backend's log and clicks Share with relative pointer motion
+through a RemoteDesktop session that has no screencast. The original
+driver had polled the screen with its own Mutter screencasts while the
+fixture captured.
+
+| Run (headless GNOME 50, portal v5, PipeWire 1.6.2) | Captures | Result |
+|---|---|---|
+| Original driver (own screencasts while waiting), pre-change code | 20 | 2 succeeded, then `OpenPipeWireRemote` timed out and the portal stopped answering D-Bus calls, including `Registry.Register`, for about 70 s; every failure was safe |
+| New driver, no own screencasts, no delay between captures, pre-change code | 30 | 30 succeeded |
+| New driver, final code (capture slot, confirmed teardown) | 30 | 30 succeeded; close confirmed 30/30 in 4–7 ms; descriptors 11 → 11, threads 7 → 7 |
+| Final code with a competing screencast client polling during consent | 12 | 12 succeeded |
+| Final code, competing client and screencast-backed clicks | 12 | 12 succeeded |
+
+The harness also had a startup race: if xdg-desktop-portal started before
+the GNOME backend was on the bus, ScreenCast was never exported.
+`with-portal.sh` now waits for the backend.
+
+**Conclusion.** Teardown is complete and back-to-back captures succeed
+without a delay, so no timed settle was added. The single failure in
+seven was the harness's own screencasts competing with the portal. A
+portal stall caused by other screencast clients was reproduced once and
+cannot be fixed by the app.
+
+**Readiness mechanism** (`capture::Permit`):
+- One capture slot per process. It is taken before consent is requested and
+  released only after the portal session is closed and the PipeWire stream,
+  connection and thread are destroyed.
+- A second request while the slot is held is refused at once ("Another
+  screen capture is still finishing…"). It is never queued, retried or
+  turned into an automatic consent request.
+- `portal::close` now waits up to 1 s until the portal no longer exports the
+  session; the receipt records whether that was confirmed.
+- Failures name the setup step (for diagnosis). A portal that ends a request
+  without a user decision (response 2) or does not reply in time is reported
+  as "The desktop could not start screen sharing. Nothing was captured. Try
+  again." Missing portal or PipeWire support keeps its own message.
+- Cancellation is checked before consent and every 25 ms during acquisition,
+  as before.
+
+### PipeWire FFI safety checks
+
+| Area | Finding | Action |
+|---|---|---|
+| Buffer bounds | Frames were read from the whole mapping (`maxsize`), with `chunk.offset` wrapped modulo `maxsize`. Stale bytes past the chunk could be taken as pixels (not memory-unsafe) | Read only `size` bytes at `offset`; a chunk outside the mapping is rejected, never wrapped or clamped |
+| Stride | A negative stride (bottom-up rows) was silently replaced by a packed stride | Rejected; zero still means packed rows |
+| Dimensions, overflow | `Frame::from_raw` already checks zero and maximum sizes, `MAX_FRAME_BYTES` and every offset with checked arithmetic | No change; tests added for short chunks and extreme values |
+| Buffer types | DMA-BUF and unknown types rejected; only MemPtr and MemFd with mapped data accepted | No change |
+| Buffer ownership | Each dequeued buffer is queued back before the callback returns; pixels are copied out | No change |
+| Callback lifetime | Callbacks run on the loop thread with the loop lock held; the stream is destroyed (removing its listener) under that lock before the hook and shared state are dropped | No change |
+| Thread shutdown | The loop is unlocked, stopped (joined), then context and loop are destroyed; fds and threads do not grow across 30 captures | Verified by the repeated fixture |
+| Partial initialization | Each failure path releases what exists in reverse order; the remote fd is closed by PipeWire on disconnect or its own error path | Ownership documented; only a failed core allocation could leak the fd, never double-close it |
+| Cancellation | Checked before connecting and every 25 ms while waiting | Verified (cancel before first frame) |
+
+The frame-settling documentation now says settling reduces but does not
+guarantee removal of consent-dialog content; the preview and confirmation
+remain mandatory (D-056).
+
+### Local-only
+
+Engine regressions:
+- `local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work`:
+  in Local-only mode, recognized screen text is translated on the device
+  (screen labels kept, no external record); an image is refused (no local
+  vision model); a remote target is refused with "Local-only mode is on…".
+- `local_only_during_a_remote_screen_request_revokes_it_and_keeps_the_receipt_accurate`:
+  turning on Local-only while a remote screen-text request streams stops it
+  within a moment; the receipt keeps transmission "sent"; the panel state
+  then reports Local-only with no providers.
+
+Capture and OCR never depended on Local-only and remain available.
+Corrections:
+- The panel previously refused a remote request in Local-only mode with
+  "Allow this request to be shared…"; it now names Local-only.
+- The panel shows "Local-only mode is on: requests stay on this device.
+  Screen capture and text recognition still work."
+- Settings → Providers and Privacy & Storage now describe the contextual
+  panel and screen capture in both modes.
+
+### OCR decisions (G6, G7)
+
+- **D-057, starter languages.** English is the required base; the package
+  depends on `tesseract-ocr` and `tesseract-ocr-eng`. Spanish, French,
+  German, Portuguese, Russian, Arabic, Hindi, Simplified Chinese, Japanese
+  and Korean are *recommended optional* packs. They are no longer declared
+  as Debian Recommends, because apt installs Recommends by default; the
+  package installs `/usr/share/doc/local-first-ai-agent/README.ocr-languages`
+  and the panel shows the apt command for recommended languages that are
+  missing. Other `tesseract-ocr-*` packs stay optional.
+- **D-058, thresholds.** The measured per-script mean CER limits above
+  (`crates/tools/tests/ocr_languages.rs`) are initial synthetic regression
+  thresholds, not real-world accuracy guarantees.
+
+Ubuntu 26.04 package sizes (download / installed):
+
+| Package | Size |
+|---|---|
+| `tesseract-ocr` + `libtesseract5` + `libleptonica6` | 2.7 / 7.1 MB |
+| `tesseract-ocr-eng` (required) | 1.7 / 3.9 MB |
+| `tesseract-ocr-osd` (pulled in by `tesseract-ocr`) | 3.6 / 10.1 MB |
+| Ten recommended packs together | 10.3 / 19.3 MB |
+| Each recommended pack | spa 1.0/2.2, fra 0.6/1.1, deu 0.8/1.5, por 0.9/1.9, rus 1.4/3.7, ara 0.7/1.4, hin 0.9/1.1, chi-sim 1.6/2.4, jpn 1.4/2.4, kor 1.0/1.6 |
+| `libpipewire-0.3-0t64` | 0.3 / 0.9 MB |
+
+Guidance: with no Tesseract or no data, the panel says "Local text
+recognition needs Tesseract with English data. Install it with “sudo apt
+install tesseract-ocr tesseract-ocr-eng”, then reopen this panel."; with
+data but no English, it names `tesseract-ocr-eng`. A missing installation is
+looked up again on the next use, so installing it needs no restart.
+Languages are shown by name (code on hover), choices beyond four are
+disabled, and the source text and result use `dir="auto"` so right-to-left
+and mixed text display correctly. Recognized text is passed through
+unchanged (bidi marks and zero-width characters included).
+
+### Product polish
+
+Inspected in the WebView fixtures and the development UI (light and dark):
+- Onboarding with no model and no provider no longer says "Chat runs
+  entirely on this computer with your local model" above the provider
+  choices.
+- Local-only wording in Providers, Privacy & Storage and the panel (above).
+- Capture receipts say whether the desktop confirmed the end of screen
+  sharing; recognition languages are named.
+- OCR guidance and language names (above).
+
+No redesign; the existing visual direction is unchanged.
+
+### Packaging
+
+`target/release/bundle/deb/local-first-ai-agent_0.2.0_amd64.deb` (11.04 MiB,
+no model weights). Depends: bubblewrap, poppler-utils, util-linux,
+`libpipewire-0.3-0t64 | libpipewire-0.3-0`, tesseract-ocr,
+tesseract-ocr-eng, libwebkit2gtk-4.1-0, libgtk-3-0. Recommends:
+`gnome-keyring | kwalletmanager`, xdg-desktop-portal. PipeWire is loaded at
+run time, so the executable links no PipeWire symbols.
+
+| Check (isolated: fake-root `dpkg --root` in a user namespace, apt simulation, disposable profiles offline under Xvfb) | Result |
+|---|---|
+| Clean install | Installed; 10 files; no `.gguf`; desktop entry `io.github.gimesha-adikari.localfirstaiagent.desktop` (matches the portal app ID, `Exec=local-first-ai-agent`, Summon action) plus the legacy launcher |
+| Upgrade from 0.1.0 (bundled LFM2.5) | Model retained at `/var/lib/local-first-ai-agent/models/` (730,895,168 bytes, root 0644, SHA-256 verified), old payload removed, no staging left |
+| Upgrade with a tampered legacy model | Refused before removal; 0.1.0 stays installed with its file |
+| Reinstall over the previous 0.2.0 build | Installed; OCR README present |
+| Dependency resolution on an empty package state | Resolves; installs `tesseract-ocr`, `-eng`, `-osd` and no optional language packs |
+| Profile from the previous 0.2.0 build (schema 13) | Migrated to 15; preferences (theme, Enter-to-send, temperature), a custom model reference and its settings, last-used model, a conversation, a memory and Local-only preserved; integrity and foreign keys clean; the model file untouched |
+| Profile from 0.1.0 (schema 5) | Migrated to 15 with its conversation intact |
+| Shortcut prerequisites | Installed desktop file with the app ID and `Exec` on `PATH` (portal Registry); `xdg-desktop-portal` recommended; binding itself is an owner check |
+
+The owner's active application and profile were not modified.
+
+### Final automated results
+
+- **Workspace:** 287 passed, 0 failed, 54 opt-in ignored (baseline 281 + 6
+  new: engine 2, desktop 4).
+- **Clippy** (release, workspace, all targets, `tauri/custom-protocol`,
+  `-D warnings`) and **rustfmt**: clean.
+- **Frontend:** 70 tests (one new), type-check and production build.
+- **WebView fixtures:** `unified_ipc_desktop_fixture`,
+  `providers_ipc_desktop_fixture` (7 steps) and
+  `glance_panel_desktop_fixture` (16 steps) passed.
+- **Native capture fixture:** passed (denial 1.46 s, fresh consent, portal
+  v5, BGRx 1280×800, 4 frames, quiescent at 308 ms, session closed in 5 ms,
+  permission store empty, OCR 169 ms).
+- **Repeated-capture fixture:** as tabled above.
+
+Not claimed: real GPUs or DMA-BUF producers, multiple monitors, HiDPI,
+KDE, wlroots, X11, any real provider (none was contacted) and owner
+interaction. Owner manual acceptance is pending:
+[v0.3.0 owner acceptance guide](v0.3.0-owner-acceptance.md).
+

@@ -32,6 +32,15 @@ OQ-13). It is not an approval, and no production capture code was written.**
 To reproduce, run from the repository root:
 `AGENT_REPO=$PWD unshare --user --map-root-user --net sh docs/feasibility-03-e/probe/session.sh docs/feasibility-03-e/probe sh docs/feasibility-03-e/probe/with-portal.sh python3 -I docs/feasibility-03-e/probe/portal_probe.py <out> '[{"persist":0,"action":"share"}]'`
 
+The production fixtures reuse this harness. `capture_driver.py` drives
+`capture::tests::portal_frame_overlay_and_ocr_in_a_headless_session`, and
+`capture_loop_driver.py` drives the repeated-capture fixture
+`capture::tests::back_to_back_captures_in_a_headless_session` (set
+`AGENT_CAPTURE_OUT` and `AGENT_CAPTURE_CYCLES`; `AGENT_CAPTURE_COMPETE=1`
+adds a competing screencast client). The loop driver opens no screencast of
+its own, because extra screencasts in the same compositor compete with the
+fixture's. See [stage 03-E](../stage-03-e-screen-intelligence.md#capture-reliability).
+
 ## Measurements
 
 ### Portal path (consent dialog, `OpenPipeWireRemote`, one frame)
