@@ -3,7 +3,7 @@
 ## Project direction
 
 - The project is a multimodal Personal Intelligence Layer. The approved
-  external blueprint (Blueprint v1.1, `local-first-ai-agent/blueprint/` in the
+  external blueprint (`local-first-ai-agent/blueprint/` in the
   project context repository) is authoritative for scope, architecture,
   invariants and decisions. If this file conflicts with it, follow the
   blueprint and raise the conflict.
