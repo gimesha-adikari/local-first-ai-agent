@@ -53,6 +53,37 @@ pub const PROVIDER_CONTROL: DataClass = DataClass {
     id: "core.provider-control/1",
     sensitivity: Sensitivity::Public,
 };
+pub const MODEL_ARTIFACT: DataClass = DataClass {
+    id: "core.model-artifact/1",
+    sensitivity: Sensitivity::Public,
+};
+/// Untrusted public web material: search results, public page URLs found
+/// through search, and text extracted from public webpages. It is public in
+/// origin but never trusted as instructions, and it does not declassify any
+/// personal input it is combined with.
+pub const PUBLIC_WEB: DataClass = DataClass {
+    id: "core.public-web/1",
+    sensitivity: Sensitivity::Public,
+};
+/// The source class of a file the user attached to a Chat message. Attached
+/// files are untrusted data from the user's device (Stage 04-D).
+pub const ATTACHMENT: DataClass = personal("core.attachment/1");
+/// Text extracted from an attached document, or recognized from an attached
+/// image. It also carries the attachment's other labels.
+pub const ATTACHMENT_TEXT: DataClass = personal("core.attachment-text/1");
+/// A validated, metadata-stripped image representation of an attachment.
+/// It is user-chosen file content, not a sensor capture.
+pub const ATTACHMENT_IMAGE: DataClass = personal("core.attachment-image/1");
+/// A camera snapshot the user explicitly captured and confirmed (Stage
+/// 04-E). Like a screen crop it is a raw sensor capture: it may show
+/// people, places and documents, and it never declassifies.
+pub const CAMERA_IMAGE: DataClass = DataClass {
+    id: "core.camera-image/1",
+    sensitivity: Sensitivity::RawSensor,
+};
+/// Text recognized from a camera snapshot. It also carries the snapshot's
+/// labels: recognition does not declassify.
+pub const CAMERA_TEXT: DataClass = personal("core.camera-text/1");
 pub const SECRET: DataClass = DataClass {
     id: "core.secret/1",
     sensitivity: Sensitivity::Secret,
@@ -86,6 +117,13 @@ impl Default for DataClasses {
             MODEL_OUTPUT,
             SYSTEM_TEXT,
             PROVIDER_CONTROL,
+            MODEL_ARTIFACT,
+            PUBLIC_WEB,
+            ATTACHMENT,
+            ATTACHMENT_TEXT,
+            ATTACHMENT_IMAGE,
+            CAMERA_IMAGE,
+            CAMERA_TEXT,
             SECRET,
         ])
     }

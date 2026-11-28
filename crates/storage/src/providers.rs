@@ -282,12 +282,11 @@ impl SqliteStore {
     pub fn intelligence_settings(&self) -> Result<IntelligenceSettings> {
         self.connection
             .query_row(
-                "SELECT local_only, active_provider FROM intelligence_settings WHERE id = 1",
+                "SELECT active_provider FROM intelligence_settings WHERE id = 1",
                 [],
                 |row| {
                     Ok(IntelligenceSettings {
-                        local_only: row.get(0)?,
-                        active_provider: row.get(1)?,
+                        active_provider: row.get(0)?,
                     })
                 },
             )
@@ -300,8 +299,8 @@ impl SqliteStore {
         }
         self.connection
             .execute(
-                "UPDATE intelligence_settings SET local_only = ?1, active_provider = ?2 WHERE id = 1",
-                params![settings.local_only, settings.active_provider],
+                "UPDATE intelligence_settings SET active_provider = ?1 WHERE id = 1",
+                [settings.active_provider],
             )
             .map_err(sql_error)?;
         Ok(())

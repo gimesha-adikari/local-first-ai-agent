@@ -38,7 +38,7 @@ void (async () => {
         budget: { monthlyTokens: 50000, monthlyCostMicros: null },
       },
     });
-    await call("set_intelligence_settings", { settings: { localOnly: false, activeProvider: null } });
+    await call("set_intelligence_settings", { settings: { activeProvider: null } });
     await call("memory_set_retrieval_enabled", { enabled: true });
     await call("memory_create", { content: "Synthetic memory: the orchard rainwater tanks hold 400 litres." });
     assert((await call("list_conversations", { query: "" })).length === 0, "Profile is not empty");

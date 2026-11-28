@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use agent_core::{
     capability::ImageInput,
-    classification::{Labels, SCREEN_IMAGE},
+    classification::{CAMERA_IMAGE, Labels, SCREEN_IMAGE},
     inference::{Cancellation, ErrorCode, InferenceError, Result},
     screen::Frame,
 };
@@ -22,15 +22,78 @@ use crate::{
     commands::Desktop,
 };
 
-/// The confirmed crop of this session.
+/// How the session's visual input was captured (Stage 04-E keeps the
+/// source of every crop so its classes never change).
+#[derive(Clone)]
+pub(crate) enum Facts {
+    Screen(CaptureRecord),
+    Camera(crate::camera::CameraRecord),
+}
+
+impl Facts {
+    fn source(&self) -> &'static str {
+        match self {
+            Self::Screen(_) => "screen",
+            Self::Camera(_) => "camera",
+        }
+    }
+
+    fn screen(&self) -> Option<CaptureRecord> {
+        match self {
+            Self::Screen(record) => Some(record.clone()),
+            Self::Camera(_) => None,
+        }
+    }
+
+    fn camera(&self) -> Option<crate::camera::CameraRecord> {
+        match self {
+            Self::Camera(record) => Some(record.clone()),
+            Self::Screen(_) => None,
+        }
+    }
+
+    fn image_labels(&self) -> Labels {
+        Labels::from_source(match self {
+            Self::Screen(_) => SCREEN_IMAGE,
+            Self::Camera(_) => CAMERA_IMAGE,
+        })
+    }
+
+    fn full_frame(&self) -> &'static str {
+        match self {
+            Self::Screen(_) => "released after region confirmation; never sent or stored",
+            Self::Camera(_) => {
+                "camera released before preview; the uncropped snapshot was discarded at confirmation; never sent or stored"
+            }
+        }
+    }
+}
+
+/// The confirmed crop of this session: a screen region or a camera snapshot.
 pub(super) struct ScreenCrop {
     pub id: String,
     pub png: Zeroizing<Vec<u8>>,
     pub width: u32,
     pub height: u32,
     pub region: RegionRecord,
-    pub capture: CaptureRecord,
+    pub capture: Facts,
     pub ocr: Option<OcrRecord>,
+}
+
+impl ScreenCrop {
+    fn info(&self) -> CropInfo {
+        CropInfo {
+            id: self.id.clone(),
+            width: self.width,
+            height: self.height,
+            bytes: self.png.len(),
+            image_eligible: self.png.len() <= agent_core::capability::MAX_IMAGE_BYTES,
+            region: self.region,
+            source: self.capture.source(),
+            capture: self.capture.screen(),
+            camera: self.capture.camera(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,21 +117,25 @@ pub struct CropInfo {
     bytes: usize,
     image_eligible: bool,
     region: RegionRecord,
-    capture: CaptureRecord,
+    source: &'static str,
+    capture: Option<CaptureRecord>,
+    camera: Option<crate::camera::CameraRecord>,
 }
 
-/// Screen facts attached to a result's receipt.
+/// Screen or camera facts attached to a result's receipt.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ScreenReceipt {
-    capture: CaptureRecord,
+    source: &'static str,
+    capture: Option<CaptureRecord>,
+    camera: Option<crate::camera::CameraRecord>,
     region: RegionRecord,
     ocr: Option<OcrRecord>,
     image_attached: bool,
     full_frame: &'static str,
 }
 
-fn crop_id() -> String {
+pub(crate) fn crop_id() -> String {
     let mut bytes = [0u8; 12];
     getrandom(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -92,7 +159,7 @@ fn capture_error(error: CaptureError) -> InferenceError {
     InferenceError::new(code, error.message())
 }
 
-fn encode(crop: &Frame) -> Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn encode(crop: &Frame) -> Result<Zeroizing<Vec<u8>>> {
     let failed =
         || InferenceError::new(ErrorCode::InvalidConfig, "The region could not be encoded.");
     let rgba = crop.rgba();
@@ -139,7 +206,7 @@ fn package(language: &str) -> String {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct OcrState {
+pub(crate) struct OcrState {
     available: bool,
     engine: Option<String>,
     languages: Vec<String>,
@@ -201,7 +268,11 @@ fn locale_language(locale: &str) -> Option<&'static str> {
     })
 }
 
-pub(super) fn ocr_state() -> OcrState {
+/// The recognition state with the shared language choice (Stage 04-E):
+/// `defaults` are the saved languages that are installed, or the locale's
+/// when none are saved. Screen regions, camera snapshots and attachments
+/// all start from these.
+pub(crate) fn ocr_state(settings: &agent_core::visual::VisualSettings) -> OcrState {
     let Some(tesseract) = tesseract() else {
         return OcrState {
             available: false,
@@ -230,6 +301,8 @@ pub(super) fn ocr_state() -> OcrState {
         defaults.push("eng".to_owned());
     }
     defaults.truncate(agent_tools::ocr::MAX_LANGUAGES);
+    let mut defaults = settings.effective_languages(&languages, &defaults);
+    defaults.truncate(agent_tools::ocr::MAX_LANGUAGES);
     OcrState {
         available: !languages.is_empty(),
         engine: Some(tesseract.engine().to_owned()),
@@ -238,6 +311,18 @@ pub(super) fn ocr_state() -> OcrState {
         languages,
         defaults,
     }
+}
+
+/// The installed recognizer and the shared language choice, for text in
+/// attached images and camera snapshots. Nothing is installed automatically.
+pub(crate) fn recognizer(
+    settings: &agent_core::visual::VisualSettings,
+) -> Option<(Tesseract, Vec<String>)> {
+    let state = ocr_state(settings);
+    if !state.available || state.defaults.is_empty() {
+        return None;
+    }
+    tesseract().map(|tesseract| (tesseract, state.defaults))
 }
 
 /// The desktop fixture's synthetic frame and region (test builds only).
@@ -291,7 +376,7 @@ pub async fn glance_capture(window: WebviewWindow, pane: State<'_, Panel>) -> Re
                     frame_width,
                     frame_height,
                 },
-                capture: record,
+                capture: Facts::Screen(record),
                 ocr: None,
             });
         }
@@ -320,7 +405,7 @@ pub async fn glance_capture(window: WebviewWindow, pane: State<'_, Panel>) -> Re
                 frame_width,
                 frame_height,
             },
-            capture: record,
+            capture: Facts::Screen(record),
             ocr: None,
         })
     }
@@ -336,16 +421,10 @@ pub async fn glance_capture(window: WebviewWindow, pane: State<'_, Panel>) -> Re
         let _ = present(&reopen, None);
     });
     let crop = result?;
-    let info = CropInfo {
-        id: crop.id.clone(),
-        width: crop.width,
-        height: crop.height,
-        bytes: crop.png.len(),
-        image_eligible: crop.png.len() <= agent_core::capability::MAX_IMAGE_BYTES,
-        region: crop.region,
-        capture: crop.capture.clone(),
-    };
-    glance.data()?.screen = Some(crop);
+    let info = crop.info();
+    let mut data = glance.data()?;
+    data.camera = None;
+    data.screen = Some(crop);
     Ok(info)
 }
 
@@ -358,6 +437,238 @@ pub fn glance_capture_clear(window: WebviewWindow, pane: State<'_, Panel>) -> Re
     }
     data.screen = None;
     Ok(())
+}
+
+/// Explicit gesture in the panel: take one camera snapshot and keep it for
+/// preview and crop. Nothing is processed until the user confirms it.
+#[tauri::command]
+pub async fn glance_camera(
+    window: WebviewWindow,
+    pane: State<'_, Panel>,
+    desktop: State<'_, Desktop>,
+    device: Option<String>,
+) -> Result<crate::camera::Taken> {
+    let glance = current(&window, &pane)?;
+    let cancellation = Cancellation::default();
+    {
+        let mut data = glance.data()?;
+        if data.reading || data.operation.is_some() {
+            return Err(busy());
+        }
+        data.operation = Some(cancellation.clone());
+        data.camera = None;
+    }
+    // Ending the session cancels the snapshot.
+    let stop = cancellation.clone();
+    let owner = std::sync::Arc::clone(&glance);
+    let watch = tauri::async_runtime::spawn(async move {
+        while !stop.is_cancelled() {
+            if owner.closed.is_cancelled() {
+                stop.cancel();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    });
+    let result = crate::camera::take(&window, &desktop.engine, device, cancellation.clone()).await;
+    watch.abort();
+    let mut data = glance.data()?;
+    data.operation = None;
+    if glance.closed.is_cancelled() {
+        return Err(closed());
+    }
+    match result? {
+        Err(cameras) => Ok(crate::camera::Taken::Choose { cameras }),
+        Ok(pending) => {
+            let info = Box::new(pending.info());
+            data.camera = Some(pending);
+            Ok(crate::camera::Taken::Snapshot { snapshot: info })
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraConfirm {
+    id: String,
+    region: Option<agent_core::screen::Region>,
+}
+
+/// Use the previewed snapshot, or the area the user chose, as this
+/// session's image. The uncropped frame is discarded here.
+#[tauri::command]
+pub async fn glance_camera_confirm(
+    window: WebviewWindow,
+    pane: State<'_, Panel>,
+    request: CameraConfirm,
+) -> Result<CropInfo> {
+    let glance = current(&window, &pane)?;
+    let pending = {
+        let mut data = glance.data()?;
+        if data.reading || data.operation.is_some() {
+            return Err(busy());
+        }
+        data.camera
+            .take()
+            .filter(|pending| pending.id == request.id && !pending.expired())
+            .ok_or_else(|| {
+                InferenceError::new(
+                    ErrorCode::InvalidConfig,
+                    "That snapshot is no longer available. Take a new one.",
+                )
+            })?
+    };
+    let (frame_width, frame_height) = (pending.frame.width(), pending.frame.height());
+    let (crop, region) = pending.crop(request.region)?;
+    let record = pending.record.clone();
+    drop(pending);
+    let png = tauri::async_runtime::spawn_blocking(move || encode(&crop))
+        .await
+        .map_err(|_| closed())??;
+    let crop = ScreenCrop {
+        id: crop_id(),
+        width: region.width,
+        height: region.height,
+        png,
+        region: RegionRecord {
+            region,
+            frame_width,
+            frame_height,
+        },
+        capture: Facts::Camera(record),
+        ocr: None,
+    };
+    let info = crop.info();
+    let mut data = glance.data()?;
+    if glance.closed.is_cancelled() {
+        return Err(closed());
+    }
+    data.screen = Some(crop);
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn glance_camera_discard(
+    window: WebviewWindow,
+    pane: State<'_, Panel>,
+    id: String,
+) -> Result<()> {
+    let glance = current(&window, &pane)?;
+    let mut data = glance.data()?;
+    if data.camera.as_ref().is_some_and(|pending| pending.id == id) {
+        data.camera = None;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchRequest {
+    query: String,
+    provider: Option<agent_core::research::SearchProviderKind>,
+    /// The query started from the panel's answer (a model's description).
+    #[serde(default)]
+    described: bool,
+}
+
+/// Visual-assisted search: send the reviewed query, and only the query, to
+/// the configured search provider. The query carries the classes of what
+/// it came from: recognized screen or camera text, clipboard text, and a
+/// model's description of the image when used.
+#[tauri::command]
+pub async fn glance_search(
+    window: WebviewWindow,
+    pane: State<'_, Panel>,
+    desktop: State<'_, Desktop>,
+    request: SearchRequest,
+) -> Result<engine::research::VisualSearch> {
+    let glance = current(&window, &pane)?;
+    let cancellation = Cancellation::default();
+    let labels = {
+        let mut data = glance.data()?;
+        if data.reading || data.operation.is_some() {
+            return Err(busy());
+        }
+        let labels = if request.described {
+            data.answer
+                .as_ref()
+                .filter(|answer| answer.error.is_none())
+                .and_then(|answer| answer.receipt.as_ref())
+                .map(|receipt| receipt.output_labels.clone())
+                .ok_or_else(|| {
+                    InferenceError::new(
+                        ErrorCode::InvalidConfig,
+                        "Complete a visual result before using it to search.",
+                    )
+                })?
+        } else {
+            engine::chat::glance::prompt_labels(origin(&data))
+        };
+        data.operation = Some(cancellation.clone());
+        data.search = None;
+        labels
+    };
+    let result = desktop
+        .engine
+        .visual_search(&request.query, request.provider, labels, cancellation)
+        .await;
+    let mut data = glance.data()?;
+    data.operation = None;
+    if glance.closed.is_cancelled() {
+        return Err(closed());
+    }
+    let search = result?;
+    data.search = Some(search.clone());
+    Ok(search)
+}
+
+/// Open one listed search result in the default browser on an explicit
+/// click. The link comes from the session's results and is revalidated.
+#[tauri::command]
+pub async fn glance_search_open(
+    window: WebviewWindow,
+    pane: State<'_, Panel>,
+    index: usize,
+) -> Result<()> {
+    let glance = current(&window, &pane)?;
+    let url = glance
+        .data()?
+        .search
+        .as_ref()
+        .and_then(|search| search.results.get(index))
+        .map(|result| result.url.clone())
+        .ok_or_else(|| InferenceError::new(ErrorCode::InvalidConfig, "Choose a listed result."))?;
+    let url = engine::research::validated_link(&url)?;
+    let (reply, opened) = tokio::sync::oneshot::channel();
+    window
+        .app_handle()
+        .run_on_main_thread(move || {
+            let launched = gtk::gio::AppInfo::launch_default_for_uri(
+                &url,
+                None::<&gtk::gio::AppLaunchContext>,
+            );
+            let _ = reply.send(launched.is_ok());
+        })
+        .map_err(|_| closed())?;
+    match tokio::time::timeout(std::time::Duration::from_secs(10), opened).await {
+        Ok(Ok(true)) => Ok(()),
+        _ => Err(InferenceError::new(
+            ErrorCode::NotFound,
+            "The link couldn't be opened in your browser.",
+        )),
+    }
+}
+
+/// Save the shared OCR languages and translation target from the panel.
+#[tauri::command]
+pub fn glance_visual_settings(
+    window: WebviewWindow,
+    pane: State<'_, Panel>,
+    desktop: State<'_, Desktop>,
+    settings: agent_core::visual::VisualSettings,
+) -> Result<()> {
+    current(&window, &pane)?;
+    desktop.engine.save_visual_settings(&settings)
 }
 
 #[derive(Deserialize)]
@@ -446,7 +757,10 @@ pub async fn glance_ocr(
         .filter(|crop| crop.id == request.crop)
         .ok_or_else(closed)?;
     crop.ocr = Some(record.clone());
-    data.screen_text = true;
+    match crop.capture {
+        Facts::Screen(_) => data.screen_text = true,
+        Facts::Camera(_) => data.camera_text = true,
+    }
     Ok(OcrResult {
         text: output.text,
         record,
@@ -455,13 +769,11 @@ pub async fn glance_ocr(
 
 /// How the request's text is labelled: every source this session read from
 /// counts, so editing never removes a classification.
-pub(super) fn origin(data: &super::Contents, text: &str) -> Origin {
-    match (data.screen_text, &data.clipboard) {
-        (true, Some(_)) => Origin::ScreenAndClipboard,
-        (true, None) => Origin::Screen,
-        (false, Some(captured)) if captured == text => Origin::Clipboard,
-        (false, Some(_)) => Origin::EditedClipboard,
-        (false, None) => Origin::Manual,
+pub(super) fn origin(data: &super::Contents) -> Origin {
+    Origin {
+        clipboard: data.clipboard.is_some(),
+        screen: data.screen_text,
+        camera: data.camera_text,
     }
 }
 
@@ -477,7 +789,7 @@ pub(super) fn attachment(data: &super::Contents, input: &Input) -> Result<Option
         .ok_or_else(|| {
             InferenceError::new(
                 ErrorCode::PolicyDenied,
-                "The screen region changed. Review the current region again.",
+                "The image changed. Review the current region or snapshot again.",
             )
         })?;
     let image = ImageInput::new(crop.png.to_vec()).ok_or_else(|| {
@@ -489,18 +801,20 @@ pub(super) fn attachment(data: &super::Contents, input: &Input) -> Result<Option
     Ok(Some(Attachment {
         image,
         size: (crop.width, crop.height),
-        labels: Labels::from_source(SCREEN_IMAGE),
+        labels: crop.capture.image_labels(),
     }))
 }
 
 pub(super) fn receipt(data: &super::Contents, image: bool) -> Option<ScreenReceipt> {
     let crop = data.screen.as_ref()?;
-    (image || data.screen_text).then(|| ScreenReceipt {
-        capture: crop.capture.clone(),
+    (image || data.screen_text || data.camera_text).then(|| ScreenReceipt {
+        source: crop.capture.source(),
+        capture: crop.capture.screen(),
+        camera: crop.capture.camera(),
         region: crop.region,
         ocr: crop.ocr.clone(),
         image_attached: image,
-        full_frame: "released after region confirmation; never sent or stored",
+        full_frame: crop.capture.full_frame(),
     })
 }
 
@@ -516,7 +830,7 @@ pub fn glance_estimate(
     let attachment = attachment(&data, &input)?;
     desktop
         .engine
-        .estimate_glance(&input, origin(&data, input.text()), attachment.as_ref())
+        .estimate_glance(&input, origin(&data), attachment.as_ref())
 }
 
 /// `glance-crop://localhost/<id>.png`: the confirmed crop of the current
@@ -553,12 +867,23 @@ pub fn crop_protocol(
     let Ok(data) = glance.data() else {
         return refuse(404);
     };
-    match data.screen.as_ref().filter(|crop| crop.id == id) {
-        Some(crop) => tauri::http::Response::builder()
+    let pending = data
+        .camera
+        .as_ref()
+        .filter(|pending| pending.id == id && !pending.expired())
+        .map(|pending| &pending.png);
+    match data
+        .screen
+        .as_ref()
+        .filter(|crop| crop.id == id)
+        .map(|crop| &crop.png)
+        .or(pending)
+    {
+        Some(png) => tauri::http::Response::builder()
             .status(200)
             .header("Content-Type", "image/png")
             .header("Cache-Control", "no-store")
-            .body(crop.png.to_vec())
+            .body(png.to_vec())
             .unwrap_or_else(|_| refuse(500)),
         None => refuse(404),
     }
@@ -605,7 +930,7 @@ mod tests {
                         frame_width: width * 2,
                         frame_height: height * 2,
                     },
-                    capture: capture::fixture_record(width * 2, height * 2),
+                    capture: Facts::Screen(capture::fixture_record(width * 2, height * 2)),
                     ocr: None,
                 }
             }),
@@ -623,27 +948,25 @@ mod tests {
 
     #[test]
     fn text_keeps_every_source_label_the_session_used() {
-        assert!(matches!(
-            origin(&session(false, None, None), "x"),
-            Origin::Manual
-        ));
-        assert!(matches!(
-            origin(&session(false, Some("x"), None), "x"),
-            Origin::Clipboard
-        ));
-        assert!(matches!(
-            origin(&session(false, Some("x"), None), "edited"),
-            Origin::EditedClipboard
-        ));
+        assert_eq!(origin(&session(false, None, None)), Origin::MANUAL);
+        // Clipboard text keeps its class whether or not it was edited.
+        assert_eq!(origin(&session(false, Some("x"), None)), Origin::CLIPBOARD);
         // Editing or replacing recognized text never drops its screen labels.
-        assert!(matches!(
-            origin(&session(true, None, None), "anything"),
-            Origin::Screen
-        ));
-        assert!(matches!(
-            origin(&session(true, Some("x"), None), "x"),
-            Origin::ScreenAndClipboard
-        ));
+        assert_eq!(origin(&session(true, None, None)), Origin::SCREEN);
+        let both = origin(&session(true, Some("x"), None));
+        assert!(both.screen && both.clipboard && !both.camera);
+        // Camera text is labelled as camera text, alongside earlier sources.
+        let mut camera = session(true, None, None);
+        camera.camera_text = true;
+        let labels = engine::chat::glance::prompt_labels(origin(&camera));
+        for class in [
+            agent_core::classification::SCREEN_TEXT,
+            agent_core::classification::CAMERA_TEXT,
+            agent_core::classification::CAMERA_IMAGE,
+            agent_core::classification::USER_INPUT,
+        ] {
+            assert!(labels.contains(class), "{}", class.id);
+        }
     }
 
     #[test]

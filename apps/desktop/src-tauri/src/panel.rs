@@ -68,8 +68,15 @@ struct Contents {
     remembered: bool,
     /// The confirmed screen crop (encoded, wiped on drop).
     screen: Option<screen::ScreenCrop>,
-    /// Text in this session was recognized from the crop.
+    /// Text in this session was recognized from a screen crop.
     screen_text: bool,
+    /// Text in this session was recognized from a camera snapshot.
+    camera_text: bool,
+    /// A camera snapshot waiting for preview and crop (Stage 04-E). Its
+    /// full frame exists only here and is wiped when the session ends.
+    camera: Option<crate::camera::Pending>,
+    /// The latest visual-assisted search results, for opening a result.
+    search: Option<engine::research::VisualSearch>,
 }
 
 impl Glance {
@@ -327,9 +334,18 @@ pub async fn glance_state(
     if glance.closed.is_cancelled() {
         return Err(closed());
     }
+    let visual = desktop.engine.visual_settings()?;
+    let research = desktop.engine.web_research().await?;
+    let provider = research.settings.provider;
     Ok(HostState {
         engine: state,
-        ocr: screen::ocr_state(),
+        ocr: screen::ocr_state(&visual),
+        search: SearchState {
+            provider,
+            name: provider.map(|provider| provider.label()),
+            personal_use_only: provider == Some(agent_core::research::SearchProviderKind::Purili),
+        },
+        visual,
     })
 }
 
@@ -338,6 +354,18 @@ pub struct HostState {
     #[serde(flatten)]
     engine: PanelState,
     ocr: screen::OcrState,
+    search: SearchState,
+    visual: agent_core::visual::VisualSettings,
+}
+
+/// The configured provider for visual-assisted search.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchState {
+    provider: Option<agent_core::research::SearchProviderKind>,
+    name: Option<&'static str>,
+    /// Purili: personal, non-commercial use only; results are transient.
+    personal_use_only: bool,
 }
 
 /// A result with the screen facts that apply to it.
@@ -442,7 +470,7 @@ pub async fn glance_run(
         data.answer = None;
         data.remembered = false;
         data.operation = Some(cancellation.clone());
-        (screen::origin(&data, input.text()), attachment, receipt)
+        (screen::origin(&data), attachment, receipt)
     };
     let events = Arc::new(Deltas {
         owner: Arc::clone(&glimpse),

@@ -41,6 +41,7 @@ pub(super) struct Config {
     tls: Arc<rustls::ClientConfig>,
     limits: Limits,
     slots: Arc<Semaphore>,
+    artifact_slots: Arc<Semaphore>,
     connections: AtomicU64,
 }
 
@@ -61,6 +62,7 @@ impl Config {
             resolver: config.resolver,
             tls: Arc::new(tls),
             slots: Arc::new(Semaphore::new(config.limits.concurrency.max(1))),
+            artifact_slots: Arc::new(Semaphore::new(1)),
             limits: config.limits,
             connections: AtomicU64::new(0),
         }
@@ -88,6 +90,24 @@ fn denied(denial: Denial) -> Failure {
 }
 
 impl Job {
+    fn limits(&self) -> Limits {
+        let mut limits = self.config.limits;
+        if let Some(target) = &self.request.artifact_target {
+            limits.max_body = target.max_body;
+            limits.total = super::artifact::TRANSFER_LIMIT;
+            limits.head = std::time::Duration::from_secs(30);
+            limits.idle = limits.head;
+            limits.chunk = 64 * 1024;
+        }
+        if self.request.page_target.is_some() {
+            limits.max_body = limits.max_body.min(super::page::MAX_BODY);
+            limits.total = limits.total.min(super::page::TOTAL);
+            limits.head = limits.head.min(super::page::HEAD);
+            limits.idle = limits.idle.min(super::page::HEAD);
+        }
+        limits
+    }
+
     /// Before the commit: every admission condition, without consuming.
     fn admitted(&self) -> Result<(), Failure> {
         self.policy
@@ -164,7 +184,7 @@ impl Worker {
             share: job.share,
         };
         self.handle.spawn(async move {
-            let limits = job.config.limits;
+            let limits = job.limits();
             let mut head_tx = Some(head_tx);
             let mut body_tx = body_tx;
             let outcome = tokio::time::timeout(limits.total, run(&job, &mut head_tx, &mut body_tx))
@@ -185,7 +205,7 @@ impl Worker {
             drop(done_tx);
         });
         match head_rx.await {
-            Ok(Ok((status, content_type))) => {
+            Ok(Ok((status, content_type, artifact_head))) => {
                 if let Err(failure) = authorization.check() {
                     drop(body_rx);
                     let _ = done_rx.await;
@@ -199,6 +219,7 @@ impl Worker {
                     ended: false,
                     status,
                     content_type,
+                    artifact_head,
                     body: body_rx,
                     done: Some(done_rx),
                     record,
@@ -230,7 +251,7 @@ impl Drop for Worker {
     }
 }
 
-type Head = (u16, Option<String>);
+type Head = (u16, Option<String>, Option<http::Head>);
 
 /// Record socket progress immediately, including when the outer timeout drops a pending write.
 struct Counted {
@@ -307,7 +328,7 @@ fn after(duration: std::time::Duration) -> Option<Instant> {
 }
 
 async fn resolve(job: &Job) -> Result<Vec<IpAddr>, Failure> {
-    let limits = &job.config.limits;
+    let limits = &job.limits();
     let endpoint = job.request.destination().endpoint();
     let scope = job.request.destination().scope();
     let addresses = match endpoint.host() {
@@ -339,7 +360,7 @@ async fn resolve(job: &Job) -> Result<Vec<IpAddr>, Failure> {
 }
 
 async fn connect(job: &Job, addresses: &[IpAddr]) -> Result<TcpStream, Failure> {
-    let limits = &job.config.limits;
+    let limits = &job.limits();
     let port = job.request.destination().endpoint().port();
     for address in addresses {
         job.admitted()?;
@@ -373,9 +394,14 @@ async fn run(
     head_tx: &mut Option<oneshot::Sender<Result<Head, Failure>>>,
     body_tx: &mut mpsc::Sender<Result<Vec<u8>, Failure>>,
 ) -> Result<(), Failure> {
-    let limits = job.config.limits;
+    let limits = job.limits();
     // Queue: wait for a slot while the operation stays admissible.
-    let slots = Arc::clone(&job.config.slots);
+    let artifact = job.request.artifact_target.as_ref();
+    let slots = Arc::clone(if artifact.is_some() {
+        &job.config.artifact_slots
+    } else {
+        &job.config.slots
+    });
     let _slot = guarded(&limits, None, || job.admitted(), slots.acquire_owned())
         .await?
         .map_err(|_| Failure::Stopped)?;
@@ -441,14 +467,27 @@ async fn run(
 
     let binding = job.request.binding();
     let path = format!("{}{}", endpoint.base_path(), binding.route.as_str());
-    let request = http::encode_request(
-        binding.method.as_str(),
-        &endpoint.authority(),
-        &path,
-        job.request.content_type,
-        &job.request.body,
-        credential.as_ref(),
-    );
+    #[cfg(test)]
+    let path = match &job.request.query {
+        Some(query) => format!("{path}?{query}"),
+        None => path,
+    };
+    let request = if let Some(target) = artifact {
+        http::encode_artifact(&endpoint.authority(), target)
+    } else if let Some(target) = &job.request.page_target {
+        http::encode_page(&endpoint.authority(), &target.path)
+    } else {
+        http::encode_request(
+            binding.method.as_str(),
+            &endpoint.authority(),
+            &path,
+            job.request.content_type,
+            &job.request.body,
+            credential
+                .as_ref()
+                .zip(destination.credential().map(|binding| binding.header())),
+        )
+    };
     drop(credential);
 
     // Last check and consumption of the sharing grant, serialized with
@@ -479,7 +518,7 @@ async fn run(
     let mut buffer = Vec::with_capacity(8 * 1024);
     let head_deadline = after(limits.head);
     let head = loop {
-        if let Some(head) = http::parse_head(&mut buffer, limits.max_head)? {
+        if let Some(head) = http::parse_head(&mut buffer, limits.max_head, artifact.is_some())? {
             break head;
         }
         if head_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -490,22 +529,32 @@ async fn run(
         }
     };
     job.live()?;
-    if (300..400).contains(&head.status) {
+    if artifact.is_none() && (300..400).contains(&head.status) {
         return Err(Failure::Redirect {
             status: head.status,
             location: head.location,
         });
     }
-    let mut decoder = Decoder::new(head.framing, limits.max_body)?;
+    let framing = head.framing;
+    let discard = artifact.is_some() && !matches!(head.status, 200 | 206);
+    let mut decoder = Decoder::new(
+        if discard { Framing::Empty } else { framing },
+        limits.max_body,
+    )?;
+    let status = head.status;
+    let content_type = head.content_type.clone();
     match head_tx.take() {
         Some(sender) => {
-            if sender.send(Ok((head.status, head.content_type))).is_err() {
+            if sender
+                .send(Ok((status, content_type, artifact.map(|_| head))))
+                .is_err()
+            {
                 return Ok(());
             }
         }
         None => return Err(Failure::Stopped),
     }
-    if head.framing == Framing::Empty {
+    if discard || framing == Framing::Empty {
         return Ok(());
     }
     let mut piece = Vec::with_capacity(limits.chunk);
@@ -533,9 +582,33 @@ async fn run(
             }
         }
         if decoder.is_done() {
+            if artifact.is_some() && !buffer.is_empty() {
+                return Err(Failure::Protocol);
+            }
+            if artifact.is_some() {
+                // Connection: close disallows pipelining. Detect extra bytes
+                // even when they arrive in a separate TLS record.
+                let mut extra = [0u8; 1];
+                match guarded(
+                    &limits,
+                    after(limits.idle),
+                    || job.live(),
+                    stream.read(&mut extra),
+                )
+                .await?
+                {
+                    Ok(0) => {}
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+                    Ok(_) => return Err(Failure::Protocol),
+                    Err(_) => return Err(Failure::Io),
+                }
+            }
             return Ok(());
         }
         if read_some(&mut stream, &mut buffer, &limits, job).await? == 0 {
+            if artifact.is_some() && matches!(framing, Framing::Length(_)) {
+                return Err(Failure::Io);
+            }
             decoder.finish_at_eof()?;
             return Ok(());
         }
@@ -543,12 +616,12 @@ async fn run(
 }
 
 /// A ready socket may wake before the next liveness tick. Order each
-/// non-blocking write/flush poll against the same lock used by restriction.
+/// non-blocking write/flush poll against the same lock used by grant revocation.
 async fn guarded_write(
     job: &Job,
     write: impl std::future::Future<Output = io::Result<()>>,
 ) -> Result<(), Failure> {
-    let limits = &job.config.limits;
+    let limits = &job.limits();
     let mut write = std::pin::pin!(write);
     let poll = std::future::poll_fn(|cx| {
         match job
@@ -578,7 +651,7 @@ async fn read_some(
     )
     .await?
     .map_err(|error| {
-        if error.kind() == io::ErrorKind::UnexpectedEof {
+        if error.kind() == io::ErrorKind::UnexpectedEof && job.request.artifact_target.is_none() {
             Failure::Protocol
         } else {
             Failure::Io

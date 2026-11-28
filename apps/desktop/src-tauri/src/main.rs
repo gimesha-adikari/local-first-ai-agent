@@ -1,18 +1,25 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod attachments;
 mod bundled_model;
+mod camera;
 mod capture;
 mod chat_context;
 mod commands;
 mod credentials;
+mod database_keyring;
+mod database_startup;
 #[cfg(all(test, target_os = "linux"))]
 mod desktop_acceptance;
+mod downloads;
 mod knowledge;
+mod model_files;
 mod panel;
 mod platform;
 mod portal_bus;
 mod providers;
+mod research;
 mod semantic;
 mod summon;
 
@@ -24,36 +31,6 @@ use engine::Engine;
 use inference::{InferenceWorker, LlamaProvider};
 use storage::SqliteStore;
 use tauri::Manager;
-
-fn prepare_database(path: &Path) -> std::io::Result<()> {
-    let directory = path.parent().expect("database directory");
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(directory)?;
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(path) {
-        Ok(_) => Ok(()),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::AlreadyExists
-                && path.symlink_metadata()?.is_file() =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
 
 fn main() {
     let instance = match summon::claim() {
@@ -68,6 +45,7 @@ fn main() {
         tauri::Builder::default(),
         || InferenceWorker::spawn(LlamaProvider::default),
         Some(instance),
+        database_startup::open_native,
     );
 }
 
@@ -76,26 +54,31 @@ fn run_desktop(
     builder: tauri::Builder<tauri::Wry>,
     spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
 ) {
-    run_desktop_instance(builder, spawn_worker, None)
+    run_desktop_instance(builder, spawn_worker, None, database_startup::open_fixture)
 }
 
 fn run_desktop_instance(
     builder: tauri::Builder<tauri::Wry>,
     spawn_worker: impl FnOnce() -> agent_core::inference::Result<InferenceWorker> + Send + 'static,
     instance: Option<summon::Instance>,
+    open_database: fn(&Path) -> Option<(SqliteStore, database_startup::DatabaseAccess)>,
 ) {
     builder
         .register_uri_scheme_protocol("glance-crop", panel::crop_protocol)
+        .register_uri_scheme_protocol("attachment-preview", attachments::preview_protocol)
+        .register_uri_scheme_protocol("camera-preview", camera::preview_protocol)
         .setup(move |app| {
             let path = app
                 .path()
                 .app_local_data_dir()?
                 .join("chat/conversations.sqlite3");
-            prepare_database(&path)?;
-            let database = SqliteStore::open(&path)?;
+            let Some((database, access)) = open_database(&path) else {
+                app.handle().exit(1);
+                return Ok(());
+            };
             let worker = Arc::new(spawn_worker()?);
             let engine = Arc::new(Engine::with_network(
-                Arc::new(platform::TauriPlatform),
+                Arc::new(platform::TauriPlatform(app.handle().clone())),
                 worker,
                 database,
                 path,
@@ -107,6 +90,16 @@ fn run_desktop_instance(
             );
             app.manage(Desktop { engine, agent });
             app.manage(panel::Panel::default());
+            app.manage(camera::CameraDesk::default());
+            app.manage(access);
+            let main_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .expect("main window configuration");
+            tauri::WebviewWindowBuilder::from_config(app, main_config)?.build()?;
             panel::prewarm(app.handle());
             summon::install(app.handle(), instance);
             Ok(())
@@ -127,7 +120,14 @@ fn run_desktop_instance(
             panel::screen::glance_capture_clear,
             panel::screen::glance_ocr,
             panel::screen::glance_estimate,
+            panel::screen::glance_camera,
+            panel::screen::glance_camera_confirm,
+            panel::screen::glance_camera_discard,
+            panel::screen::glance_search,
+            panel::screen::glance_search_open,
+            panel::screen::glance_visual_settings,
             bootstrap,
+            database_startup::database_recovery_key,
             list_conversations,
             get_conversation,
             create_conversation,
@@ -142,6 +142,12 @@ fn run_desktop_instance(
             stop_generation,
             choose_model,
             list_models,
+            downloads::model_catalog,
+            downloads::start_model_download,
+            downloads::cancel_model_download,
+            downloads::finish_model_installation,
+            downloads::remove_model_download,
+            downloads::use_downloaded_embedding,
             load_model,
             save_model_settings,
             reset_model_settings,
@@ -198,6 +204,25 @@ fn run_desktop_instance(
             providers::provider_delete_credential,
             providers::intelligence_settings,
             providers::set_intelligence_settings,
+            research::web_research_settings,
+            research::web_research_save,
+            research::web_research_enter_key,
+            research::web_research_delete_key,
+            research::chat_web_research,
+            research::web_research_open,
+            attachments::attachment_choose,
+            attachments::attachment_list,
+            attachments::attachment_cancel,
+            attachments::attachment_remove,
+            attachments::attachment_set_retention,
+            attachments::chat_attachment_evidence,
+            attachments::attachment_text,
+            camera::camera_capture,
+            camera::camera_cancel,
+            camera::camera_discard,
+            camera::camera_attach,
+            camera::visual_settings,
+            camera::visual_settings_save,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the desktop application");

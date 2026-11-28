@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn registration_never_registers_unverified_resources() {
         let spec = fixture_spec();
-        let mut db = storage::SqliteStore::open(Path::new(":memory:")).unwrap();
+        let mut db = storage::SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
         for verification in [Verification::Missing, Verification::Corrupted] {
             let result = register(&mut db, &spec, verification).unwrap();
             assert!(result.model.is_none() && !result.auto_load);
@@ -472,7 +472,8 @@ mod tests {
         let old_path = old.0.join(spec.resource);
         let retained_path = retained.0.join(spec.resource);
         fs::write(&old_path, b"synthetic gguf").unwrap();
-        let mut db = storage::SqliteStore::open(&old.0.join("profile.sqlite3")).unwrap();
+        let mut db =
+            storage::SqliteStore::open_test_fixture(&old.0.join("profile.sqlite3")).unwrap();
         let legacy = register(&mut db, &spec, verify(&spec, &old.0, &old.0))
             .unwrap()
             .model
@@ -490,7 +491,8 @@ mod tests {
 
         // Mirror the package upgrade: the original package path disappears.
         fs::rename(&old_path, &retained_path).unwrap();
-        let mut db = storage::SqliteStore::open(&old.0.join("profile.sqlite3")).unwrap();
+        let mut db =
+            storage::SqliteStore::open_test_fixture(&old.0.join("profile.sqlite3")).unwrap();
         let verified = verify_installed(&spec, &old.0, Some(&retained.0), &old.0);
         let upgraded = register(&mut db, &spec, verified).unwrap().model.unwrap();
         assert_eq!(upgraded.id, legacy.id);
@@ -574,7 +576,7 @@ mod tests {
     #[ignore = "uses AGENT_PROFILE_DB_COPY, a scratch copy of a real profile database"]
     fn real_profile_copy_collapses_duplicate_models() {
         let path = PathBuf::from(std::env::var_os("AGENT_PROFILE_DB_COPY").unwrap());
-        let store = Mutex::new(storage::SqliteStore::open(&path).unwrap());
+        let store = Mutex::new(storage::SqliteStore::open_test_fixture(&path).unwrap());
         let describe = |store: &Mutex<storage::SqliteStore>| {
             store
                 .lock()
@@ -623,7 +625,8 @@ mod tests {
         assert_eq!(content_key(&a).unwrap(), content_key(&b).unwrap());
         let original = PathBuf::from(std::env::var_os("AGENT_TEST_MODEL").unwrap());
         let copy = PathBuf::from(std::env::var_os("AGENT_TEST_MODEL_COPY").unwrap());
-        let store = Mutex::new(storage::SqliteStore::open(Path::new(":memory:")).unwrap());
+        let store =
+            Mutex::new(storage::SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap());
         {
             let mut db = store.lock().unwrap();
             for (path, name) in [

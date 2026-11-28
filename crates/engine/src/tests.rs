@@ -79,18 +79,20 @@ impl Platform for QueuedChat {
 /// What the scripted provider saw for one generation.
 #[derive(Clone, Debug)]
 pub(crate) struct Seen {
-    prompt: String,
-    system: String,
-    history_turns: usize,
-    evidence: Option<Vec<String>>,
-    memories: Vec<String>,
+    pub(crate) prompt: String,
+    pub(crate) system: String,
+    pub(crate) history_turns: usize,
+    pub(crate) evidence: Option<Vec<String>>,
+    pub(crate) memories: Vec<String>,
+    /// Evidence instructions the adapter appends to the system prompt.
+    pub(crate) instructions: String,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct Script(Arc<Mutex<Vec<Seen>>>);
 
 impl Script {
-    fn seen(&self) -> Vec<Seen> {
+    pub(crate) fn seen(&self) -> Vec<Seen> {
         self.0.lock().unwrap().clone()
     }
 }
@@ -130,6 +132,11 @@ impl InferenceProvider for Scripted {
                 .context
                 .as_ref()
                 .map_or_else(Vec::new, |c| c.memories.clone()),
+            instructions: request.context.as_ref().map_or_else(String::new, |c| {
+                let mut text = String::new();
+                c.append_system_instructions(&mut text);
+                text
+            }),
         });
         if let Some(observer) = &request.context_observer {
             observer.decoded(
@@ -140,7 +147,12 @@ impl InferenceProvider for Scripted {
                 0,
             )?;
         }
-        let reason = if request.prompt.contains("wait") {
+        let reason = if let Some(output) =
+            crate::research_tests::model_output(&request.history.system, &request.prompt)
+        {
+            emit(TextDelta { text: output })?;
+            FinishReason::EndOfGeneration
+        } else if request.prompt.contains("wait") {
             emit(TextDelta {
                 text: "Partial".into(),
             })?;
@@ -157,6 +169,12 @@ impl InferenceProvider for Scripted {
                 ErrorCode::GenerationFailed,
                 "Scripted failure.",
             ));
+        } else if request.prompt.contains("cite") {
+            // Valid, out-of-range and malformed markers for citation checks.
+            emit(TextDelta {
+                text: "Opened in 2026 [S1]. Also [S7] and [S2, S9].".into(),
+            })?;
+            FinishReason::EndOfGeneration
         } else if request.prompt == "Truncate this answer" {
             emit(TextDelta {
                 text: "Prefix".into(),
@@ -198,7 +216,7 @@ impl ChatEventSink for Recorder {
 }
 
 impl Recorder {
-    fn kinds(&self) -> Vec<String> {
+    pub(crate) fn kinds(&self) -> Vec<String> {
         self.0
             .lock()
             .unwrap()
@@ -225,7 +243,7 @@ fn harness_with_platform(platform: Arc<dyn Platform>) -> Harness {
     let engine = Engine::new(
         platform,
         Arc::new(worker),
-        SqliteStore::open(Path::new(":memory:")).unwrap(),
+        SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap(),
         ":memory:".into(),
     )
     .unwrap();
@@ -1085,6 +1103,7 @@ impl ChatEventSink for PanickingSink {
             ChatEvent::Started { .. } => "started",
             ChatEvent::Delta { .. } => "delta",
             ChatEvent::Knowledge { .. } => "knowledge",
+            ChatEvent::Research { .. } => "research",
         };
         if kind == self.kind {
             self.invoked
@@ -1356,7 +1375,7 @@ fn glance(
 ) -> Result<crate::chat::glance::Answer> {
     futures_executor::block_on(h.engine.run_glance(
         serde_json::from_value(input).unwrap(),
-        crate::chat::glance::Origin::EditedClipboard,
+        crate::chat::glance::Origin::CLIPBOARD,
         None,
         cancellation,
         Arc::new(Recorder::default()),
@@ -1481,7 +1500,7 @@ fn local_glance_stops_holds_the_chat_gate_and_refuses_to_remember_partial_output
 }
 
 #[test]
-fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work() {
+fn screen_intelligence_stays_on_device_without_remote_authorization() {
     use crate::chat::glance::{Attachment, Origin};
     use agent_core::{
         capability::ImageInput,
@@ -1489,22 +1508,16 @@ fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work()
     };
     let h = harness();
     h.load();
-    h.engine
-        .set_intelligence_settings(agent_core::provider::IntelligenceSettings {
-            local_only: true,
-            active_provider: None,
-        })
-        .unwrap();
     let run = |input: Value, attachment: Option<Attachment>| {
         futures_executor::block_on(h.engine.run_glance(
             serde_json::from_value(input).unwrap(),
-            Origin::Screen,
+            Origin::SCREEN,
             attachment,
             Cancellation::default(),
             Arc::new(Recorder::default()),
         ))
     };
-    // Recognized screen text is processed on this device in Local-only mode.
+    // Recognized screen text is processed on this device.
     let answer = run(
         json!({"text": "Synthetic recognized screen text", "recipe": "translate",
             "language": "French", "share": false, "memory": false, "documents": []}),
@@ -1534,13 +1547,16 @@ fn local_only_keeps_on_device_screen_intelligence_and_refuses_only_remote_work()
         refused.err().unwrap().code,
         ErrorCode::UnsupportedCapability
     );
-    // A remote target is refused before anything else in Local-only mode.
+    // A remote target requires authorization even for recognized text.
     let remote = run(
         json!({"text": "Synthetic recognized screen text", "recipe": "explain",
-            "provider": 1, "revision": "r", "share": true, "memory": false, "documents": []}),
+            "provider": 1, "revision": "r", "share": false, "memory": false, "documents": []}),
         None,
     );
     let remote = remote.err().unwrap();
     assert_eq!(remote.code, ErrorCode::PolicyDenied);
-    assert!(remote.message.contains("Local-only mode is on"));
+    assert!(remote.message.contains("Allow this request to be shared"));
 }
+
+#[path = "attachment_tests.rs"]
+pub(crate) mod attachment_tests;

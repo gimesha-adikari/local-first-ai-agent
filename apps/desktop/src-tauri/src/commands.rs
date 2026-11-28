@@ -44,9 +44,23 @@ fn chat_events(channel: Channel<ChatEvent>) -> ChatEvents {
     Arc::new(IpcChat(channel))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopBootstrap {
+    #[serde(flatten)]
+    engine: Bootstrap,
+    plaintext_backup: Option<String>,
+}
+
 #[tauri::command]
-pub fn bootstrap(state: State<'_, Desktop>) -> Result<Bootstrap> {
-    state.engine.bootstrap()
+pub fn bootstrap(
+    state: State<'_, Desktop>,
+    database: State<'_, crate::database_startup::DatabaseAccess>,
+) -> Result<DesktopBootstrap> {
+    Ok(DesktopBootstrap {
+        engine: state.engine.bootstrap()?,
+        plaintext_backup: database.plaintext_backup(),
+    })
 }
 
 #[tauri::command]

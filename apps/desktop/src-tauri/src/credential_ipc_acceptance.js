@@ -21,7 +21,7 @@ void (async () => {
     const outcome = await ipc.invoke("provider_enter_credential", { id: view.id });
     assert(outcome === "stored", `Entry returned ${JSON.stringify(outcome)}`);
     result.steps.push("native dialog stored the key");
-    await ipc.invoke("set_intelligence_settings", { settings: { localOnly: false, activeProvider: view.id } });
+    await ipc.invoke("set_intelligence_settings", { settings: { activeProvider: view.id } });
     const listed = (await ipc.invoke("provider_list"))[0];
     assert(listed.credential === "stored" && listed.readiness === "ready", "Status did not report the stored key");
     const test = await ipc.invoke("provider_test", { id: view.id });

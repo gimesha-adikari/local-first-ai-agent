@@ -5,20 +5,22 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
 
 use agent_core::{
     capability::{
-        AGENT_DECISION, CapabilityId, CapabilityRegistry, DISCOVER, EMBED, GENERATE, IMPORT,
-        Locality, RETRIEVE, Retention,
+        AGENT_DECISION, CAMERA_SNAPSHOT, CapabilityId, CapabilityRegistry, DISCOVER,
+        DOWNLOAD_MODEL, EMBED, GENERATE, IMPORT, Locality, RETRIEVE, Retention, WEB_PAGE,
+        WEB_SEARCH,
     },
     classification::{
-        AGENT_CONTEXT, CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY,
-        MODEL_OUTPUT, PDF_EXCERPT, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT, Sensitivity,
-        TEXT_EXCERPT, USER_INPUT,
+        AGENT_CONTEXT, ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, CAMERA_IMAGE, CAMERA_TEXT,
+        CLIPBOARD_TEXT, DataClasses, EMBEDDING, HISTORY, LIBRARY, Labels, MEMORY, MODEL_ARTIFACT,
+        MODEL_OUTPUT, PDF_EXCERPT, PUBLIC_WEB, QUERY, SCREEN_IMAGE, SCREEN_TEXT, SYSTEM_TEXT,
+        Sensitivity, TEXT_EXCERPT, USER_INPUT,
     },
     inference::Cancellation,
 };
@@ -73,6 +75,10 @@ impl Session {
 
     pub fn cancellation(&self) -> &Cancellation {
         &self.cancellation
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.key.load(Ordering::Acquire) || self.cancellation.is_cancelled()
     }
 
     pub fn close(&self) {
@@ -178,7 +184,6 @@ struct Grant {
     operation: std::sync::Weak<()>,
     session: std::sync::Weak<AtomicBool>,
     permission: Permission,
-    remote: bool,
     until: Instant,
     revoked: bool,
     used: bool,
@@ -187,7 +192,6 @@ struct Grant {
 #[derive(Default)]
 struct Grants {
     sequence: GrantId,
-    restrictions_pending: usize,
     entries: BTreeMap<GrantId, Grant>,
 }
 
@@ -197,27 +201,45 @@ pub struct Policy {
     /// Registered by the trusted provider configuration. Changing or
     /// removing an entry invalidates every operation bound to the old value.
     destinations: RwLock<BTreeMap<Arc<str>, Destination>>,
-    local_only: AtomicBool,
-    restriction_epoch: AtomicU64,
     grants: Mutex<Grants>,
 }
 
-pub(crate) struct PendingRestriction<'a>(&'a Policy);
+pub(crate) const VISUAL_SEARCH_PURPOSE: &str = "visual-search";
 
-impl Drop for PendingRestriction<'_> {
-    fn drop(&mut self) {
-        let mut grants = self.0.grants.lock().unwrap_or_else(|err| err.into_inner());
-        grants.restrictions_pending -= 1;
-    }
-}
+/// Classes a reviewed visual-assisted search query may carry besides the
+/// user's input (Stage 04-E): text recognized from, or written by a model
+/// about, a screen region, camera snapshot or attached image, and clipboard
+/// text. Only the query text is ever sent; these classes record where it
+/// came from. History, memories, library documents and document excerpts
+/// are never admitted into a search request.
+const VISUAL_QUERY_CLASSES: [agent_core::classification::DataClass; 8] = [
+    CLIPBOARD_TEXT,
+    SCREEN_TEXT,
+    SCREEN_IMAGE,
+    CAMERA_TEXT,
+    CAMERA_IMAGE,
+    ATTACHMENT,
+    ATTACHMENT_TEXT,
+    ATTACHMENT_IMAGE,
+];
 
 impl Default for Policy {
     fn default() -> Self {
         Self::new(
-            CapabilityRegistry::new([GENERATE, AGENT_DECISION, EMBED, IMPORT, RETRIEVE, DISCOVER]),
+            CapabilityRegistry::new([
+                GENERATE,
+                AGENT_DECISION,
+                EMBED,
+                IMPORT,
+                RETRIEVE,
+                DISCOVER,
+                DOWNLOAD_MODEL,
+                WEB_SEARCH,
+                WEB_PAGE,
+                CAMERA_SNAPSHOT,
+            ]),
             DataClasses::default(),
-            [],
-            true,
+            crate::network::artifact::destinations(),
         )
     }
 }
@@ -227,7 +249,6 @@ impl Policy {
         capabilities: CapabilityRegistry,
         classes: DataClasses,
         destinations: impl IntoIterator<Item = Destination>,
-        local_only: bool,
     ) -> Self {
         let mut known = BTreeMap::new();
         let mut conflicts = std::collections::BTreeSet::new();
@@ -244,8 +265,6 @@ impl Policy {
             capabilities,
             classes,
             destinations: RwLock::new(known),
-            local_only: AtomicBool::new(local_only),
-            restriction_epoch: AtomicU64::new(0),
             grants: Mutex::default(),
         }
     }
@@ -274,51 +293,8 @@ impl Policy {
         self.destinations.read().ok()?.get(id).cloned()
     }
 
-    /// Local-only mode denies every operation whose locality is not on the
-    /// device, before any resolution or connection.
-    pub(crate) fn set_local_only(&self, local_only: bool) {
-        let mut grants = self.grants.lock().unwrap_or_else(|err| err.into_inner());
-        self.apply_mode(&mut grants, local_only);
-    }
-
-    pub(crate) fn begin_restriction(&self) -> PendingRestriction<'_> {
-        let mut grants = self.grants.lock().unwrap_or_else(|err| err.into_inner());
-        grants.restrictions_pending += 1;
-        self.apply_mode(&mut grants, true);
-        PendingRestriction(self)
-    }
-
-    fn apply_mode(&self, grants: &mut Grants, local_only: bool) {
-        if local_only {
-            self.restriction_epoch.fetch_add(1, Ordering::AcqRel);
-            for grant in grants.entries.values_mut().filter(|grant| grant.remote) {
-                grant.revoked = true;
-            }
-        }
-        self.local_only.store(local_only, Ordering::Release);
-    }
-
-    pub(crate) fn restriction_epoch(&self) -> u64 {
-        self.restriction_epoch.load(Ordering::Acquire)
-    }
-
-    /// An enable that raced with saving a permissive selection wins.
-    pub(crate) fn allow_remote_if_current(&self, epoch: u64) -> bool {
-        let grants = self.grants.lock().unwrap_or_else(|err| err.into_inner());
-        if grants.restrictions_pending != 0 || self.restriction_epoch() != epoch {
-            return false;
-        }
-        self.local_only.store(false, Ordering::Release);
-        true
-    }
-
-    pub fn is_local_only(&self) -> bool {
-        self.local_only.load(Ordering::Acquire)
-    }
-
     fn check(&self, operation: &Operation) -> Result<(), Denial> {
-        if operation.session.key.load(Ordering::Acquire) || operation.cancellation().is_cancelled()
-        {
+        if operation.session.is_closed() {
             return Err(Denial::Cancelled);
         }
         if self
@@ -349,10 +325,117 @@ impl Policy {
         if operation.connectivity == Connectivity::Unverifiable {
             return Err(Denial::UngovernedProvider);
         }
-        if operation.locality != operation.intended_locality
-            || (self.is_local_only() && operation.locality != Locality::OnDevice)
-        {
+        if operation.locality != operation.intended_locality {
             return Err(Denial::Locality);
+        }
+        let artifact_binding = operation
+            .request
+            .as_ref()
+            .is_some_and(RequestBinding::has_artifact_binding);
+        if operation.capability == DOWNLOAD_MODEL {
+            if !artifact_binding
+                || operation.labels != Labels::from_source(MODEL_ARTIFACT)
+                || operation.purpose != "model-download"
+                || !operation.destination.as_ref().is_some_and(|target| {
+                    target.id().starts_with("artifact/")
+                        && target.credential().is_none()
+                        && target.locality() == Locality::ThirdParty
+                })
+            {
+                return Err(Denial::Scope);
+            }
+        } else if artifact_binding
+            || operation
+                .destination
+                .as_ref()
+                .is_some_and(|target| target.id().starts_with("artifact/"))
+        {
+            return Err(Denial::Scope);
+        }
+        let page_binding = operation
+            .request
+            .as_ref()
+            .is_some_and(RequestBinding::has_page_binding);
+        let public_page = operation.capability == WEB_PAGE;
+        if public_page {
+            // A dynamic public destination: never registered, so every
+            // property that registration would fix is checked here.
+            let labels_ok = operation.labels.contains(PUBLIC_WEB)
+                && operation
+                    .labels
+                    .ids()
+                    .all(|id| id == PUBLIC_WEB.id || id == USER_INPUT.id);
+            if !page_binding
+                || !labels_ok
+                || operation.purpose != "web-page"
+                || !operation
+                    .request
+                    .as_ref()
+                    .is_some_and(RequestBinding::is_bodiless_get)
+                || !operation.destination.as_ref().is_some_and(|target| {
+                    target.id() == crate::network::page::DESTINATION
+                        && target.credential().is_none()
+                        && target.locality() == Locality::ThirdParty
+                        && target.endpoint().scheme() == crate::network::Scheme::Https
+                        && public_scope(target.scope())
+                })
+            {
+                return Err(Denial::Scope);
+            }
+        } else if page_binding
+            || operation
+                .destination
+                .as_ref()
+                .is_some_and(|target| target.id().starts_with("web/"))
+        {
+            return Err(Denial::Scope);
+        }
+        if operation.capability == WEB_SEARCH {
+            let visual = operation.purpose == VISUAL_SEARCH_PURPOSE;
+            let generated = operation.purpose == crate::research::GENERATED_QUERY_PURPOSE;
+            let labels = &operation.labels;
+            // A model's visual description also inherits the built-in prompt
+            // class. Keep that label without accepting standalone system text.
+            let description = labels.contains(MODEL_OUTPUT)
+                && [SCREEN_IMAGE, CAMERA_IMAGE, ATTACHMENT_IMAGE]
+                    .into_iter()
+                    .any(|class| labels.contains(class));
+            if (!visual && !generated && operation.purpose != "web-search")
+                || (generated
+                    && (!labels.contains(MODEL_OUTPUT)
+                        || !labels.contains(USER_INPUT)
+                        || !labels.contains(SYSTEM_TEXT)))
+                || !labels.contains(QUERY)
+                || ((labels.contains(ATTACHMENT) || labels.contains(ATTACHMENT_TEXT))
+                    && !labels.contains(ATTACHMENT_IMAGE))
+                || !labels.ids().all(|id| {
+                    id == USER_INPUT.id
+                        || id == QUERY.id
+                        || (generated
+                            && (id == MODEL_OUTPUT.id
+                                || id == SYSTEM_TEXT.id
+                                || id == PUBLIC_WEB.id))
+                        || (visual
+                            && ((description && (id == MODEL_OUTPUT.id || id == SYSTEM_TEXT.id))
+                                || VISUAL_QUERY_CLASSES.iter().any(|class| class.id == id)))
+                })
+                || !operation
+                    .destination
+                    .as_ref()
+                    .is_some_and(|target| target.id().starts_with("search/"))
+            {
+                return Err(Denial::Scope);
+            }
+        }
+        if operation.purpose == crate::research::MODEL_PURPOSE
+            && (operation.capability != GENERATE
+                || !operation.labels.ids().all(|id| {
+                    [USER_INPUT, SYSTEM_TEXT, PUBLIC_WEB, MODEL_OUTPUT]
+                        .iter()
+                        .any(|class| id == class.id)
+                }))
+        {
+            return Err(Denial::Scope);
         }
         match (
             &operation.destination,
@@ -360,6 +443,11 @@ impl Policy {
             operation.connectivity,
         ) {
             (None, None, Connectivity::Offline) => Ok(()),
+            (Some(_), Some(request), Connectivity::ThroughBoundary)
+                if public_page && request.is_valid() =>
+            {
+                Ok(())
+            }
             (Some(target), Some(request), Connectivity::ThroughBoundary)
                 if request.is_valid()
                     && self
@@ -393,6 +481,15 @@ impl Policy {
             QUERY,
             MODEL_OUTPUT,
             SYSTEM_TEXT,
+            // Admitted for Chat research answers (Stage 04-C).
+            PUBLIC_WEB,
+            // Admitted for Chat answers with attached files (Stage 04-D).
+            ATTACHMENT,
+            ATTACHMENT_TEXT,
+            ATTACHMENT_IMAGE,
+            // Admitted for confirmed camera snapshots (Stage 04-E).
+            CAMERA_IMAGE,
+            CAMERA_TEXT,
         ];
         if labels.ids().all(|id| {
             allowed.iter().any(|class| {
@@ -428,6 +525,9 @@ impl Policy {
                 Ok("builtin.chat/1")
             }
             (Permission::Process, GENERATE, "glance", Retention::Session) => Ok("builtin.glance/1"),
+            (Permission::Process, GENERATE, "web-research-step", Retention::Session) => {
+                Ok("builtin.web-research/1")
+            }
             (Permission::Retain, GENERATE, "glance-remember", Retention::SavedLocally) => {
                 Ok("explicit.glance-remember/1")
             }
@@ -471,7 +571,6 @@ impl Policy {
                 operation: Arc::downgrade(&operation.key),
                 session: Arc::downgrade(&operation.session.key),
                 permission,
-                remote: operation.destination.is_some(),
                 until,
                 revoked: false,
                 used: false,
@@ -571,7 +670,7 @@ impl Policy {
         self.with_live_grants(operation, process, share, || ())
     }
 
-    /// Order a single non-blocking handoff with restriction and revocation.
+    /// Order a single non-blocking handoff with grant revocation.
     pub(crate) fn with_live_grants<T>(
         &self,
         operation: &Operation,
@@ -589,6 +688,16 @@ impl Policy {
         }
         check_liveness(grant, now)?;
         Ok(handoff())
+    }
+}
+
+/// Public pages connect only to globally routable addresses. Transport tests
+/// route them to a loopback fixture instead.
+fn public_scope(scope: &crate::network::NetworkScope) -> bool {
+    match scope {
+        crate::network::NetworkScope::Public => true,
+        crate::network::NetworkScope::Loopback => cfg!(test),
+        crate::network::NetworkScope::Pinned(_) => false,
     }
 }
 

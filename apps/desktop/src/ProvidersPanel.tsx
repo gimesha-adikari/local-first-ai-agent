@@ -3,12 +3,12 @@ import { CubeIcon, EditIcon, LockIcon, PlusIcon, RefreshIcon, ShieldIcon, Spinne
 import { errorMessage } from "./inference";
 import {
   type IntelligenceSettings, type ProviderSettings, type ProviderTest, type ProviderView,
-  deleteCredential, deleteProvider, draftProblem, enterCredential, listText, localityLabel, microsText, newProvider,
+  deleteCredential, deleteProvider, disclosure, draftProblem, enterCredential, listText, localityLabel, microsText, newProvider,
   parseMicros, readinessCopy, retentionText, saveIntelligence, saveProvider, sharingSummary, testProvider, usageLines,
 } from "./providers";
 import { Callout, Switch } from "./ui";
 
-/** Providers and the intelligence mode. Credentials are entered natively and never pass through this view. */
+/** Providers and the Chat target. Credentials are entered natively and never pass through this view. */
 export function ProvidersPanel({ providers, intelligence, busy, onChanged }: {
   providers: ProviderView[];
   intelligence: IntelligenceSettings;
@@ -19,23 +19,7 @@ export function ProvidersPanel({ providers, intelligence, busy, onChanged }: {
   const [working, setWorking] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "error" | "accent" | "warning"; title: string; detail?: string } | null>(null);
   const [tests, setTests] = useState<Record<number, ProviderTest>>({});
-  const [restrictionError, setRestrictionError] = useState<string | null>(null);
-  const [restricting, setRestricting] = useState(false);
-  const locked = busy || working !== null || restricting;
-
-  async function restrictConnections() {
-    if (restricting) return;
-    setRestricting(true);
-    setRestrictionError(null);
-    try {
-      await saveIntelligence({ ...intelligence, localOnly: true });
-    } catch (failure) {
-      setRestrictionError(errorMessage(failure));
-    } finally {
-      await onChanged().catch(() => undefined);
-      setRestricting(false);
-    }
-  }
+  const locked = busy || working !== null;
 
   async function run(label: string, action: () => Promise<void>) {
     if (working) return;
@@ -51,36 +35,22 @@ export function ProvidersPanel({ providers, intelligence, busy, onChanged }: {
     }
   }
 
-  const choose = (activeProvider: number | null) => run("mode", () => saveIntelligence({
-    localOnly: activeProvider === null ? intelligence.localOnly : false,
-    activeProvider,
-  }));
+  const choose = (activeProvider: number | null) => run("mode", () => saveIntelligence({ activeProvider }));
 
   return (
     <div className="settings-stack">
       <section className="settings-section">
-        <h4>Connections</h4>
-        <Switch label="Local-only mode" checked={intelligence.localOnly} disabled={restricting || (intelligence.localOnly && locked)}
-          description={intelligence.localOnly
-            ? "No outbound connections. Chat and the contextual panel use your local model; screen capture and text recognition still work on this computer. Turning this on stops any provider request in progress."
-            : "Providers you configure can be reached, only through the app's network boundary."}
-          onChange={(localOnly) => localOnly ? void restrictConnections() : void run("mode", () => saveIntelligence({ ...intelligence, localOnly }))} />
-        {restrictionError && <Callout tone="error" role="alert" title="Local-only setting"
-          actions={<button type="button" className="link-button" disabled={restricting}
-            onClick={() => void restrictConnections()}>Retry saving Local-only</button>}>
-          {restrictionError}
-        </Callout>}
-        <fieldset className="provider-choice" disabled={locked || intelligence.localOnly}>
+        <fieldset className="provider-choice" disabled={locked}>
           <legend>Chat answers with</legend>
           <label className="provider-option">
-            <input type="radio" name="chat-target" checked={intelligence.localOnly || intelligence.activeProvider === null}
+            <input type="radio" name="chat-target" checked={intelligence.activeProvider === null}
               onChange={() => void choose(null)} />
             <span><strong>Local model</strong><small>Runs on this computer. Nothing is sent anywhere.</small></span>
           </label>
           {providers.map((provider) => (
             <label key={provider.id} className="provider-option">
               <input type="radio" name="chat-target" disabled={provider.readiness !== "ready"}
-                checked={!intelligence.localOnly && intelligence.activeProvider === provider.id}
+                checked={intelligence.activeProvider === provider.id}
                 onChange={() => void choose(provider.id)} />
               <span>
                 <strong>{provider.settings.name}</strong>
@@ -89,6 +59,12 @@ export function ProvidersPanel({ providers, intelligence, busy, onChanged }: {
             </label>
           ))}
         </fieldset>
+        {providers.filter((provider) => provider.id === intelligence.activeProvider).map((provider) => (
+          <details key={provider.id} className="hint">
+            <summary>What Chat shares</summary>
+            <p>{disclosure(provider)} {retentionText(provider.settings)}</p>
+          </details>
+        ))}
         <p className="hint">
           There is no automatic fallback. If the selected provider fails, Chat reports the error and nothing is sent elsewhere.
           Agent mode always uses the local model.
@@ -215,7 +191,7 @@ function ProviderCard({ provider, test, working, disabled, onEdit, onKey, onRemo
           <button type="button" className="ghost-button small" disabled={disabled} onClick={onRemoveKey}>Remove key</button>
         )}
         <button type="button" className="secondary-button small" disabled={disabled || provider.readiness !== "ready"}
-          title={provider.readiness === "local_only" ? "Turn off local-only mode to connect" : undefined} onClick={onTest}>
+          onClick={onTest}>
           {spinning("test") ? <Spinner size={13} /> : <RefreshIcon size={14} />}Test connection
         </button>
         <button type="button" className="ghost-button small" disabled={disabled || provider.readiness === "deletion_pending"} onClick={onEdit}><EditIcon size={14} />Edit</button>

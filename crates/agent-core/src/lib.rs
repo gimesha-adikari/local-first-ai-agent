@@ -8,6 +8,8 @@ pub fn status() -> &'static str {
 pub mod inference;
 pub mod intelligence;
 
+/// Conversation attachments: limits, retention and per-attempt records.
+pub mod attachment;
 pub mod capability;
 pub mod chat;
 pub mod chat_context;
@@ -19,7 +21,11 @@ pub mod agent;
 pub mod knowledge;
 
 pub mod provider;
+/// Web research contracts: search results, public page evidence and records.
+pub mod research;
 /// One captured screen frame: conversion, regions and settling.
 pub mod screen;
 
 pub mod semantic;
+/// Shared visual input settings: OCR languages and translation target.
+pub mod visual;

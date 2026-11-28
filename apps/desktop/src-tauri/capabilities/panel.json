@@ -1,6 +1,6 @@
 {
   "identifier": "panel",
-  "description": "Ephemeral text preview, contextual processing, explicit clipboard, screen-region capture and local text recognition, and explicit memory actions.",
+  "description": "Ephemeral text preview, contextual processing, explicit clipboard, screen-region capture, explicit camera snapshots, local text recognition, reviewed visual-assisted search, and explicit memory actions.",
   "windows": [
     "panel"
   ],
@@ -16,6 +16,12 @@
     "allow-glance-capture",
     "allow-glance-capture-clear",
     "allow-glance-ocr",
-    "allow-glance-estimate"
+    "allow-glance-estimate",
+    "allow-glance-camera",
+    "allow-glance-camera-confirm",
+    "allow-glance-camera-discard",
+    "allow-glance-search",
+    "allow-glance-search-open",
+    "allow-glance-visual-settings"
   ]
 }

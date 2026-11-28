@@ -9,11 +9,11 @@ import {
 } from "./chat";
 import {
   AgentIcon, ChatIcon, CheckIcon, ChevronRightIcon, CloseIcon, CubeIcon, FileIcon, FolderIcon, LockIcon,
-  PowerIcon, Spinner, ThinkIcon, UploadIcon,
+  PowerIcon, Spinner, ThinkIcon,
 } from "./icons";
 import type { ModelInfo } from "./inference";
 import {
-  advancedModelName, builtInModelName, capabilityGuidance, modelCapabilities, modelLabel, referenceProfile,
+  builtInModelName, capabilityGuidance, modelCapabilities, modelLabel, modelOrigin, referenceProfile,
 } from "./models";
 import { Callout, Dialog, Switch } from "./ui";
 
@@ -170,7 +170,7 @@ function LoadedModelBanner({ snapshot }: { snapshot: Bootstrap }) {
       <span>
         <strong>Loaded now: {modelLabel(info.fileName)}</strong>
         <small>
-          {[reference ? (reference.bundled ? "Built-in" : "Imported") : null,
+          {[reference ? modelOrigin(reference) : null,
             reference ? (reference.automaticSettings ? "Automatic settings" : "Custom settings") : null,
             `${info.config.contextLength.toLocaleString()}-token context`, `${info.config.threads} threads`,
           ].filter(Boolean).join(" · ")}
@@ -182,6 +182,7 @@ function LoadedModelBanner({ snapshot }: { snapshot: Bootstrap }) {
 
 /** Curated manifest identity: a file is verified only by exact size and SHA-256. */
 function verificationBadge(model: ModelReference) {
+  if (model.available === false) return null;
   const artifact = model.artifact ? curatedArtifacts[model.artifact] : null;
   if (artifact) {
     return <span className="badge badge-verified" title={`${artifact.name} · ${artifact.license} · checksum verified`}>Verified</span>;
@@ -193,7 +194,7 @@ function verificationBadge(model: ModelReference) {
 function ModelBadges({ model }: { model: ModelReference }) {
   return (
     <span className="model-badges">
-      <span className={`badge ${model.bundled ? "badge-verified" : "badge-muted"}`}>{model.bundled ? "Built-in" : "Imported"}</span>
+      <span className={`badge ${model.bundled ? "badge-verified" : "badge-muted"}`}>{modelOrigin(model)}</span>
       {verificationBadge(model)}
       <span className={`badge ${model.automaticSettings ? "badge-ready" : "badge-warning"}`}>{model.automaticSettings ? "Automatic" : "Custom"}</span>
     </span>
@@ -205,7 +206,7 @@ function ModelBadges({ model }: { model: ModelReference }) {
  * Settings. Drafts are owned by the caller so they survive category switches.
  */
 export function ModelsPanel({
-  snapshot, selectedId, onSelect, action, operationLocked, error, notice, onImport, onLoad, onUnload, onSaveSettings,
+  snapshot, selectedId, onSelect, action, operationLocked, error, notice, onLoad, onUnload, onSaveSettings,
   recommended, onReload, bundled, onResetSettings, drafts, onDraft,
 }: {
   snapshot: Bootstrap;
@@ -258,10 +259,7 @@ export function ModelsPanel({
       <div className="models-layout">
         <div className="models-library">
           <div className="library-heading">
-            <h3>Library</h3>
-            <button type="button" className="secondary-button small" disabled={busy} onClick={onImport}>
-              {action === "import" ? <Spinner size={13} /> : <UploadIcon size={14} />}Import model…
-            </button>
+            <h3>Chat models</h3>
           </div>
           {bundled === "corrupted" && (
             <Callout tone="error" title="Built-in assistant failed verification">
@@ -275,8 +273,7 @@ export function ModelsPanel({
             <div className="library-empty">
               <CubeIcon size={22} />
               <p>
-                {bundled === "checking" ? "No models yet."
-                  : "No models yet. This copy of the app doesn't include the built-in assistant. Import a GGUF file to get started."}
+                No Chat models in this library.
               </p>
             </div>
           ) : (
@@ -292,7 +289,8 @@ export function ModelsPanel({
                       <span className="library-text">
                         <span className="library-name" title={model.fileName}>{modelLabel(model.fileName)}</span>
                         <small>
-                          {[loaded ? "Loaded" : null, model.bundled ? "Built-in" : "Imported",
+                          {[loaded ? "Loaded" : null, modelOrigin(model),
+                            model.available === false ? "File unavailable" : null,
                             model.automaticSettings ? "Automatic" : "Custom", unsaved ? "Unsaved changes" : null,
                           ].filter(Boolean).join(" · ")}
                         </small>
@@ -304,13 +302,6 @@ export function ModelsPanel({
               })}
             </ul>
           )}
-          <div className="model-guidance">
-            <h4>Which model?</h4>
-            <ul>
-              <li><strong>{builtInModelName}</strong><span>Included with the app. Quick, lightweight offline Chat. No Thinking or Agent.</span></li>
-              <li><strong>{advancedModelName}</strong><span>For Agent tasks and Thinking. Larger and slower. Download the GGUF file yourself, then import it.</span></li>
-            </ul>
-          </div>
         </div>
 
         <div className="models-detail">
@@ -331,7 +322,7 @@ export function ModelsPanel({
                       {action === "unload" ? "Unloading…" : "Unload"}
                     </button>
                   ) : (
-                    <button type="button" className="primary-button" disabled={busy || !valid}
+                    <button type="button" className="primary-button" disabled={busy || !valid || selected.available === false}
                       onClick={() => onLoad(selected, settings)}>
                       {action === "load" || action === "switch" ? <Spinner size={13} /> : null}
                       {action === "load" ? "Loading…" : action === "switch" ? "Switching…" : loadedId ? "Switch to this model" : "Load model"}
@@ -339,6 +330,8 @@ export function ModelsPanel({
                   )}
                 </div>
               </div>
+
+              {selected.available === false && <p className="hint">This file is unavailable. Reconnect its drive, import an available copy or use Discover.</p>}
 
               {/* Shown near the top so a failed action is visible without scrolling. */}
               {error && <Callout tone="error" role="alert" title="Model operation failed">{error}</Callout>}

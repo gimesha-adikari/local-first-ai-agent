@@ -106,7 +106,7 @@ pub struct Endpoint {
 const MAX_URL: usize = 512;
 const MAX_PATH: usize = 256;
 
-fn valid_domain(name: &str) -> bool {
+pub(super) fn valid_domain(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 253
         && name.split('.').all(|label| {

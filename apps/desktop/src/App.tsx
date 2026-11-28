@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { defaultTaskTimeoutSeconds, validTimeout } from "./agent";
 import { LegacyRecord } from "./AgentView";
@@ -39,9 +40,21 @@ import {
 import { useAgent } from "./useAgent";
 import { useKnowledge } from "./useKnowledge";
 import {
-  type IntelligenceSettings, type ProviderView, activeRemote, disclosure, listProviders, localityLabel, readinessCopy,
+  type IntelligenceSettings, type ProviderView, activeRemote, listProviders, localityLabel, readinessCopy,
 } from "./providers";
-import { Onboarding, RemoteDisclosure } from "./RemoteViews";
+import { Onboarding } from "./RemoteViews";
+import { ResearchBar, SearchControl } from "./ResearchControl";
+import { AttachButton, AttachmentTray, type VisualActions } from "./AttachmentControl";
+import { useChatCamera } from "./ChatCamera";
+import { suggestQuery } from "./visual";
+import {
+  attachmentRequest, emptyShare, pendingAttachments, preparing, readyAttachments, recordedAttachments, sendProblem, sharePlan,
+  type AttachmentView, type Chosen, type RemoteTarget, type ShareDraft,
+} from "./attachments";
+import {
+  emptyResearch, researchOptions, researchPlan,
+  type ResearchDraft, type ResearchStage, type WebResearchView,
+} from "./research";
 
 type Modal = "settings" | "access" | "rename" | "delete" | "instructions";
 type Operation = "opening" | "creating" | "saving" | "generating";
@@ -137,7 +150,27 @@ export default function App() {
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const providerRefresh = useRef(0);
+  const [research, setResearch] = useState<ResearchDraft>(emptyResearch);
+  const [draftImageSources, setDraftImageSources] = useState<string[]>([]);
+  useEffect(() => {
+    if (!draft) setDraftImageSources((sources) => sources.length ? [] : sources);
+  }, [draft]);
+  const [webResearch, setWebResearch] = useState<WebResearchView | null>(null);
+  const [researchStages, setResearchStages] = useState<ReadonlyMap<number, ResearchStage>>(() => new Map());
+  const [researching, setResearching] = useState(false);
   const [providersBusy, setProvidersBusy] = useState(false);
+  // Both the open conversation’s files and the composer’s pending draft.
+  const [attachments, setAttachments] = useState<AttachmentView[]>([]);
+  const [pausedAttachments, setPausedAttachments] = useState<ReadonlySet<string>>(() => new Set());
+  const [share, setShare] = useState<ShareDraft>(emptyShare);
+  const [confirmedAttachmentSelection, setConfirmedAttachmentSelection] = useState<string | null>(null);
+  const [usePreviousFiles, setUsePreviousFiles] = useState(true);
+  const [reviewRegeneration, setReviewRegeneration] = useState(false);
+  const attachmentRefresh = useRef(0);
+  const [attaching, setAttaching] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [rejectedFiles, setRejectedFiles] = useState<Chosen["rejected"]>([]);
+  const attachmentScope = useRef<number | null>(null);
   const viewRef = useRef<View>({ kind: "empty" });
   const agent = useAgent({ onTurnSettled: (identity) => settleTurn(identity) });
   viewRef.current = view;
@@ -154,6 +187,77 @@ export default function App() {
     if (!initialized) return;
     void invoke<boolean>("memory_retrieval_enabled").then(setMemoryEnabled).catch(() => setMemoryEnabled(false));
   }, [initialized]);
+
+  const scopeId = view.kind === "conversation" ? view.id : null;
+
+  async function refreshAttachments(scope: number | null) {
+    const sequence = ++attachmentRefresh.current;
+    const isCurrent = () => attachmentScope.current === scope && attachmentRefresh.current === sequence;
+    try {
+      const [pending, bound] = await Promise.all([
+        invoke<AttachmentView[]>("attachment_list", { conversationId: null }),
+        scope === null ? [] : invoke<AttachmentView[]>("attachment_list", { conversationId: scope }),
+      ]);
+      if (isCurrent()) setAttachments([...new Map([...pending, ...bound].map((file) => [file.id, file])).values()]);
+    } catch (failure) {
+      if (isCurrent()) setAttachmentError(errorMessage(failure));
+    }
+  }
+
+  useEffect(() => {
+    attachmentScope.current = scopeId;
+    setAttachments((current) => current.filter((file) => file.draft));
+    if (operationRef.current !== "generating") {
+      setUsePreviousFiles(true);
+      setShare(emptyShare);
+      setReviewRegeneration(false);
+      setAttachmentError(null);
+      setRejectedFiles([]);
+    }
+    if (initialized) void refreshAttachments(scopeId);
+  }, [scopeId, initialized]);
+
+  const composerAttachments = pendingAttachments(attachments, conversation?.turns ?? []);
+  const attachmentsPreparing = composerAttachments.some(preparing);
+  useEffect(() => {
+    if (!attachmentsPreparing) return;
+    const timer = window.setInterval(() => void refreshAttachments(attachmentScope.current), 400);
+    return () => window.clearInterval(timer);
+  }, [attachmentsPreparing]);
+
+  async function attachFiles() {
+    setAttaching(true);
+    setAttachmentError(null);
+    setRejectedFiles([]);
+    try {
+      const chosen = await invoke<Chosen>("attachment_choose", { conversationId: null, retention: "temporary" });
+      setRejectedFiles(chosen.rejected);
+      if (chosen.attachments.length) {
+        setShare(emptyShare);
+        setReviewRegeneration(false);
+      }
+      await refreshAttachments(attachmentScope.current);
+    } catch (failure) {
+      setAttachmentError(errorMessage(failure));
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  async function changeAttachment(action: "cancel" | "remove" | "keep" | "temporary", id: string) {
+    const scope = attachmentScope.current;
+    const conversationId = attachments.find((file) => file.id === id)?.draft ? null : scope;
+    setAttachmentError(null);
+    try {
+      if (action === "cancel") await invoke("attachment_cancel", { conversationId, id });
+      else if (action === "remove") await invoke("attachment_remove", { conversationId, id });
+      else await invoke("attachment_set_retention", { conversationId, id, retention: action === "keep" ? "conversation" : "temporary" });
+      if (action === "remove") setShare((current) => ({ confirmed: false, images: current.images.filter((item) => item !== id) }));
+    } catch (failure) {
+      setAttachmentError(errorMessage(failure));
+    }
+    await refreshAttachments(scope);
+  }
 
   async function changeMemoryEnabled(value: boolean) {
     await invoke("memory_set_retrieval_enabled", { enabled: value });
@@ -298,9 +402,41 @@ export default function App() {
   const remote = activeRemote(snapshot?.intelligence ?? null, providers);
   const remoteReady = remote?.readiness === "ready";
   /** Chat can answer with the loaded local model or the selected provider. */
-  const chatReady = remote ? remoteReady : modelReady;
+  const remoteSelected = snapshot?.intelligence.activeProvider != null;
+  const chatReady = remoteSelected ? remoteReady : modelReady;
+  const searchDraft = research.query === null && draftImageSources.length
+    ? { ...research, queryAttachments: draftImageSources }
+    : research;
+  const plan = researchPlan({
+    draft: searchDraft, message: draft, view: webResearch,
+    remoteName: remote && remoteReady ? remote.settings.name : null, modelReady: !remoteSelected && modelReady,
+  });
+  const researchProblem = research.enabled && selection.enabled
+    ? "Web search can't be combined with selected documents yet. Turn off Knowledge or Search."
+    : research.enabled ? plan.problem : null;
+  const researchReady = research.enabled && plan.canSend && !researchProblem;
+  const includedAttachment = (id: string) => !pausedAttachments.has(id);
+  const previousRecord = latestChatAttempt(conversation?.turns ?? [])?.context?.attachments;
+  const previousAttachments = recordedAttachments(attachments, previousRecord);
+  const previousAvailable = mode === "chat" && composerAttachments.length === 0
+    && !research.enabled && !selection.enabled && previousAttachments.length > 0;
+  const draftReady = readyAttachments(composerAttachments, includedAttachment);
+  const readyForNext = mode !== "chat" ? []
+    : previousAvailable && usePreviousFiles ? previousAttachments : draftReady;
+  const remoteTarget: RemoteTarget = remote && remoteReady
+    ? { id: remote.id, name: remote.settings.name, imageInput: remote.settings.imageInput } : null;
+  const sharingFiles = reviewRegeneration ? previousAttachments : readyForNext;
+  const sharingSelection = JSON.stringify([remoteTarget?.id, sharingFiles.map((file) => file.id)]);
+  const effectiveShare = confirmedAttachmentSelection === sharingSelection ? share : { ...share, confirmed: false };
+  const attachmentPlan = sharePlan(sharingFiles, remoteTarget, effectiveShare);
+  const attachmentProblem = mode !== "chat" ? null
+    : sendProblem(composerAttachments, includedAttachment)
+      ?? (draftReady.length && research.enabled ? "Web search can't be combined with attachments yet. Turn off Search, or pause the attachments."
+        : draftReady.length && selection.enabled ? "Library documents can't be combined with attachments yet. Turn off Knowledge, or pause the attachments."
+          : !reviewRegeneration && attachmentPlan.needed && !attachmentPlan.canSend && draft.trim() ? `Review what will be sent to ${remoteTarget?.name ?? "the provider"} and confirm it below the attachments.`
+            : null);
   const activeReference = snapshot?.models.find((model) => model.id === snapshot.activeModelId) ?? null;
-  const supportsThinking = !remote && !!modelInfo?.supportsThinking;
+  const supportsThinking = !research.enabled && !remote && !!modelInfo?.supportsThinking;
   const supportsAgent = !!modelInfo?.supportsAgent;
   const agentUnavailable = !agent.eventReady ? "Connecting to Agent events…"
     : !modelReady ? "Load a model to use Agent mode"
@@ -370,6 +506,62 @@ export default function App() {
     composer.current?.focus();
     window.requestAnimationFrame(() => composer.current?.focus());
   }, []);
+
+  const camera = useChatCamera({
+    scope: () => null,
+    count: composerAttachments.length,
+    disabled: !!agent.activeApproval || !snapshot || generating,
+    onAttached: () => {
+      setShare(emptyShare);
+      setReviewRegeneration(false);
+      void refreshAttachments(attachmentScope.current);
+    },
+  });
+
+  // The panel's visual operations, carried out by Chat's own pipelines:
+  // recognized text, a translation or question request through attachments,
+  // and a reviewed, editable search query through web research.
+  const includeAttachment = (id: string) => setPausedAttachments((current) => {
+    if (!current.has(id)) return current;
+    const next = new Set(current);
+    next.delete(id);
+    return next;
+  });
+  const visualActions: VisualActions = {
+    loadText: (id) => invoke<string>("attachment_text", {
+      conversationId: attachments.find((file) => file.id === id)?.draft ? null : attachmentScope.current, id,
+    }),
+    useText: (view, text) => {
+      setDraft((current) => current.trim() ? `${current}\n\n${text}` : text);
+      setDraftImageSources((current) => [...new Set([...current, view.id])]);
+      setResearch((current) => ({ ...current, reviewedQuery: null }));
+      focusComposer();
+    },
+    translate: (view, target) => {
+      includeAttachment(view.id);
+      setResearch((current) => ({ ...current, enabled: false }));
+      setDraftImageSources([]);
+      setDraft(`Translate the text recognized in “${view.name}” into ${target}. Keep the original line breaks, and say if any part is unclear.`);
+      if (camera.visual) void camera.save({ ...camera.visual.settings, translationTarget: target });
+      setChatNotice(null);
+      focusComposer();
+    },
+    ask: (view) => {
+      includeAttachment(view.id);
+      setResearch((current) => ({ ...current, enabled: false }));
+      setDraft((current) => current.trim() ? current : `About “${view.name}”: `);
+      focusComposer();
+    },
+    search: (view, text) => {
+      // The image stays out of the message; only the reviewed query is sent.
+      setPausedAttachments((current) => new Set(current).add(view.id));
+      setResearch({ ...emptyResearch, enabled: true, mode: "search", query: suggestQuery(text), queryAttachments: [view.id] });
+      setDraft((current) => current.trim() ? current : "What do web sources say about this?");
+      setChatNotice(null);
+      focusComposer();
+    },
+    target: camera.visual?.settings.translationTarget ?? "",
+  };
 
   /** Read the saved unified thread. Never triggers a native operation. */
   async function loadConversation(id: number) {
@@ -479,17 +671,29 @@ export default function App() {
 
   async function generate(kind: "send" | "regenerate" | "continue", regenerate: RegenerateRequest = {}, messageId?: number) {
     if (!snapshot || knowledge.holdsLease) return;
-    if (kind === "continue" ? !modelReady : !chatReady) return;
+    const regenerateAttachments = kind === "regenerate" && previousRecord;
+    const wantsResearch = kind !== "continue" && !regenerateAttachments && research.enabled;
+    if (wantsResearch && !researchReady) return;
+    if (kind === "continue" ? !modelReady : !(chatReady || wantsResearch)) return;
     const content = draft;
-    if (kind === "send" && !content.trim()) return;
+    if (kind === "send" && (!content.trim() || reviewRegeneration)) return;
     if (kind === "regenerate" && !canRegenerateLatest(conversation)) return;
     if (kind === "continue" && (!conversation || messageId === undefined
       || latestChatAttempt(conversation.turns)?.id !== messageId
       || isContextual(latestChatAttempt(conversation.turns)))) return;
     if (Number.isNaN(parsedOverride)) return;
-    // Send and Regenerate use the current selection; Continue never searches.
-    const knowledgeRequest = kind === "continue" ? null : knowledgeOption(selection);
-    if (kind !== "continue" && selection.enabled && readiness.blocked) {
+    if (regenerateAttachments && previousAttachments.length !== previousRecord.attachments.length) {
+      setError("Some files from this answer are no longer available. Attach them again to ask a new question.");
+      return;
+    }
+    if (regenerateAttachments && remoteTarget && (!reviewRegeneration || !effectiveShare.confirmed)) {
+      if (!reviewRegeneration) setShare(emptyShare);
+      setReviewRegeneration(true);
+      return;
+    }
+    const selectedAttachments = regenerateAttachments ? previousAttachments : kind === "regenerate" ? draftReady : readyForNext;
+    const knowledgeRequest = kind === "continue" || regenerateAttachments ? null : knowledgeOption(selection);
+    if (kind !== "continue" && !regenerateAttachments && selection.enabled && readiness.blocked) {
       setChatNotice({ tone: "warning", title: readiness.blocked.title, detail: readiness.blocked.detail, fix: readiness.blocked.fix });
       return;
     }
@@ -510,10 +714,21 @@ export default function App() {
       maxTokens: regenerate.maxTokens ?? (parsedOverride === null ? null : parsedOverride),
       knowledge: knowledgeRequest,
     });
+    if (kind !== "continue") options.expectedTarget = { providerId: snapshot.intelligence.activeProvider };
+    const researchRequest = wantsResearch ? researchOptions(searchDraft, webResearch, content) : undefined;
+    if (researchRequest) options.research = researchRequest;
+    const attachmentOption = kind === "continue" ? undefined : attachmentRequest(selectedAttachments, remoteTarget, effectiveShare);
+    if (attachmentOption) options.attachments = attachmentOption;
+    setResearching(!!researchRequest);
     const generation = ++request.current;
     follow.current = true;
     const count = knowledgeRequest?.documentIds.length ?? 0;
-    if (knowledgeRequest || (memoryEnabled && kind !== "continue")) {
+    if (researchRequest) {
+      setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: researchRequest.mode === "search" ? "Understanding your question…" : "Reading the page…" });
+    } else if (attachmentOption) {
+      const n = attachmentOption.ids.length;
+      setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: `Reading ${n} ${n === 1 ? "attachment" : "attachments"}…` });
+    } else if (knowledgeRequest || (memoryEnabled && kind !== "continue")) {
       setPendingChat({
         conversationId: id, prompt: kind === "send" ? content : null,
         label: knowledgeRequest ? `Searching ${count} selected ${count === 1 ? "document" : "documents"}…` : "Preparing…",
@@ -523,6 +738,10 @@ export default function App() {
     let routed: KnowledgeCoverage | null = null;
     const events = new Channel<ChatEvent>((event) => {
       if (request.current !== generation) return;
+      if (event.kind === "research") {
+        setResearchStages((current) => new Map(current).set(event.id, event.stage));
+        return;
+      }
       if (event.kind === "knowledge") {
         routed = event.coverage;
         const label = preparationLabel(event.coverage);
@@ -537,6 +756,14 @@ export default function App() {
         }
         // Keep edits made while the request was preparing.
         if (event.user && kind === "send") setDraft((current) => (current === content ? "" : current));
+        // Search applies to one message; the next one is ordinary Chat again.
+        if (researchRequest) setResearch(emptyResearch);
+        // Sharing is authorized for one message at a time.
+        if (attachmentOption) {
+          setShare(emptyShare);
+          setReviewRegeneration(false);
+          void refreshAttachments(id);
+        }
         setOutputOverride("");
         setPendingChat(null);
       }
@@ -582,12 +809,16 @@ export default function App() {
     } finally {
       request.current++;
       setPendingChat(null);
+      setResearching(false);
       // A rejected request may still have saved the user message and a partial reply.
       try {
         const saved = await loadConversation(id);
         if (kind === "send" && (sent || saved.turns.some((turn) =>
           turn.user.content === content && !before.has(turn.id)))) {
           setDraft((current) => (current === content ? "" : current));
+        }
+        if (attachmentOption && (started || sent || saved.turns.some((turn) => !before.has(turn.id)))) {
+          await refreshAttachments(id);
         }
         // A first message that never started leaves no empty conversation behind.
         if (ensured.created && !started && saved.turns.length === 0) {
@@ -786,10 +1017,15 @@ export default function App() {
   }
 
   /** Refresh the library from the host: deduplicated rows with their saved settings and modes. */
-  async function refreshModels() {
+  const refreshModels = useCallback(async () => {
     const models = await invoke<ModelReference[]>("list_models").catch(() => null);
     if (models) setSnapshot((current) => current && { ...current, models });
-  }
+  }, []);
+
+  useEffect(() => {
+    const subscription = listen("model-library-changed", () => void refreshModels());
+    return () => { void subscription.then((unlisten) => unlisten()).catch(() => undefined); };
+  }, [refreshModels]);
 
   /**
    * Return a model to automatic settings. With `reload`, the loaded model is
@@ -900,6 +1136,18 @@ export default function App() {
   }
 
   /** Models and Settings share one categorized dialog; "models" opens its Models category. */
+  async function refreshWebResearch() {
+    try {
+      setWebResearch(await invoke<WebResearchView>("web_research_settings"));
+    } catch {
+      setWebResearch(null);
+    }
+  }
+
+  useEffect(() => {
+    if (snapshot) void refreshWebResearch();
+  }, [!!snapshot]);
+
   async function refreshProviders() {
     const sequence = ++providerRefresh.current;
     setProvidersBusy(true);
@@ -907,6 +1155,9 @@ export default function App() {
       const intelligence = await invoke<IntelligenceSettings>("intelligence_settings");
       if (sequence !== providerRefresh.current) return;
       setSnapshot((current) => current && { ...current, intelligence });
+      setResearch((current) => current.share ? { ...current, share: false } : current);
+      setShare(emptyShare);
+      setReviewRegeneration(false);
       const list = await listProviders();
       if (sequence === providerRefresh.current) setProviders(list);
     } finally {
@@ -989,33 +1240,44 @@ export default function App() {
       revision: knowledge.sourceRevision,
       documentName: (id) => names.get(id) ?? null,
       liveCoverage: (id) => liveCoverage.get(id) ?? null,
+      researchStage: (id) => researchStages.get(id) ?? null,
+      attachmentAvailable: (id) => attachments.some((item) => item.id === id && item.phase === "ready"),
     };
-  }, [knowledge.sourceRevision, knowledge.documents, liveCoverage]);
+  }, [knowledge.sourceRevision, knowledge.documents, liveCoverage, researchStages, attachments]);
 
   const canSend = !busy && !!draft.trim() && (mode === "agent"
     ? agentAvailable && validTimeout(Number(taskTimeout))
-    : !!snapshot && chatReady && !Number.isNaN(parsedOverride) && !knowledgeBlocked);
+    : !!snapshot && !reviewRegeneration && !Number.isNaN(parsedOverride) && !attachmentProblem && (research.enabled
+      ? researchReady
+      : chatReady && !knowledgeBlocked));
 
   const composerStatus = !snapshot ? (startupError ? "The app couldn't start." : "Starting…")
     : generating ? (stopping ? "Stopping…" : pendingChat ? pendingChat.label
-      : remote ? `Waiting for ${remote.settings.name}…` : "Generating locally…")
+      : researching ? "Web research in progress. Stop ends all searching and page reading."
+        : remote ? `Waiting for ${remote.settings.name}…` : "Generating locally…")
       : agent.running ? (activeHere
         ? (agent.activeApproval ? "Waiting for your approval. Approve, deny or cancel above." : "Agent is working. You can cancel at any time.")
         : `An Agent turn is running in “${shorten(activeTitle ?? "another conversation", 40)}”.`)
         : modelAction ? statusText
           : leaseText ? leaseText
-          : mode === "chat" && remote ? (remoteReady ? disclosure(remote)
-            : `${remote.settings.name} isn't ready: ${readinessCopy(remote).label}. Open Providers in Settings.`)
+          : attachmentProblem ? attachmentProblem
+          : mode === "chat" && research.enabled ? ""
+          : mode === "chat" && remoteSelected ? (remote ? (remoteReady ? ""
+            : `${remote.settings.name} isn’t ready. Open Providers in Settings.`) : "Loading the selected provider…")
           : !modelReady ? (bundled === "checking" && !snapshot.models.length ? "Checking the built-in assistant…"
             : phase === "loading" ? "Loading model…" : "Load a local model, or select a provider in Settings, to start")
-            : mode === "agent" ? (agentUnavailable ?? "Agent uses only tools and files you allow · Local only")
+            : mode === "agent" ? (agentUnavailable ?? (composerAttachments.length
+              ? "Agent doesn't read Chat attachments. Switch to Chat to ask about them."
+              : "Agent runs on this device with the tools and files you allow"))
               : knowledgeBlocked ? `${readiness.blocked!.title}. ${readiness.blocked!.detail}`
               : `Local inference · ${snapshot.preferences.enterToSend ? "Enter to send, Shift+Enter for a new line" : "Use the send button to send"}`;
 
   const inThread = view.kind === "conversation" && !!conversation?.turns.length;
   const placeholder = mode === "agent"
     ? (inThread ? "Ask the agent a follow-up…" : "Describe a task for the agent…")
-    : (inThread ? "Reply…" : "Ask anything…");
+    : research.enabled
+      ? (research.mode === "page" ? "What should be done with this page?" : "Ask a question to research on the web…")
+      : (inThread ? "Reply…" : "Ask anything…");
 
   const loadingReference = snapshot?.models.find((model) => model.id === selectedModelId) ?? null;
   const loadingBuiltIn = !!(autoLoad || loadingReference?.bundled);
@@ -1029,6 +1291,7 @@ export default function App() {
       <p>
         {mode === "agent"
           ? "The agent can calculate, describe this device, search and read files you select, and find or open applications after you approve."
+          : research.enabled ? (research.mode === "page" ? "Ask a question about a public webpage." : "Look up information in public sources.")
           : remote ? `Chat sends your requests to ${remote.settings.name} (${localityLabel(remote).toLowerCase()}). Agent mode stays on this computer.`
             : snapshot && !snapshot.models.length ? "Chat needs a local model or a provider you connect."
             : "Chat runs entirely on this computer with your local model."}
@@ -1051,10 +1314,10 @@ export default function App() {
       ) : bundled === "corrupted" ? (
         <Callout tone="error" role="alert" title="The built-in assistant couldn't be verified"
           actions={<button type="button" className="primary-button small" onClick={() => openModal("models")}>
-            {snapshot.models.length ? "Choose a model" : "Import a model"}
+            {snapshot.models.length ? "Choose a model" : "Discover models"}
           </button>}>
           Its model file is damaged or was changed, so it wasn't loaded. Reinstall the app to restore it
-          {snapshot.models.length ? ", or choose one of your models." : ", or import a GGUF model from this computer."}
+          {snapshot.models.length ? ", or choose one of your models." : ", or discover a model to use on this computer."}
         </Callout>
       ) : snapshot.models.length ? (
         <Callout tone="accent" title="Choose a model to begin"
@@ -1077,7 +1340,7 @@ export default function App() {
         <ul className="suggestions" aria-label="Suggestions">
           {(mode === "agent" ? agentSuggestions : chatSuggestions).map((text) => (
             <li key={text}>
-              <button type="button" className="suggestion" onClick={() => { setDraft(text); focusComposer(); }}>
+              <button type="button" className="suggestion" onClick={() => { setDraft(text); setDraftImageSources([]); focusComposer(); }}>
                 {mode === "agent" ? <AgentIcon size={14} /> : <ChatIcon size={14} />}<span>{text}</span>
               </button>
             </li>
@@ -1116,12 +1379,12 @@ export default function App() {
         <header className="topbar">
           <h1 className="topbar-title" title={title}>{title}</h1>
           <span className="spacer" />
-          {remote ? (
+          {mode === "chat" && remoteSelected ? (
             <button type="button" className="status-pill" onClick={() => openModal("settings", "providers")}
-              title="Providers" aria-label={`Chat uses ${remote.settings.name}. Open providers.`}>
+              title="Providers" aria-label={remote ? `Chat uses ${remote.settings.name}. ${localityLabel(remote)}. Open providers.` : "Open the selected provider"}>
               <span className={`status-dot status-${remoteReady ? "ready" : "empty"}`} aria-hidden="true" />
-              <span className="status-pill-label">{remote.settings.locality === "cloud" ? "Cloud" : "Self-hosted"}</span>
-              <span className="status-pill-model">{remote.settings.name} · {remote.settings.model}</span>
+              <span className="status-pill-label">{remote ? (remote.settings.locality === "cloud" ? "Cloud" : "Self-hosted") : "Provider"}</span>
+              <span className="status-pill-model">{remote ? `${remote.settings.name} · ${remote.settings.model}` : "Loading…"}</span>
             </button>
           ) : (
             <button type="button" className="status-pill" onClick={() => openModal("models")}
@@ -1239,9 +1502,6 @@ export default function App() {
               Models shows the recommended settings, which you can review before applying.
             </Callout>
           )}
-          {mode === "chat" && remote && remoteReady && (
-            <RemoteDisclosure provider={remote} onOpen={() => openModal("settings", "providers")} />
-          )}
           <Composer inputRef={composer} mode={mode} onModeChange={setMode}
             agentAvailable={agentAvailable} agentUnavailable={agentUnavailable}
             draft={draft} onDraftChange={setDraft} onSubmit={submit}
@@ -1254,7 +1514,7 @@ export default function App() {
                 || conversation?.turns.at(-1)?.assistants.at(-1)?.message.state === "streaming")}
             stopping={agent.running ? agent.cancelling : stopping}
             enterToSend={snapshot?.preferences.enterToSend ?? true}
-            models={snapshot?.models ?? []} activeModelId={modelReady || phase === "generating" ? snapshot?.activeModelId ?? null : null}
+            models={(snapshot?.models ?? []).filter((model) => model.available !== false)} activeModelId={modelReady || phase === "generating" ? snapshot?.activeModelId ?? null : null}
             modelBusy={modelAction === "load" || modelAction === "switch" ? "Loading…" : modelAction === "unload" ? "Unloading…" : null}
             modelLocked={chatBusy || agentBusy}
             onSelectModel={selectModelFromComposer} onManageModels={() => openModal("models")}
@@ -1272,7 +1532,56 @@ export default function App() {
                 documents={knowledge.documents} loaded={knowledge.loaded} indexStates={knowledge.indexStates}
                 readiness={readiness} memoryEnabled={memoryEnabled} disabled={!!agent.activeApproval || !snapshot}
                 onOpenKnowledge={() => openDestination("knowledge")} onOpenMemory={() => openDestination("memory")} />
-            )} />
+            )}
+            researchControl={(
+              <SearchControl draft={research} disabled={!!agent.activeApproval || !snapshot || generating}
+                onChange={(next) => { setResearch(next); setChatNotice(null); }} />
+            )}
+            attachmentControl={(
+              <>
+                <AttachButton disabled={!!agent.activeApproval || !snapshot || generating} busy={attaching}
+                  count={composerAttachments.length} onAttach={() => void attachFiles()} />
+                {camera.button}
+                {previousAvailable && (
+                  <button type="button" className="composer-pill" aria-pressed={usePreviousFiles}
+                    disabled={generating || reviewRegeneration} title={previousAttachments.map((file) => file.name).join(", ")}
+                    onClick={() => { setUsePreviousFiles(!usePreviousFiles); setShare(emptyShare); }}>
+                    Previous files
+                  </button>
+                )}
+              </>
+            )}
+            attachmentTray={(
+              <>
+              {camera.panel}
+              <AttachmentTray views={composerAttachments} included={includedAttachment} disabled={generating} visual={visualActions}
+                error={attachmentError} rejected={rejectedFiles} plan={attachmentPlan} share={effectiveShare}
+                showSharing={reviewRegeneration || !!draft.trim() || composerAttachments.length > 0}
+                onCancelReview={reviewRegeneration ? () => { setReviewRegeneration(false); setShare(emptyShare); } : undefined}
+                remoteName={remoteTarget?.name ?? null} onShareChange={(next) => {
+                  setShare(next);
+                  setConfirmedAttachmentSelection(next.confirmed ? sharingSelection : null);
+                }}
+                onToggle={(id) => {
+                  setShare(emptyShare);
+                  setPausedAttachments((current) => {
+                    const next = new Set(current);
+                    if (next.has(id)) next.delete(id); else next.add(id);
+                    return next;
+                  });
+                }}
+                onCancel={(id) => void changeAttachment("cancel", id)}
+                onRemove={(id) => void changeAttachment("remove", id)}
+                onRetention={(id, keep) => void changeAttachment(keep ? "keep" : "temporary", id)}
+                onDismissError={() => { setAttachmentError(null); setRejectedFiles([]); }} />
+              </>
+            )}
+            researchPanel={research.enabled ? (
+              <ResearchBar draft={searchDraft} onChange={setResearch} plan={{ ...plan, problem: researchProblem }} view={webResearch}
+                remoteName={remote && remoteReady ? remote.settings.name : null} remoteLocality={remote ? localityLabel(remote) : null}
+                message={draft} disabled={generating}
+                onOpenSettings={() => openModal("settings", "web")} />
+            ) : null} />
         </div>
         </>)}
       </main>
@@ -1303,7 +1612,11 @@ export default function App() {
           onOpenKnowledge={() => { setModal(null); openDestination("knowledge"); }}
           onOpenMemory={() => { setModal(null); openDestination("memory"); }}
           onManageAccess={() => openModal("access")}
-          providers={{ list: providers, intelligence: snapshot.intelligence, busy: providersBusy || chatBusy, onChanged: refreshProviders }} />
+          providers={{ list: providers, intelligence: snapshot.intelligence, busy: providersBusy || chatBusy, onChanged: refreshProviders }}
+          webResearch={{ view: webResearch, busy: chatBusy, onChanged: (view) => {
+            setWebResearch(view);
+            setResearch((current) => current.reviewedQuery ? { ...current, reviewedQuery: null } : current);
+          } }} />
       )}
       {modal === "access" && (
         <AccessDialog scopes={agent.scopes} remaining={agent.scopeRemaining} action={agent.scopeAction}

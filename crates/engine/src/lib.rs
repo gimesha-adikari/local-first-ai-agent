@@ -29,9 +29,11 @@ use inference::{InferenceWorker, LocalInference, Status};
 use serde::Serialize;
 use storage::SqliteStore;
 
+pub mod attachments;
 pub mod chat;
 mod chat_session;
 pub mod credentials;
+pub mod downloads;
 #[cfg(test)]
 mod fixture;
 pub mod knowledge;
@@ -40,8 +42,10 @@ pub mod models;
 pub mod network;
 pub mod policy;
 pub mod providers;
+pub mod research;
 pub mod semantic;
 pub mod usage;
+pub mod visual;
 
 use credentials::{CredentialSource, NoSecureStorage};
 use knowledge::KnowledgeImports;
@@ -63,6 +67,12 @@ pub trait Platform: Send + Sync + 'static {
     /// Memory currently available for a model, in bytes, if known. It sizes
     /// recommended context lengths.
     fn available_memory(&self) -> Option<u64>;
+    /// Notify the host of a library change, including background installation.
+    fn model_library_changed(&self) {}
+    /// Open the host's private, non-following artifact directory.
+    fn model_files(&self, _path: &Path) -> std::io::Result<Box<dyn downloads::ModelFiles>> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
 }
 
 /// Lock the conversation database, reporting a poisoned lock as a storage
@@ -114,6 +124,9 @@ pub struct Engine {
     imports: KnowledgeImports,
     boundary: Arc<NetworkBoundary>,
     credentials: Arc<dyn CredentialSource>,
+    downloads: downloads::Downloads,
+    research_results: research::TransientResults,
+    attachments: Arc<attachments::AttachmentStore>,
 }
 
 #[derive(Serialize)]
@@ -148,8 +161,8 @@ impl Engine {
     }
 
     /// Create the engine with the host's secure storage and the network
-    /// boundary configuration. Saved providers are registered and the saved
-    /// local-only mode is applied before the engine is returned.
+    /// boundary configuration. Saved destinations are registered before the
+    /// engine is returned. The transport starts on the first admitted request.
     pub fn with_network(
         platform: Arc<dyn Platform>,
         worker: Arc<InferenceWorker>,
@@ -181,7 +194,15 @@ impl Engine {
             imports: KnowledgeImports::default(),
             boundary,
             credentials,
+            downloads: downloads::Downloads::default(),
+            research_results: research::TransientResults::default(),
+            attachments: Arc::default(),
         };
+        if let Ok(settings) =
+            crate::database(&engine.database).and_then(|db| db.web_research_settings())
+        {
+            research::register(&engine.policy, &settings);
+        }
         engine.restore_providers().map_err(|_| {
             agent_core::agent::AgentError::new(
                 agent_core::agent::AgentErrorCode::StorageFailed,
@@ -241,14 +262,15 @@ impl Engine {
     }
 
     pub fn bootstrap(&self) -> Result<Bootstrap> {
+        let models = self.list_models()?;
         let db = database(&self.database)?;
         Ok(Bootstrap {
             preferences: db.preferences()?,
             database_path: self.database_path.to_string_lossy().into_owned(),
-            models: db.recent_models()?,
+            models,
             active_model_id: self.active_model(),
             inference: self.worker.status()?,
-            intelligence: providers::effective_settings(&db, &self.policy)?,
+            intelligence: db.intelligence_settings()?,
         })
     }
 
@@ -279,7 +301,12 @@ impl Engine {
 
     pub fn delete_conversation(&self, id: ConversationId) -> Result<()> {
         let _operation = self.reserve()?;
-        database(&self.database)?.delete(id)
+        database(&self.database)?.delete(id)?;
+        self.research_results.clear();
+        // Kept attachments were deleted with the conversation; temporary
+        // ones leave memory now.
+        self.attachments.purge_conversation(id);
+        Ok(())
     }
 
     pub fn save_preferences(&self, preferences: &Preferences) -> Result<()> {
@@ -319,3 +346,6 @@ mod tests;
 
 #[cfg(test)]
 mod remote_tests;
+
+#[cfg(test)]
+mod research_tests;

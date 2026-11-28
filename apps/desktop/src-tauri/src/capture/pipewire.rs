@@ -8,13 +8,16 @@ use std::{
     ffi::{CStr, c_char, c_int, c_void},
     os::fd::{IntoRawFd, OwnedFd},
     ptr,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicPtr, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use agent_core::{
     inference::Cancellation,
-    screen::{Frame, FrameError, SettlePolicy, Settled},
+    screen::{Frame, FrameError, PixelFormat, SettlePolicy, Settled},
 };
 use libloading::Library;
 use serde::Serialize;
@@ -32,12 +35,86 @@ pub(crate) enum StreamError {
     /// The stream failed or the producer went away.
     Failed,
     Cancelled,
+    /// The portal's remote offers no camera.
+    NoCamera,
+    /// The chosen camera disappeared before or during capture.
+    Disconnected,
+}
+
+/// What one capture should negotiate and how long it may wait.
+pub(crate) struct Profile {
+    pub stream_name: &'static CStr,
+    pub role: &'static CStr,
+    pub formats: &'static [PixelFormat],
+    pub size: (u32, u32),
+    pub policy: SettlePolicy,
+    pub first_frame: Duration,
+}
+
+impl Profile {
+    pub(crate) fn screen(policy: SettlePolicy) -> Self {
+        Self {
+            stream_name: c"agent-region-capture",
+            role: c"Screen",
+            formats: &spa::SCREEN_FORMATS,
+            size: (1920, 1080),
+            policy,
+            first_frame: FIRST_FRAME,
+        }
+    }
+
+    /// Cameras stream continuously, so the frame is taken once exposure has
+    /// had a moment to settle after the stream starts, never later.
+    pub(crate) fn camera() -> Self {
+        Self {
+            stream_name: c"agent-camera-snapshot",
+            role: c"Camera",
+            formats: &spa::CAMERA_FORMATS,
+            size: (1280, 720),
+            policy: SettlePolicy {
+                quiet: Duration::from_millis(200),
+                minimum: Duration::from_millis(600),
+                maximum: Duration::from_millis(900),
+            },
+            first_frame: Duration::from_secs(8),
+        }
+    }
+}
+
+/// A camera node the portal's remote exposes. `key` is the stable node
+/// name used to ask for the same camera again; no device path is exposed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraNode {
+    #[serde(skip)]
+    pub id: u32,
+    pub key: String,
+    pub name: String,
+}
+
+pub(crate) enum Target<'a> {
+    /// A ScreenCast node from the portal's Start response.
+    Node(u32),
+    /// A camera on the portal's remote: the one with this key, or the only
+    /// one when no key is given.
+    Camera(Option<&'a str>),
+}
+
+pub(crate) enum Captured {
+    Frame {
+        frame: Frame,
+        record: StreamRecord,
+        /// The camera used and how many were offered (camera targets only).
+        camera: Option<(CameraNode, usize)>,
+    },
+    /// Several cameras exist and none was chosen; nothing was streamed.
+    Choose(Vec<CameraNode>),
 }
 
 /// What the stream delivered, for the capture receipt.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamRecord {
+pub struct StreamRecord {
     pub library: String,
     pub format: String,
     pub width: u32,
@@ -71,6 +148,7 @@ type StreamConnectFn =
 type DequeueFn = unsafe extern "C" fn(*mut c_void) -> *mut PwBuffer;
 type QueueFn = unsafe extern "C" fn(*mut c_void, *mut PwBuffer) -> c_int;
 type UpdateParamsFn = unsafe extern "C" fn(*mut c_void, *mut *const u8, u32) -> c_int;
+type ProxyDestroyFn = unsafe extern "C" fn(*mut c_void);
 
 struct Api {
     _library: Library,
@@ -98,6 +176,7 @@ struct Api {
     stream_dequeue: DequeueFn,
     stream_queue: QueueFn,
     stream_update_params: UpdateParamsFn,
+    proxy_destroy: ProxyDestroyFn,
 }
 
 // SAFETY: the function pointers are plain C entry points of a library that
@@ -150,6 +229,7 @@ unsafe fn load() -> Result<Api, libloading::Error> {
             stream_dequeue: symbol!(b"pw_stream_dequeue_buffer\0"),
             stream_queue: symbol!(b"pw_stream_queue_buffer\0"),
             stream_update_params: symbol!(b"pw_stream_update_params\0"),
+            proxy_destroy: symbol!(b"pw_proxy_destroy\0"),
             _library: library,
         })
     }
@@ -175,6 +255,81 @@ struct StreamEvents {
     command: Option<unsafe extern "C" fn(*mut c_void, *const c_void)>,
     trigger_done: Option<unsafe extern "C" fn(*mut c_void)>,
 }
+
+/// `struct spa_interface`: type, version and callbacks (methods, object).
+/// The `pw_core_*` and `pw_registry_*` calls are inline header functions
+/// that dispatch through these method tables, which are part of the stable
+/// PipeWire 0.3 ABI.
+#[repr(C)]
+struct SpaInterface {
+    kind: *const c_char,
+    version: u32,
+    funcs: *const c_void,
+    data: *mut c_void,
+}
+
+/// The leading members of `struct pw_core_methods`, version 0.
+#[repr(C)]
+struct CoreMethods {
+    version: u32,
+    add_listener:
+        unsafe extern "C" fn(*mut c_void, *mut Hook, *const CoreEvents, *mut c_void) -> c_int,
+    hello: *const c_void,
+    sync: unsafe extern "C" fn(*mut c_void, u32, c_int) -> c_int,
+    pong: *const c_void,
+    error: *const c_void,
+    get_registry: unsafe extern "C" fn(*mut c_void, u32, usize) -> *mut c_void,
+}
+
+/// The leading member of `struct pw_registry_methods`, version 0.
+#[repr(C)]
+struct RegistryMethods {
+    version: u32,
+    add_listener:
+        unsafe extern "C" fn(*mut c_void, *mut Hook, *const RegistryEvents, *mut c_void) -> c_int,
+}
+
+/// `struct pw_core_events`, version 0.
+#[repr(C)]
+struct CoreEvents {
+    version: u32,
+    info: Option<unsafe extern "C" fn(*mut c_void, *const c_void)>,
+    done: Option<unsafe extern "C" fn(*mut c_void, u32, c_int)>,
+    ping: Option<unsafe extern "C" fn(*mut c_void, u32, c_int)>,
+    error: Option<unsafe extern "C" fn(*mut c_void, u32, c_int, c_int, *const c_char)>,
+    remove_id: Option<unsafe extern "C" fn(*mut c_void, u32)>,
+    bound_id: Option<unsafe extern "C" fn(*mut c_void, u32, u32)>,
+    add_mem: Option<unsafe extern "C" fn(*mut c_void, u32, u32, c_int, u32)>,
+    remove_mem: Option<unsafe extern "C" fn(*mut c_void, u32)>,
+}
+
+/// `struct pw_registry_events`, version 0.
+#[repr(C)]
+struct RegistryEvents {
+    version: u32,
+    global: Option<unsafe extern "C" fn(*mut c_void, u32, u32, *const c_char, u32, *const SpaDict)>,
+    global_remove: Option<unsafe extern "C" fn(*mut c_void, u32)>,
+}
+
+#[repr(C)]
+struct SpaDict {
+    flags: u32,
+    n_items: u32,
+    items: *const SpaDictItem,
+}
+
+#[repr(C)]
+struct SpaDictItem {
+    key: *const c_char,
+    value: *const c_char,
+}
+
+const PW_ID_CORE: u32 = 0;
+const VERSION_REGISTRY: u32 = 3;
+/// The registry of a portal camera remote is small; this bounds a listing
+/// the session manager never finishes.
+const LISTING: Duration = Duration::from_secs(3);
+const MAX_CAMERAS: usize = 16;
 
 #[repr(C)]
 struct PwBuffer {
@@ -227,28 +382,160 @@ struct State {
     last_at: Option<Instant>,
     streaming: bool,
     error: Option<StreamError>,
+    cameras: Vec<CameraNode>,
+    sync_seq: Option<c_int>,
+    listed: bool,
+    target: Option<u32>,
+    /// The chosen camera's node was removed while in use.
+    target_removed: bool,
 }
 
 struct Shared {
     api: &'static Api,
     thread_loop: *mut c_void,
-    stream: *mut c_void,
+    stream: AtomicPtr<c_void>,
     state: Mutex<State>,
 }
 
-unsafe extern "C" fn on_state(data: *mut c_void, old: c_int, state: c_int, _: *const c_char) {
+unsafe extern "C" fn on_state(data: *mut c_void, old: c_int, state: c_int, message: *const c_char) {
     // SAFETY: `data` is the Shared box, alive until the stream is destroyed.
     let shared = unsafe { &*(data as *const Shared) };
+    // A failed negotiation names formats ("no more input formats"): the
+    // producer offers nothing this build reads.
+    let format = state == STREAM_STATE_ERROR
+        && !message.is_null()
+        && unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .contains("format");
     if let Ok(mut guard) = shared.state.lock() {
         if state == STREAM_STATE_ERROR
             || (state == STREAM_STATE_UNCONNECTED && old != STREAM_STATE_UNCONNECTED)
         {
-            guard.error.get_or_insert(StreamError::Failed);
+            let failure = if format && guard.format.is_none() {
+                StreamError::Unsupported
+            } else {
+                StreamError::Failed
+            };
+            guard.error.get_or_insert(failure);
         }
         guard.streaming |= state == STREAM_STATE_STREAMING;
     }
     unsafe { (shared.api.loop_signal)(shared.thread_loop, false) };
 }
+
+/// The value of `key` in a PipeWire property dictionary, bounded.
+unsafe fn lookup(dict: *const SpaDict, key: &str) -> Option<String> {
+    let dict = unsafe { dict.as_ref() }?;
+    if dict.items.is_null() || dict.n_items > 512 {
+        return None;
+    }
+    let items = unsafe { std::slice::from_raw_parts(dict.items, dict.n_items as usize) };
+    items.iter().find_map(|item| {
+        if item.key.is_null() || item.value.is_null() {
+            return None;
+        }
+        let name = unsafe { CStr::from_ptr(item.key) };
+        (name.to_bytes() == key.as_bytes()).then(|| {
+            let value = unsafe { CStr::from_ptr(item.value) }.to_string_lossy();
+            value
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(120)
+                .collect()
+        })
+    })
+}
+
+unsafe extern "C" fn on_global(
+    data: *mut c_void,
+    id: u32,
+    _permissions: u32,
+    kind: *const c_char,
+    _version: u32,
+    props: *const SpaDict,
+) {
+    let shared = unsafe { &*(data as *const Shared) };
+    if kind.is_null() || unsafe { CStr::from_ptr(kind) }.to_bytes() != b"PipeWire:Interface:Node" {
+        return;
+    }
+    let class = unsafe { lookup(props, "media.class") };
+    let role = unsafe { lookup(props, "media.role") };
+    if class.as_deref() != Some("Video/Source") || role.as_deref() != Some("Camera") {
+        return;
+    }
+    let Some(key) = (unsafe { lookup(props, "node.name") }) else {
+        return;
+    };
+    let name = unsafe { lookup(props, "node.description") }
+        .or_else(|| unsafe { lookup(props, "node.nick") })
+        .unwrap_or_else(|| key.clone());
+    // A global is announced again when the portal's access permissions on
+    // the remote change; the latest announcement replaces the earlier one.
+    if let Ok(mut guard) = shared.state.lock() {
+        guard.cameras.retain(|camera| camera.id != id);
+        if guard.cameras.len() < MAX_CAMERAS {
+            guard.cameras.push(CameraNode { id, key, name });
+        }
+    }
+    unsafe { (shared.api.loop_signal)(shared.thread_loop, false) };
+}
+
+unsafe extern "C" fn on_global_remove(data: *mut c_void, id: u32) {
+    let shared = unsafe { &*(data as *const Shared) };
+    if let Ok(mut guard) = shared.state.lock() {
+        guard.cameras.retain(|camera| camera.id != id);
+        if guard.target == Some(id) {
+            guard.target_removed = true;
+            guard.error.get_or_insert(StreamError::Disconnected);
+        }
+    }
+    unsafe { (shared.api.loop_signal)(shared.thread_loop, false) };
+}
+
+unsafe extern "C" fn on_done(data: *mut c_void, id: u32, seq: c_int) {
+    let shared = unsafe { &*(data as *const Shared) };
+    if let Ok(mut guard) = shared.state.lock()
+        && id == PW_ID_CORE
+        && guard.sync_seq == Some(seq)
+    {
+        guard.listed = true;
+    }
+    unsafe { (shared.api.loop_signal)(shared.thread_loop, false) };
+}
+
+unsafe extern "C" fn on_core_error(
+    data: *mut c_void,
+    id: u32,
+    _seq: c_int,
+    _res: c_int,
+    _message: *const c_char,
+) {
+    let shared = unsafe { &*(data as *const Shared) };
+    if id == PW_ID_CORE
+        && let Ok(mut guard) = shared.state.lock()
+    {
+        guard.error.get_or_insert(StreamError::Failed);
+    }
+    unsafe { (shared.api.loop_signal)(shared.thread_loop, false) };
+}
+
+static CORE_EVENTS: CoreEvents = CoreEvents {
+    version: 0,
+    info: None,
+    done: Some(on_done),
+    ping: None,
+    error: Some(on_core_error),
+    remove_id: None,
+    bound_id: None,
+    add_mem: None,
+    remove_mem: None,
+};
+
+static REGISTRY_EVENTS: RegistryEvents = RegistryEvents {
+    version: 0,
+    global: Some(on_global),
+    global_remove: Some(on_global_remove),
+};
 
 unsafe extern "C" fn on_param(data: *mut c_void, id: u32, param: *const u8) {
     let shared = unsafe { &*(data as *const Shared) };
@@ -273,21 +560,25 @@ unsafe extern "C" fn on_param(data: *mut c_void, id: u32, param: *const u8) {
     let buffers = spa::buffers();
     let mut params = [buffers.as_ptr()];
     unsafe {
-        (shared.api.stream_update_params)(shared.stream, params.as_mut_ptr(), 1);
+        (shared.api.stream_update_params)(
+            shared.stream.load(Ordering::Acquire),
+            params.as_mut_ptr(),
+            1,
+        );
         (shared.api.loop_signal)(shared.thread_loop, false);
     }
 }
 
 unsafe extern "C" fn on_process(data: *mut c_void) {
     let shared = unsafe { &*(data as *const Shared) };
-    let buffer = unsafe { (shared.api.stream_dequeue)(shared.stream) };
+    let buffer = unsafe { (shared.api.stream_dequeue)(shared.stream.load(Ordering::Acquire)) };
     if buffer.is_null() {
         return;
     }
     // SAFETY: a dequeued pw_buffer and its spa_buffer stay valid until queued
     // again. Every length below is bounded by the buffer's own maxsize.
     let frame = unsafe { read(&*buffer, shared) };
-    unsafe { (shared.api.stream_queue)(shared.stream, buffer) };
+    unsafe { (shared.api.stream_queue)(shared.stream.load(Ordering::Acquire), buffer) };
     if let Ok(mut guard) = shared.state.lock() {
         match frame {
             Ok(Some(frame)) => {
@@ -386,10 +677,33 @@ pub(crate) fn single_frame(
     policy: SettlePolicy,
     cancellation: &Cancellation,
 ) -> Result<(Frame, StreamRecord), StreamError> {
+    match capture(
+        remote,
+        &Profile::screen(policy),
+        Target::Node(node),
+        cancellation,
+    )? {
+        Captured::Frame { frame, record, .. } => Ok((frame, record)),
+        Captured::Choose(_) => Err(StreamError::Failed),
+    }
+}
+
+/// List the cameras on a portal camera remote, choose one and return one
+/// frame from it, or the list when the choice is the user's. Blocks the
+/// calling thread; the registry, stream and connection are gone when it
+/// returns.
+pub(crate) fn capture(
+    remote: OwnedFd,
+    profile: &Profile,
+    target: Target<'_>,
+    cancellation: &Cancellation,
+) -> Result<Captured, StreamError> {
     let api = api()?;
     let started = Instant::now();
     // SAFETY: each pointer below is checked before use and released in
-    // reverse order by `teardown`, with the loop lock held where required.
+    // reverse order, with the loop lock held where required. Hooks outlive
+    // every proxy they are registered on: they are dropped only after the
+    // core (and with it every proxy) is disconnected.
     unsafe {
         let thread_loop = (api.loop_new)(c"agent-capture".as_ptr(), ptr::null());
         if thread_loop.is_null() {
@@ -413,48 +727,50 @@ pub(crate) fn single_frame(
         let mut shared = Box::new(Shared {
             api,
             thread_loop,
-            stream: ptr::null_mut(),
+            stream: AtomicPtr::new(ptr::null_mut()),
             state: Mutex::new(State::default()),
         });
+        let data = &mut *shared as *mut Shared as *mut c_void;
         let mut hook = Box::new(Hook([ptr::null_mut(); 6]));
+        let mut core_hook = Box::new(Hook([ptr::null_mut(); 6]));
+        let mut registry_hook = Box::new(Hook([ptr::null_mut(); 6]));
+        let mut registry = ptr::null_mut();
         let mut result = Err(StreamError::Unavailable);
         if !core.is_null() {
-            let properties = (api.properties_new)(
-                c"media.type".as_ptr(),
-                c"Video".as_ptr(),
-                c"media.category".as_ptr(),
-                c"Capture".as_ptr(),
-                c"media.role".as_ptr(),
-                c"Screen".as_ptr(),
-                ptr::null::<c_char>(),
-            );
-            let stream = (api.stream_new)(core, c"agent-region-capture".as_ptr(), properties);
-            if !stream.is_null() {
-                shared.stream = stream;
-                (api.stream_add_listener)(
-                    stream,
-                    &mut *hook,
-                    &EVENTS,
-                    &mut *shared as *mut Shared as *mut c_void,
-                );
-                let format = spa::enum_format();
-                let mut params = [format.as_ptr()];
-                let flags = FLAG_AUTOCONNECT | FLAG_MAP_BUFFERS | FLAG_DONT_RECONNECT;
-                result = if (api.stream_connect)(
-                    stream,
-                    DIRECTION_INPUT,
+            let node = match target {
+                Target::Node(node) => Ok(Ok(node)),
+                Target::Camera(wanted) => {
+                    registry =
+                        list_cameras(&shared, core, &mut core_hook, &mut registry_hook, data);
+                    if registry.is_null() {
+                        Err(StreamError::Unavailable)
+                    } else {
+                        choose(&shared, wanted, cancellation)
+                    }
+                }
+            };
+            result = match node {
+                Err(error) => Err(error),
+                Ok(Err(cameras)) => Ok(Err(cameras)),
+                Ok(Ok(node)) => stream(
+                    &shared,
+                    core,
+                    profile,
                     node,
-                    flags,
-                    params.as_mut_ptr(),
-                    1,
-                ) < 0
-                {
-                    Err(StreamError::Failed)
-                } else {
-                    wait(&shared, policy, cancellation, started)
-                };
+                    &mut hook,
+                    data,
+                    cancellation,
+                    started,
+                )
+                .map(Ok),
+            };
+            let stream = shared.stream.swap(ptr::null_mut(), Ordering::AcqRel);
+            if !stream.is_null() {
                 (api.stream_disconnect)(stream);
                 (api.stream_destroy)(stream);
+            }
+            if !registry.is_null() {
+                (api.proxy_destroy)(registry);
             }
             (api.core_disconnect)(core);
         }
@@ -462,14 +778,26 @@ pub(crate) fn single_frame(
         (api.loop_stop)(thread_loop);
         (api.context_destroy)(context);
         (api.loop_destroy)(thread_loop);
-        drop(hook);
+        drop((hook, core_hook, registry_hook));
         let state = shared.state.into_inner().unwrap_or_default();
-        let (settled, first_frame_ms) = result?;
+        let (settled, first_frame_ms) = match result? {
+            Ok(settled) => settled,
+            Err(cameras) => return Ok(Captured::Choose(cameras)),
+        };
         let format = state.format.ok_or(StreamError::Unsupported)?;
+        let camera = state.target.and_then(|id| {
+            let offered = state.cameras.len();
+            state
+                .cameras
+                .iter()
+                .find(|camera| camera.id == id)
+                .map(|camera| (camera.clone(), offered))
+        });
         let frame = state.latest.ok_or(StreamError::Timeout)?;
-        Ok((
+        Ok(Captured::Frame {
             frame,
-            StreamRecord {
+            camera,
+            record: StreamRecord {
                 library: api.version.clone(),
                 format: format!("{:?}", format.format).to_uppercase(),
                 width: format.width,
@@ -480,15 +808,163 @@ pub(crate) fn single_frame(
                 first_frame_ms,
                 waited_ms: started.elapsed().as_millis() as u64,
             },
-        ))
+        })
     }
+}
+
+/// Bind the registry, register listeners and ask the server to confirm
+/// that the initial listing is complete. Returns the registry proxy, or
+/// null if the core offers none. The loop lock is held.
+unsafe fn list_cameras(
+    shared: &Shared,
+    core: *mut c_void,
+    core_hook: &mut Hook,
+    registry_hook: &mut Hook,
+    data: *mut c_void,
+) -> *mut c_void {
+    unsafe {
+        let interface = &*(core as *const SpaInterface);
+        let methods = &*(interface.funcs as *const CoreMethods);
+        (methods.add_listener)(interface.data, core_hook, &CORE_EVENTS, data);
+        let registry = (methods.get_registry)(interface.data, VERSION_REGISTRY, 0);
+        if registry.is_null() {
+            return registry;
+        }
+        let registry_interface = &*(registry as *const SpaInterface);
+        let registry_methods = &*(registry_interface.funcs as *const RegistryMethods);
+        (registry_methods.add_listener)(
+            registry_interface.data,
+            registry_hook,
+            &REGISTRY_EVENTS,
+            data,
+        );
+        let seq = (methods.sync)(interface.data, PW_ID_CORE, 0);
+        if let Ok(mut guard) = shared.state.lock() {
+            guard.sync_seq = Some(seq);
+        }
+        registry
+    }
+}
+
+/// Wait for the listing, then pick the camera. `Ok(Err(list))` means the
+/// user has to choose among several.
+unsafe fn choose(
+    shared: &Shared,
+    wanted: Option<&str>,
+    cancellation: &Cancellation,
+) -> Result<Result<u32, Vec<CameraNode>>, StreamError> {
+    let started = Instant::now();
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(StreamError::Cancelled);
+        }
+        {
+            let mut state = shared.state.lock().map_err(|_| StreamError::Failed)?;
+            if let Some(error) = state.error {
+                return Err(error);
+            }
+            if state.listed {
+                let found = match wanted {
+                    Some(key) => state
+                        .cameras
+                        .iter()
+                        .find(|camera| camera.key == key)
+                        .map(|camera| camera.id)
+                        .ok_or(StreamError::Disconnected),
+                    None => match state.cameras.as_slice() {
+                        [] => Err(StreamError::NoCamera),
+                        [only] => Ok(only.id),
+                        several => return Ok(Err(several.to_vec())),
+                    },
+                };
+                let id = found?;
+                state.target = Some(id);
+                return Ok(Ok(id));
+            }
+            if started.elapsed() > LISTING {
+                return Err(StreamError::Timeout);
+            }
+        }
+        unsafe { sleep(shared) };
+    }
+}
+
+/// Release the loop lock for up to 25 ms or until a callback signals.
+unsafe fn sleep(shared: &Shared) {
+    let mut deadline = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        (shared.api.loop_get_time)(shared.thread_loop, &mut deadline, 25_000_000);
+        (shared.api.loop_timed_wait)(shared.thread_loop, &deadline);
+    }
+}
+
+/// Create and connect the stream to `node` and wait for a settled frame.
+/// The loop lock is held. The stream is left in `shared` for teardown.
+#[allow(clippy::too_many_arguments)]
+unsafe fn stream(
+    shared: &Shared,
+    core: *mut c_void,
+    profile: &Profile,
+    node: u32,
+    hook: &mut Hook,
+    data: *mut c_void,
+    cancellation: &Cancellation,
+    started: Instant,
+) -> Result<(Settled, u64), StreamError> {
+    unsafe {
+        let api = shared.api;
+        let properties = (api.properties_new)(
+            c"media.type".as_ptr(),
+            c"Video".as_ptr(),
+            c"media.category".as_ptr(),
+            c"Capture".as_ptr(),
+            c"media.role".as_ptr(),
+            profile.role.as_ptr(),
+            ptr::null::<c_char>(),
+        );
+        let stream = (api.stream_new)(core, profile.stream_name.as_ptr(), properties);
+        if stream.is_null() {
+            return Err(StreamError::Unavailable);
+        }
+        shared.stream.store(stream, Ordering::Release);
+        (api.stream_add_listener)(stream, hook, &EVENTS, data);
+        let format = spa::enum_format(profile.formats, profile.size);
+        let mut params = [format.as_ptr()];
+        let flags = FLAG_AUTOCONNECT | FLAG_MAP_BUFFERS | FLAG_DONT_RECONNECT;
+        if (api.stream_connect)(stream, DIRECTION_INPUT, node, flags, params.as_mut_ptr(), 1) < 0 {
+            return Err(StreamError::Failed);
+        }
+        wait(shared, profile, cancellation, started)
+    }
+}
+
+/// A camera stream that failed may have failed because its node went away;
+/// the registry reports the removal shortly after the stream's state
+/// change. Wait briefly for it, so a disconnection is reported as one.
+unsafe fn refine(shared: &Shared) -> StreamError {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(300) {
+        if shared
+            .state
+            .lock()
+            .map(|state| state.target_removed)
+            .unwrap_or(false)
+        {
+            return StreamError::Disconnected;
+        }
+        unsafe { sleep(shared) };
+    }
+    StreamError::Failed
 }
 
 /// Wait with the loop lock held (released while sleeping) until the frames
 /// settle, fail, time out or the caller cancels.
 unsafe fn wait(
     shared: &Shared,
-    policy: SettlePolicy,
+    profile: &Profile,
     cancellation: &Cancellation,
     started: Instant,
 ) -> Result<(Settled, u64), StreamError> {
@@ -499,17 +975,23 @@ unsafe fn wait(
         {
             let state = shared.state.lock().map_err(|_| StreamError::Failed)?;
             if let Some(error) = state.error {
-                return Err(error);
+                let camera = state.target.is_some();
+                drop(state);
+                return Err(if camera && error == StreamError::Failed {
+                    unsafe { refine(shared) }
+                } else {
+                    error
+                });
             }
             match (state.first_at, state.last_at) {
                 (Some(first), Some(last)) => {
                     let now = Instant::now();
-                    let decision = policy.decide(now - first, now - last);
+                    let decision = profile.policy.decide(now - first, now - last);
                     if decision != Settled::Waiting {
                         return Ok((decision, (first - started).as_millis() as u64));
                     }
                 }
-                _ if started.elapsed() > FIRST_FRAME => {
+                _ if started.elapsed() > profile.first_frame => {
                     return Err(if state.rejected > 0 {
                         StreamError::Unsupported
                     } else {
@@ -519,14 +1001,7 @@ unsafe fn wait(
                 _ => {}
             }
         }
-        let mut deadline = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        unsafe {
-            (shared.api.loop_get_time)(shared.thread_loop, &mut deadline, 25_000_000);
-            (shared.api.loop_timed_wait)(shared.thread_loop, &deadline);
-        }
+        unsafe { sleep(shared) };
     }
 }
 

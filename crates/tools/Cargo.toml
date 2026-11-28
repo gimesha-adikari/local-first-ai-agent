@@ -11,6 +11,13 @@ agent-core = { path = "../agent-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.191"
+png = "=0.18.1"
+# EXIF orientation normalization of attached photos (Stage 04-E): bounded
+# pure-Rust decoding and re-encoding of rotated or mirrored images only.
+zune-jpeg = "=0.4.21"
+zune-core = "=0.4.12"
+jpeg-encoder = "=0.7.1"
+zeroize = "1.9.2"
 gio = "=0.18.4"
 
 [dev-dependencies]

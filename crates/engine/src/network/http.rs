@@ -15,7 +15,7 @@ pub(super) fn encode_request(
     path: &str,
     content_type: Option<&str>,
     body: &[u8],
-    credential: Option<&Secret>,
+    credential: Option<(&Secret, super::CredentialHeader)>,
 ) -> Zeroizing<Vec<u8>> {
     let mut head = Zeroizing::new(Vec::with_capacity(512 + body.len()));
     let mut line = |text: &str| {
@@ -34,13 +34,45 @@ pub(super) fn encode_request(
     if method != "GET" || !body.is_empty() {
         line(&format!("Content-Length: {}", body.len()));
     }
-    if let Some(secret) = credential {
-        head.extend_from_slice(b"Authorization: Bearer ");
+    if let Some((secret, header)) = credential {
+        head.extend_from_slice(match header {
+            super::CredentialHeader::Bearer => b"Authorization: Bearer ".as_slice(),
+            super::CredentialHeader::SubscriptionToken => b"X-Subscription-Token: ".as_slice(),
+        });
         head.extend_from_slice(secret.expose().as_bytes());
         head.extend_from_slice(b"\r\n");
     }
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(body);
+    head
+}
+
+/// Public page requests carry only fixed, non-identifying headers: no
+/// cookies, referrer, credentials, language or client hints.
+pub(super) fn encode_page(authority: &str, path: &str) -> Zeroizing<Vec<u8>> {
+    use std::io::Write as _;
+
+    let mut head = Zeroizing::new(Vec::with_capacity(256 + path.len()));
+    write!(head, "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: {USER_AGENT}\r\nAccept: text/html, application/xhtml+xml;q=0.9, text/plain;q=0.8\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n").expect("write to memory");
+    head
+}
+
+/// Artifact requests have only fixed public headers and a validated target.
+pub(super) fn encode_artifact(
+    authority: &str,
+    target: &super::artifact::Target,
+) -> Zeroizing<Vec<u8>> {
+    use std::io::Write as _;
+
+    let mut head = Zeroizing::new(Vec::with_capacity(512 + target.path.len()));
+    write!(head, "GET {} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: {USER_AGENT}\r\nAccept: application/octet-stream\r\nAccept-Encoding: identity\r\nConnection: close\r\n", target.path).expect("write to memory");
+    if let Some(offset) = target.offset {
+        write!(head, "Range: bytes={offset}-\r\n").expect("write to memory");
+    }
+    if let Some(etag) = &target.if_range {
+        write!(head, "If-Range: {etag}\r\n").expect("write to memory");
+    }
+    head.extend_from_slice(b"\r\n");
     head
 }
 
@@ -58,6 +90,10 @@ pub(super) struct Head {
     pub content_type: Option<String>,
     pub location: Option<String>,
     pub framing: Framing,
+    pub content_range: Option<String>,
+    pub etag: Option<String>,
+    pub linked_etag: Option<String>,
+    pub linked_size: Option<String>,
 }
 
 const MAX_HEADERS: usize = 64;
@@ -71,7 +107,11 @@ fn header_text(value: &[u8]) -> Result<&str, Failure> {
 
 /// Parse a response head. `Ok(None)` means more bytes are needed.
 /// Informational responses are consumed and skipped.
-pub(super) fn parse_head(buffer: &mut Vec<u8>, max_head: usize) -> Result<Option<Head>, Failure> {
+pub(super) fn parse_head(
+    buffer: &mut Vec<u8>,
+    max_head: usize,
+    artifact: bool,
+) -> Result<Option<Head>, Failure> {
     loop {
         let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
         let mut response = httparse::Response::new(&mut headers);
@@ -102,6 +142,10 @@ pub(super) fn parse_head(buffer: &mut Vec<u8>, max_head: usize) -> Result<Option
         let mut chunked = false;
         let mut content_type = None;
         let mut location = None;
+        let mut content_range = None;
+        let mut etag = None;
+        let mut linked_etag = None;
+        let mut linked_size = None;
         for header in response.headers.iter() {
             let name = header.name.to_ascii_lowercase();
             match name.as_str() {
@@ -109,7 +153,7 @@ pub(super) fn parse_head(buffer: &mut Vec<u8>, max_head: usize) -> Result<Option
                     let value: u64 = header_text(header.value)?
                         .parse()
                         .map_err(|_| Failure::Protocol)?;
-                    if length.is_some_and(|known| known != value) {
+                    if length.is_some_and(|known| artifact || known != value) {
                         return Err(Failure::Protocol);
                     }
                     length = Some(value);
@@ -131,10 +175,20 @@ pub(super) fn parse_head(buffer: &mut Vec<u8>, max_head: usize) -> Result<Option
                 }
                 "location" => {
                     let value = header_text(header.value)?;
-                    if value.len() <= MAX_LOCATION && value.bytes().all(|b| b.is_ascii_graphic()) {
+                    if artifact && location.is_some() {
+                        return Err(Failure::Protocol);
+                    }
+                    let limit = if artifact { 8192 } else { MAX_LOCATION };
+                    if value.len() <= limit && value.bytes().all(|b| b.is_ascii_graphic()) {
                         location = Some(value.to_owned());
                     }
                 }
+                "content-range" if artifact => {
+                    set_artifact_header(&mut content_range, header.value)?
+                }
+                "etag" if artifact => set_artifact_header(&mut etag, header.value)?,
+                "x-linked-etag" if artifact => set_artifact_header(&mut linked_etag, header.value)?,
+                "x-linked-size" if artifact => set_artifact_header(&mut linked_size, header.value)?,
                 _ => {}
             }
         }
@@ -157,8 +211,21 @@ pub(super) fn parse_head(buffer: &mut Vec<u8>, max_head: usize) -> Result<Option
             content_type,
             location,
             framing,
+            content_range,
+            etag,
+            linked_etag,
+            linked_size,
         }));
     }
+}
+
+fn set_artifact_header(slot: &mut Option<String>, value: &[u8]) -> Result<(), Failure> {
+    let value = header_text(value)?;
+    if slot.is_some() || value.len() > 256 {
+        return Err(Failure::Protocol);
+    }
+    *slot = Some(value.to_owned());
+    Ok(())
 }
 
 const MAX_CHUNK_LINE: usize = 1024;
@@ -324,7 +391,7 @@ mod tests {
     use super::*;
 
     fn head(text: &str) -> Result<Option<Head>, Failure> {
-        parse_head(&mut text.as_bytes().to_vec(), 64 * 1024)
+        parse_head(&mut text.as_bytes().to_vec(), 64 * 1024, false)
     }
 
     #[test]
@@ -410,7 +477,7 @@ mod tests {
             "/v1/chat/completions",
             Some("application/json"),
             b"{}",
-            Some(&secret),
+            Some((&secret, crate::network::CredentialHeader::Bearer)),
         );
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(
@@ -420,5 +487,35 @@ mod tests {
         assert!(text.contains("Authorization: Bearer sk-fixture\r\n"));
         assert!(text.contains("Connection: close\r\n"));
         assert!(text.ends_with("\r\n\r\n{}"));
+        let brave = encode_request(
+            "POST",
+            "api.search.brave.com",
+            "/res/v1/web/search",
+            Some("application/json"),
+            b"{}",
+            Some((&secret, crate::network::CredentialHeader::SubscriptionToken)),
+        );
+        let text = std::str::from_utf8(&brave).unwrap();
+        assert!(text.contains("X-Subscription-Token: sk-fixture\r\n"));
+        assert!(!text.contains("Authorization"));
+        assert_eq!(text.matches("sk-fixture").count(), 1);
+    }
+
+    #[test]
+    fn page_requests_carry_no_identifying_headers() {
+        let bytes = encode_page("news.example.org", "/a?b=c");
+        let text = std::str::from_utf8(&bytes).unwrap().to_ascii_lowercase();
+        assert!(text.starts_with("get /a?b=c http/1.1\r\nhost: news.example.org\r\n"));
+        for header in [
+            "cookie",
+            "referer",
+            "authorization",
+            "accept-language",
+            "x-subscription-token",
+            "origin:",
+        ] {
+            assert!(!text.contains(header), "{header}");
+        }
+        assert!(text.ends_with("\r\n\r\n"));
     }
 }

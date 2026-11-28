@@ -108,7 +108,6 @@ fn harness(
         CapabilityRegistry::new([GENERATE]),
         DataClasses::default(),
         destinations,
-        false,
     ));
     let boundary = NetworkBoundary::new(
         Arc::clone(&policy),
@@ -236,7 +235,7 @@ fn delivers_the_bound_request_with_its_credential_and_records_it() {
 }
 
 #[test]
-fn local_only_and_unregistered_destinations_open_no_connection() {
+fn revoked_grants_and_unregistered_destinations_open_no_connection() {
     let server = Fixture::start(
         None,
         respond("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
@@ -250,13 +249,12 @@ fn local_only_and_unregistered_destinations_open_no_connection() {
     );
     let request = h.request(loopback(server.port), b"{}");
     let grants = h.grants(&request, future());
-    h.policy.set_local_only(true);
+    assert!(h.policy.revoke(grants.1).unwrap());
     let failed = block_on(h.boundary.send(request, grants.0, grants.1))
         .err()
         .unwrap();
-    assert_eq!(failed.failure, Failure::Denied(Denial::Locality));
+    assert_eq!(failed.failure, Failure::Denied(Denial::Revoked));
     assert_eq!(failed.record.transmission, Transmission::Unsent);
-    h.policy.set_local_only(false);
     let elsewhere = self_hosted("fixture.local/1", "http://127.0.0.1:9/v1");
     let failed = block_on(h.boundary.send(h.request(elsewhere, b"{}"), 0, 0))
         .err()
@@ -596,7 +594,6 @@ fn cancellation_expiry_and_revocation_interrupt_a_stalled_request_body() {
         Failure::Cancelled,
         Failure::Denied(Denial::Expired),
         Failure::Denied(Denial::Revoked),
-        Failure::Denied(Denial::Locality),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let destination = loopback(listener.local_addr().unwrap().port());
@@ -651,7 +648,6 @@ fn cancellation_expiry_and_revocation_interrupt_a_stalled_request_body() {
                 match expected {
                     Failure::Cancelled => cancel.cancel(),
                     Failure::Denied(Denial::Revoked) => assert!(policy.revoke(share).unwrap()),
-                    Failure::Denied(Denial::Locality) => policy.set_local_only(true),
                     _ => {}
                 }
                 wait.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -831,7 +827,7 @@ fn json_fixture_helper_frames_bodies() {
 }
 
 #[test]
-fn restriction_revokes_in_flight_and_queued_requests_across_reenable() {
+fn closing_a_session_stops_in_flight_and_queued_requests() {
     let (entered, arrived) = mpsc::channel();
     let (release, resume) = mpsc::channel();
     let resume = Mutex::new(resume);
@@ -879,19 +875,12 @@ fn restriction_revokes_in_flight_and_queued_requests_across_reenable() {
             )
             .is_pending()
         );
-        h.policy.set_local_only(true);
-        h.policy.set_local_only(false);
+        h.session.close();
         release.send(()).unwrap();
         let first = first.await.err().unwrap();
         let second = second.await.err().unwrap();
-        assert!(matches!(
-            first.failure,
-            Failure::Denied(Denial::Revoked | Denial::Locality)
-        ));
-        assert!(matches!(
-            second.failure,
-            Failure::Denied(Denial::Revoked | Denial::Locality)
-        ));
+        assert_eq!(first.failure, Failure::Cancelled);
+        assert_eq!(second.failure, Failure::Cancelled);
         assert_eq!(first.record.transmission, Transmission::Sent);
         assert_eq!(second.record.transmission, Transmission::Unsent);
         assert_eq!(server.accepted(), 1);
@@ -899,7 +888,7 @@ fn restriction_revokes_in_flight_and_queued_requests_across_reenable() {
 }
 
 #[test]
-fn restriction_discards_a_buffered_response_after_reenable() {
+fn grant_revocation_discards_a_buffered_response() {
     let server = Fixture::start(
         None,
         Arc::new(|_, out| {
@@ -914,9 +903,9 @@ fn restriction_discards_a_buffered_response_after_reenable() {
         fast_limits(),
     );
     let request = h.request(loopback(server.port), b"prompt");
-    let mut response = h.send(request).unwrap();
-    h.policy.set_local_only(true);
-    h.policy.set_local_only(false);
+    let (process, share) = h.grants(&request, future());
+    let mut response = block_on(h.boundary.send(request, process, share)).unwrap();
+    assert!(h.policy.revoke(share).unwrap());
     assert_eq!(
         block_on(response.next()).unwrap().unwrap_err(),
         Failure::Denied(Denial::Revoked)

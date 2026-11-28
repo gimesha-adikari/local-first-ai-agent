@@ -28,7 +28,7 @@ fn settings() -> ProviderSettings {
 }
 
 fn store() -> SqliteStore {
-    SqliteStore::open(Path::new(":memory:")).unwrap()
+    SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap()
 }
 
 #[test]
@@ -45,13 +45,11 @@ fn providers_keep_their_key_and_selection_follows_deletion() {
     assert_eq!(updated.key, saved.key);
     assert_eq!(updated.settings.model, "other-model");
     db.save_intelligence_settings(IntelligenceSettings {
-        local_only: false,
         active_provider: Some(saved.id),
     })
     .unwrap();
     assert!(
         db.save_intelligence_settings(IntelligenceSettings {
-            local_only: false,
             active_provider: Some(999),
         })
         .is_err()
@@ -61,7 +59,6 @@ fn providers_keep_their_key_and_selection_follows_deletion() {
     assert_eq!(
         db.intelligence_settings().unwrap(),
         IntelligenceSettings {
-            local_only: false,
             active_provider: None
         }
     );
@@ -244,7 +241,7 @@ fn spending_limits_need_prices_and_count_unpriced_usage() {
 }
 
 #[test]
-fn schema_twelve_profiles_upgrade_local_only_and_keep_their_models() {
+fn schema_twelve_profiles_upgrade_with_local_chat_and_keep_their_models() {
     let directory = std::env::temp_dir().join(format!(
         "agent-provider-upgrade-{}-{}",
         std::process::id(),
@@ -253,7 +250,7 @@ fn schema_twelve_profiles_upgrade_local_only_and_keep_their_models() {
     std::fs::create_dir(&directory).unwrap();
     let path = directory.join("chat.sqlite3");
     {
-        let mut db = SqliteStore::open(&path).unwrap();
+        let mut db = SqliteStore::open_test_fixture(&path).unwrap();
         let model = db
             .remember_model(
                 Path::new("/models/lfm.gguf"),
@@ -268,13 +265,14 @@ fn schema_twelve_profiles_upgrade_local_only_and_keep_their_models() {
         .unwrap();
         db.connection
             .execute_batch(
-                "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+                "DROP TABLE visual_settings; DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
+         ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
          DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
                  ALTER TABLE models DROP COLUMN artifact_key; PRAGMA user_version = 12;",
             )
             .unwrap();
     }
-    let db = SqliteStore::open(&path).unwrap();
+    let db = SqliteStore::open_test_fixture(&path).unwrap();
     assert_eq!(
         db.intelligence_settings().unwrap(),
         IntelligenceSettings::default()
@@ -289,4 +287,49 @@ fn schema_twelve_profiles_upgrade_local_only_and_keep_their_models() {
     );
     drop(db);
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn schema_nineteen_migrates_the_effective_chat_target() {
+    for local_only in [true, false] {
+        let directory = std::env::temp_dir().join(format!(
+            "agent-connectivity-upgrade-{}-{}-{local_only}",
+            std::process::id(),
+            crate::unix_ms().unwrap()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("chat.sqlite3");
+        let id = {
+            let mut db = SqliteStore::open_test_fixture(&path).unwrap();
+            let saved = db.save_provider(None, &settings()).unwrap();
+            db.connection
+                .execute_batch(
+                    "DROP TABLE intelligence_settings;
+                     CREATE TABLE intelligence_settings (
+                         id INTEGER PRIMARY KEY CHECK (id = 1),
+                         local_only INTEGER NOT NULL DEFAULT 1 CHECK (local_only IN (0, 1)),
+                         active_provider INTEGER REFERENCES providers(id) ON DELETE SET NULL
+                     ) STRICT;
+                     PRAGMA user_version = 19;",
+                )
+                .unwrap();
+            db.connection
+                .execute(
+                    "INSERT INTO intelligence_settings VALUES (1, ?1, ?2)",
+                    params![local_only, saved.id],
+                )
+                .unwrap();
+            saved.id
+        };
+
+        for _ in 0..2 {
+            let db = SqliteStore::open_test_fixture(&path).unwrap();
+            assert_eq!(
+                db.intelligence_settings().unwrap().active_provider,
+                if local_only { None } else { Some(id) }
+            );
+            assert_eq!(db.provider(id).unwrap().settings, settings());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

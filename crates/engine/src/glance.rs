@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use agent_core::{
     capability::{GENERATE, ImageInput, Retention},
     chat::{ChatHistory, GenerationState, Message, MessageRole},
-    classification::{CLIPBOARD_TEXT, LIBRARY, MEMORY, SCREEN_IMAGE, SCREEN_TEXT},
+    classification::{
+        CAMERA_IMAGE, CAMERA_TEXT, CLIPBOARD_TEXT, LIBRARY, MEMORY, SCREEN_IMAGE, SCREEN_TEXT,
+    },
     intelligence::Receipt,
     provider::{ProviderId, Sharing},
 };
@@ -86,7 +88,8 @@ impl Input {
     }
 }
 
-/// A confirmed screen crop supplied by the trusted host, never by the panel.
+/// A confirmed screen or camera crop supplied by the trusted host, never by
+/// the panel.
 pub struct Attachment {
     pub image: ImageInput,
     pub size: (u32, u32),
@@ -107,32 +110,62 @@ pub struct Estimate {
 
 pub const MAX_TEXT_BYTES: usize = 8192;
 
-#[derive(Clone, Copy)]
-pub enum Origin {
-    Manual,
-    Clipboard,
-    EditedClipboard,
-    /// Text recognized from the session's screen crop, edited or not.
-    Screen,
-    /// The session used both the clipboard and a screen crop; the text is
-    /// labelled with both, conservatively.
-    ScreenAndClipboard,
+/// Every source the panel session's text came from. Editing or replacing
+/// text never removes a source: each one the session used is labelled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Origin {
+    /// Clipboard text was read, edited or not.
+    pub clipboard: bool,
+    /// Text was recognized from a screen crop.
+    pub screen: bool,
+    /// Text was recognized from a camera snapshot (Stage 04-E).
+    pub camera: bool,
 }
 
-fn prompt_labels(origin: Origin) -> Labels {
+impl Origin {
+    pub const MANUAL: Self = Self {
+        clipboard: false,
+        screen: false,
+        camera: false,
+    };
+    pub const CLIPBOARD: Self = Self {
+        clipboard: true,
+        ..Self::MANUAL
+    };
+    pub const SCREEN: Self = Self {
+        screen: true,
+        ..Self::MANUAL
+    };
+    pub const CAMERA: Self = Self {
+        camera: true,
+        ..Self::MANUAL
+    };
+
+    fn kind(self) -> SourceKind {
+        if self.camera {
+            SourceKind::CameraText
+        } else if self.screen {
+            SourceKind::ScreenText
+        } else if self.clipboard {
+            SourceKind::Clipboard
+        } else {
+            SourceKind::ManualText
+        }
+    }
+}
+
+pub fn prompt_labels(origin: Origin) -> Labels {
     let mut labels = Labels::from_source(USER_INPUT);
-    match origin {
-        Origin::Manual => {}
-        Origin::Clipboard | Origin::EditedClipboard => labels.insert(CLIPBOARD_TEXT),
-        Origin::Screen => {
-            labels.insert(SCREEN_TEXT);
-            labels.insert(SCREEN_IMAGE);
-        }
-        Origin::ScreenAndClipboard => {
-            labels.insert(CLIPBOARD_TEXT);
-            labels.insert(SCREEN_TEXT);
-            labels.insert(SCREEN_IMAGE);
-        }
+    if origin.clipboard {
+        labels.insert(CLIPBOARD_TEXT);
+    }
+    if origin.screen {
+        labels.insert(SCREEN_TEXT);
+        labels.insert(SCREEN_IMAGE);
+    }
+    if origin.camera {
+        labels.insert(CAMERA_TEXT);
+        labels.insert(CAMERA_IMAGE);
     }
     labels
 }
@@ -141,9 +174,6 @@ fn prompt_labels(origin: Origin) -> Labels {
 #[serde(rename_all = "camelCase")]
 pub struct PanelState {
     local_available: bool,
-    /// Local-only mode is on: providers are hidden and only on-device work
-    /// (including screen capture and text recognition) is offered.
-    local_only: bool,
     memory_enabled: bool,
     providers: Vec<Provider>,
     documents: Vec<Document>,
@@ -220,7 +250,6 @@ impl Engine {
         }
         Ok(PanelState {
             local_available: self.active_model().is_some(),
-            local_only: self.policy.is_local_only(),
             memory_enabled,
             providers,
             documents: documents
@@ -400,11 +429,7 @@ impl ChatRuntime {
         let prompt = serde_json::json!({"request_parameter": option, "quoted_context": input.text})
             .to_string();
         let input_source = ContextSource {
-            kind: match origin {
-                Origin::Manual => SourceKind::ManualText,
-                Origin::Clipboard | Origin::EditedClipboard => SourceKind::Clipboard,
-                Origin::Screen | Origin::ScreenAndClipboard => SourceKind::ScreenText,
-            },
+            kind: origin.kind(),
             record: None,
             labels: prompt_labels(origin),
         };
@@ -417,12 +442,6 @@ impl ChatRuntime {
             let db = database(&self.database)?;
             let target = match input.provider {
                 Some(id) => {
-                    if self.policy.is_local_only() {
-                        return Err(InferenceError::new(
-                            ErrorCode::PolicyDenied,
-                            "Local-only mode is on, so nothing is sent to providers. Choose the local model, or turn off Local-only mode in the main window.",
-                        ));
-                    }
                     if !input.share {
                         return Err(InferenceError::new(
                             ErrorCode::PolicyDenied,
@@ -510,7 +529,11 @@ impl ChatRuntime {
             ]
             .into_iter()
             .chain(attachment.as_ref().map(|image| ContextSource {
-                kind: SourceKind::ScreenImage,
+                kind: if image.labels.contains(CAMERA_IMAGE) {
+                    SourceKind::CameraImage
+                } else {
+                    SourceKind::ScreenImage
+                },
                 record: None,
                 labels: image.labels.clone(),
             }))
@@ -574,6 +597,8 @@ impl ChatRuntime {
                         images: attachment
                             .map(|image| vec![(image.image, image.size)])
                             .unwrap_or_default(),
+                        external: Vec::new(),
+                        attachments: false,
                     },
                     target,
                     events,
@@ -600,6 +625,7 @@ impl ChatRuntime {
                         sources,
                         coverage: None,
                         candidates,
+                        external: Vec::new(),
                     },
                 )
                 .await

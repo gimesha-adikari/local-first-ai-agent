@@ -7,24 +7,28 @@ import {
   Advanced, Capabilities, ModelLicense, ModelsPanel, OutputLimitExplanation, type ModelAction,
 } from "./Dialogs";
 import {
-  BookIcon, ChatIcon, ChevronRightIcon, CloudIcon, CpuIcon, CubeIcon, GearIcon, InfoIcon, MemoryIcon, MonitorIcon, MoonIcon,
+  BookIcon, ChatIcon, ChevronRightIcon, CloudIcon, CpuIcon, CubeIcon, GearIcon, GlobeIcon, InfoIcon, MemoryIcon, MonitorIcon, MoonIcon,
   PowerIcon, ShieldIcon, Spinner, SunIcon,
 } from "./icons";
 import { errorMessage } from "./inference";
 import { embeddingCopy } from "./knowledge";
-import { builtInModelName, capabilityGuidance, modelLabel, referenceProfile } from "./models";
+import { builtInModelName, capabilityGuidance, modelLabel, modelOrigin, referenceProfile } from "./models";
 import { Callout, Dialog, Segmented, Switch } from "./ui";
+import { ModelManager } from "./ModelManager";
 import { ProvidersPanel } from "./ProvidersPanel";
 import type { IntelligenceSettings, ProviderView } from "./providers";
+import type { WebResearchView } from "./research";
+import { WebSearchPanel } from "./WebSearchPanel";
 import type { KnowledgeController } from "./useKnowledge";
 
-export type SettingsCategory = "general" | "chat" | "models" | "providers" | "knowledge" | "privacy" | "about";
+export type SettingsCategory = "general" | "chat" | "models" | "providers" | "web" | "knowledge" | "privacy" | "about";
 
 const categories: { key: SettingsCategory; label: string; description: string; icon: ReactNode }[] = [
   { key: "general", label: "General", description: "Appearance, typing and the desktop shortcut.", icon: <GearIcon size={15} /> },
   { key: "chat", label: "Chat & Agent", description: "The loaded model's abilities, replies and file access.", icon: <ChatIcon size={15} /> },
-  { key: "models", label: "Models", description: "Your local models and their configuration. Everything runs on this computer's processor.", icon: <CubeIcon size={15} /> },
+  { key: "models", label: "Models", description: "Find local models, manage downloads and choose what runs on this computer.", icon: <CubeIcon size={15} /> },
   { key: "providers", label: "Providers", description: "Optional cloud and self-hosted intelligence, with what may be shared and monthly limits.", icon: <CloudIcon size={15} /> },
+  { key: "web", label: "Web search", description: "Search providers for web research in Chat, and what is sent and saved.", icon: <GlobeIcon size={15} /> },
   { key: "knowledge", label: "Knowledge & Memory", description: "Semantic search, document context and saved memories.", icon: <BookIcon size={15} /> },
   { key: "privacy", label: "Privacy & Storage", description: "What is stored on this computer, and where.", icon: <ShieldIcon size={15} /> },
   { key: "about", label: "About & Licenses", description: "Version, model licenses and notices.", icon: <InfoIcon size={15} /> },
@@ -43,7 +47,7 @@ export type ModelsPanelProps = Omit<Parameters<typeof ModelsPanel>[0], "drafts" 
 
 export function SettingsDialog({
   snapshot, category, onCategory, onSavePreferences, onClose, models, modelAction, knowledge, knowledgeLock,
-  memoryEnabled, onMemoryEnabledChange, onOpenKnowledge, onOpenMemory, onManageAccess, providers,
+  memoryEnabled, onMemoryEnabledChange, onOpenKnowledge, onOpenMemory, onManageAccess, providers, webResearch,
 }: {
   snapshot: Bootstrap;
   category: SettingsCategory;
@@ -60,6 +64,7 @@ export function SettingsDialog({
   onOpenMemory: () => void;
   onManageAccess: () => void;
   providers: { list: ProviderView[]; intelligence: IntelligenceSettings; busy: boolean; onChanged: () => Promise<void> };
+  webResearch: { view: WebResearchView | null; busy: boolean; onChanged: (view: WebResearchView) => void };
 }) {
   // Drafts live here so switching categories never discards them.
   const [preferences, setPreferences] = useState(snapshot.preferences);
@@ -110,16 +115,25 @@ export function SettingsDialog({
           {category === "general" && <GeneralPanel preferences={preferences} disabled={saving} onChange={setPreferences} />}
           {category === "chat" && <ChatPanel snapshot={snapshot} onManageAccess={onManageAccess} onModels={() => onCategory("models")} />}
           {category === "models" && (
+            <ModelManager initialInstalled={snapshot.models.some((model) => model.available !== false)}
+              operationsBusy={models.operationLocked || modelAction !== null || knowledge.holdsLease}
+              onSelectModel={models.onSelect} onImportChat={models.onImport}
+              onImportEmbedding={knowledge.chooseModel} onUnloadEmbedding={knowledge.unloadModel}
+              onEmbeddingChanged={knowledge.refreshEmbedding} embeddingNotice={knowledge.notice}>
             <ModelsPanel {...models} drafts={modelDrafts}
               onDraft={(id, draft) => setModelDrafts((drafts) => {
                 const next = { ...drafts };
                 if (draft) next[id] = draft; else delete next[id];
                 return next;
               })} />
+            </ModelManager>
           )}
           {category === "providers" && (
             <ProvidersPanel providers={providers.list} intelligence={providers.intelligence} busy={providers.busy}
               onChanged={providers.onChanged} />
+          )}
+          {category === "web" && (
+            <WebSearchPanel view={webResearch.view} busy={webResearch.busy} onChanged={webResearch.onChanged} />
           )}
           {category === "knowledge" && (
             <KnowledgePanel knowledge={knowledge} lockReason={knowledgeLock} memoryEnabled={memoryEnabled}
@@ -240,7 +254,7 @@ function ChatPanel({ snapshot, onManageAccess, onModels }: { snapshot: Bootstrap
           <div>
             <strong>{info ? modelLabel(info.fileName) : "No model loaded"}</strong>
             <p className="hint">
-              {info && reference ? `${referenceProfile(reference)?.role ?? (reference.bundled ? "Built-in" : "Imported")} · ${
+              {info && reference ? `${referenceProfile(reference)?.role ?? modelOrigin(reference)} · ${
                 reference.automaticSettings ? "automatic" : "custom"} settings`
                 : "Load a model in Models to chat."}
             </p>
@@ -367,17 +381,26 @@ export function EmbeddingModelCard({ knowledge, lockReason }: { knowledge: Knowl
 }
 
 function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+
+  async function openRecovery() {
+    setRecoveryError(null);
+    try {
+      await invoke("database_recovery_key");
+    } catch (failure) {
+      setRecoveryError(errorMessage(failure));
+    }
+  }
+
   return (
     <div className="settings-stack">
       <section className="settings-section">
         <h4>On this computer</h4>
         <ul className="privacy-list">
-          <li>{snapshot.intelligence.localOnly
-            ? "Local-only mode is on: the app makes no outbound connections. Chat, Agent, Knowledge, Memory and the contextual panel, including screen capture and text recognition, run on this computer, and the app doesn't download models."
-            : "Local-only mode is off. Chat and the contextual panel send requests only to the provider you select, after showing what will be shared. Agent, Knowledge, Memory, screen capture and text recognition still run locally, and the app doesn't download models."}</li>
+          <li>Local models, Agent, Knowledge, Memory and text recognition run on this computer. Chat shows the selected provider, and web search and model downloads connect when you request them.</li>
           <li>The contextual panel reads the clipboard or the screen only when you ask. Each screen capture asks your desktop for permission again, holds one frame in memory, and keeps only the region you confirm until the panel closes. Nothing from the panel is saved unless you choose Remember.</li>
           <li>Provider API keys are kept in your system keyring, never in the database or this window.</li>
-          <li>Conversations, imported document text, semantic indexes and saved memories are stored in an ordinary SQLite database. It isn't encrypted.</li>
+          <li>Conversations, imported document text, semantic indexes and saved memories are encrypted on disk. Your system keyring unlocks the database.</li>
           <li>The paths of models you choose, including the remembered semantic model, are stored locally and never shown to the interface or sent anywhere.</li>
           <li>The agent can read only files and folders you select. Access is read-only, expires automatically, and ends when the app closes.</li>
           <li>Saved answers can contain text or facts from files and documents you selected, even after a document is deleted.</li>
@@ -390,6 +413,23 @@ function PrivacyPanel({ snapshot }: { snapshot: Bootstrap }) {
           <span>Location</span>
           <code>{snapshot.databasePath}</code>
         </div>
+        <button type="button" className="secondary-button small" onClick={() => void openRecovery()}>
+          Show recovery key…
+        </button>
+        {recoveryError && <p className="error-text" role="alert">{recoveryError}</p>}
+        {snapshot.plaintextBackup && (
+          <>
+            <div className="data-location" role="group" aria-label="Unencrypted migration backup">
+              <span aria-hidden="true">Unencrypted migration backup</span>
+              <code>{snapshot.plaintextBackup}</code>
+            </div>
+            <p className="hint">
+              After you verify your records and save your recovery key, quit the app and remove this backup
+              from your file manager if you no longer need it. Removing this file cannot erase older copies
+              in system snapshots or backups, and does not guarantee erasure from an SSD.
+            </p>
+          </>
+        )}
       </section>
     </div>
   );

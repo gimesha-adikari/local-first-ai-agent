@@ -74,51 +74,61 @@ impl KnowledgeFileContents {
     }
 
     pub fn extract(&self, check: impl Fn() -> AgentResult<()>) -> AgentResult<ExtractedKnowledge> {
-        check()?;
-        let mut chunks = Vec::new();
-        let pdf_coverage = if self.format == DocumentFormat::Pdf {
-            let page_count = pdf::page_count(&self.bytes, &check)?;
-            let pages_examined = page_count.min(MAX_PDF_PAGES_EXAMINED);
-            let text = pdf::extract_text(&self.bytes, 1, pages_examined, MAX_TEXT_BYTES, &check)?;
-            let mut pages_without_text = 0;
-            for (index, raw) in pdf::page_texts(&text, pages_examined)?.enumerate() {
-                check()?;
-                let text = raw
-                    .chars()
-                    .filter(|ch| !ch.is_control() || matches!(ch, '\t' | '\n'))
-                    .collect::<String>();
-                if text.trim().is_empty() {
-                    pages_without_text += 1;
-                } else {
-                    append_chunks(&mut chunks, &text, Some(index as u32 + 1), &check)?;
-                }
-            }
-            if chunks.is_empty() {
-                return Err(pdf::no_text());
-            }
-            Some(PdfCoverage {
-                page_count,
-                pages_examined,
-                pages_without_text,
-            })
-        } else {
-            let text = utf8_text(&self.bytes)?;
-            let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-            append_chunks(&mut chunks, text, None, &check)?;
-            if chunks.is_empty() {
-                return Err(AgentError::new(
-                    AgentErrorCode::InvalidArguments,
-                    "The selected document has no indexable text.",
-                ));
-            }
-            None
-        };
-        check()?;
-        Ok(ExtractedKnowledge {
-            chunks,
-            pdf_coverage,
-        })
+        extract(self.format, &self.bytes, &check)
     }
+}
+
+/// Extract source-aware chunks from document bytes already read from a
+/// pinned selection. PDFs are parsed only inside the sandbox.
+pub(crate) fn extract(
+    format: DocumentFormat,
+    bytes: &[u8],
+    check: &dyn Fn() -> AgentResult<()>,
+) -> AgentResult<ExtractedKnowledge> {
+    check()?;
+    let mut chunks = Vec::new();
+    let pdf_coverage = if format == DocumentFormat::Pdf {
+        let page_count = pdf::page_count(bytes, check)?;
+        let pages_examined = page_count.min(MAX_PDF_PAGES_EXAMINED);
+        let text = pdf::extract_text(bytes, 1, pages_examined, MAX_TEXT_BYTES, check)?;
+        let mut pages_without_text = 0;
+        for (index, raw) in pdf::page_texts(&text, pages_examined)?.enumerate() {
+            check()?;
+            let text = raw
+                .chars()
+                .filter(|ch| !ch.is_control() || matches!(ch, '\t' | '\n'))
+                .collect::<String>();
+            if text.trim().is_empty() {
+                pages_without_text += 1;
+            } else {
+                append_chunks(&mut chunks, &text, Some(index as u32 + 1), check)?;
+            }
+        }
+        if chunks.is_empty() {
+            return Err(pdf::no_text());
+        }
+        Some(PdfCoverage {
+            page_count,
+            pages_examined,
+            pages_without_text,
+        })
+    } else {
+        let text = utf8_text(bytes)?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        append_chunks(&mut chunks, text, None, check)?;
+        if chunks.is_empty() {
+            return Err(AgentError::new(
+                AgentErrorCode::InvalidArguments,
+                "The selected document has no indexable text.",
+            ));
+        }
+        None
+    };
+    check()?;
+    Ok(ExtractedKnowledge {
+        chunks,
+        pdf_coverage,
+    })
 }
 
 #[derive(Debug)]

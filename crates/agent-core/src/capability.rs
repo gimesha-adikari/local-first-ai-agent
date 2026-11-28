@@ -32,6 +32,16 @@ pub const RETRIEVE: CapabilityId = CapabilityId::new("core.retrieve/1");
 /// Model discovery and connection tests against a configured provider.
 pub const DISCOVER: CapabilityId = CapabilityId::new("core.provider-discovery/1");
 
+pub const DOWNLOAD_MODEL: CapabilityId = CapabilityId::new("core.model-download/1");
+/// Explicitly authorized web search through a configured search provider.
+pub const WEB_SEARCH: CapabilityId = CapabilityId::new("core.web-search/1");
+/// Retrieval of one disclosed public webpage for a research request.
+pub const WEB_PAGE: CapabilityId = CapabilityId::new("core.web-page/1");
+/// One explicitly requested camera snapshot through the desktop's camera
+/// permission. Observation only: processing, retention and sharing of the
+/// snapshot each need their own authorization.
+pub const CAMERA_SNAPSHOT: CapabilityId = CapabilityId::new("core.camera-snapshot/1");
+
 #[derive(Debug, Clone)]
 pub struct CapabilityRegistry(BTreeSet<CapabilityId>);
 

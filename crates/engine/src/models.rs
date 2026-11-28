@@ -129,7 +129,18 @@ impl Engine {
 
     /// Listed models after collapsing copies of the same weights.
     pub fn list_models(&self) -> Result<Vec<ModelReference>> {
-        database(&self.database)?.recent_models()
+        let db = database(&self.database)?;
+        let mut listed = db.recent_models()?;
+        for model in &mut listed {
+            let saved = db.model(model.id)?;
+            model.managed = self.managed_path(&saved.path);
+            model.available = if model.managed {
+                self.managed_model_available(&db, &saved.path)?
+            } else {
+                saved.path.is_file()
+            };
+        }
+        Ok(listed)
     }
 
     /// Register a model file the user selected natively. The caller holds the
@@ -142,6 +153,7 @@ impl Engine {
         if !self.owns(lease) {
             return Err(foreign_lease());
         }
+        self.check_manual_model_path(&path)?;
         let name = path
             .file_name()
             .ok_or_else(|| {
@@ -262,17 +274,35 @@ impl Engine {
     ) -> Result<ModelInfo> {
         let _operation = self.reserve()?;
         settings.validate()?;
-        let saved = database(&self.database)?.model(model_id)?;
+        let saved = {
+            let db = database(&self.database)?;
+            let saved = db.model(model_id)?;
+            if self.managed_path(&saved.path) && !self.managed_model_available(&db, &saved.path)? {
+                return Err(InferenceError::new(
+                    ErrorCode::InvalidModel,
+                    "This managed model is missing or needs to finish installation.",
+                ));
+            }
+            saved
+        };
+        let managed_file = if let Some(artifact) = self.artifact_for_managed_path(&saved.path) {
+            Some(self.verified_chat_artifact(artifact).await?)
+        } else {
+            None
+        };
+        let path = managed_file
+            .as_ref()
+            .map_or(saved.path, |(path, _)| path.clone());
         let explicit = settings != saved.reference.settings;
         let automatic = saved.reference.automatic_settings && !explicit;
         let settings = if automatic {
-            self.recommended_for_file(saved.path.clone(), saved.reference.settings)
+            self.recommended_for_file(path.clone(), saved.reference.settings)
                 .await?
         } else {
             settings
         };
         settings.validate()?;
-        let info = wait_for(self.worker.load(saved.path, settings.model)?).await?;
+        let info = wait_for(self.worker.load(path, settings.model)?).await?;
         let stored = {
             let mut db = database(&self.database)?;
             db.set_model_settings(model_id, settings, automatic)

@@ -6,8 +6,13 @@
 //! byte, and while the request and response are in flight.
 
 mod address;
+pub(crate) mod artifact;
 pub mod endpoint;
 mod http;
+/// Stage 04-C2 feasibility probe. Never compiled into the application.
+#[cfg(test)]
+mod managed_probe;
+pub(crate) mod page;
 mod transport;
 
 use std::{
@@ -34,15 +39,29 @@ use crate::{
     policy::{Connectivity, Denial, GrantId, Operation, Policy, Session},
 };
 
+/// How a bound credential is presented. Each provider documents exactly one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialHeader {
+    /// `Authorization: Bearer <key>`, as OpenAI-compatible servers expect.
+    Bearer,
+    /// `X-Subscription-Token: <key>`, the Brave Search API header.
+    SubscriptionToken,
+}
+
 /// A provider credential bound to one provider and one canonical origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialBinding {
     key: CredentialKey,
+    header: CredentialHeader,
 }
 
 impl CredentialBinding {
     pub fn key(&self) -> &CredentialKey {
         &self.key
+    }
+
+    pub fn header(&self) -> CredentialHeader {
+        self.header
     }
 }
 
@@ -75,12 +94,19 @@ impl Destination {
 
     /// Bind a credential stored for `provider` at this destination's exact
     /// origin. The transport attaches it only to connections to that origin.
-    pub fn with_credential(mut self, provider: &str) -> Self {
+    pub fn with_credential(self, provider: &str) -> Self {
+        self.with_credential_header(provider, CredentialHeader::Bearer)
+    }
+
+    /// Bind a credential presented in `header`. The binding is to this exact
+    /// origin, so the key can never reach a different server.
+    pub fn with_credential_header(mut self, provider: &str, header: CredentialHeader) -> Self {
         self.credential = Some(CredentialBinding {
             key: CredentialKey {
                 provider: provider.to_owned(),
                 origin: self.endpoint.origin(),
             },
+            header,
         });
         self
     }
@@ -161,9 +187,23 @@ pub struct RequestBinding {
     route: Route,
     body_sha256: [u8; 32],
     body_len: usize,
+    artifact: Option<artifact::Binding>,
+    page: Option<page::Binding>,
 }
 
 impl RequestBinding {
+    pub(crate) fn has_artifact_binding(&self) -> bool {
+        self.artifact.is_some()
+    }
+
+    pub(crate) fn has_page_binding(&self) -> bool {
+        self.page.is_some()
+    }
+
+    pub(crate) fn is_bodiless_get(&self) -> bool {
+        self.method == Method::Get && self.body_len == 0
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         self.route.is_valid() && self.body_len <= MAX_REQUEST_BODY
     }
@@ -187,6 +227,11 @@ pub struct Outbound {
     body: Vec<u8>,
     content_type: Option<&'static str>,
     provider_retention: Retention,
+    artifact_target: Option<artifact::Target>,
+    page_target: Option<page::Target>,
+    /// Query string appended to the fixed route, for the 04-C2 probe only.
+    #[cfg(test)]
+    query: Option<String>,
 }
 
 impl Outbound {
@@ -208,6 +253,8 @@ impl Outbound {
             route,
             body_sha256: sha256(&body),
             body_len: body.len(),
+            artifact: None,
+            page: None,
         };
         Self {
             operation: Arc::new(Operation::new(
@@ -224,7 +271,20 @@ impl Outbound {
             content_type: (!body.is_empty()).then_some("application/json"),
             body,
             provider_retention,
+            artifact_target: None,
+            page_target: None,
+            #[cfg(test)]
+            query: None,
         }
+    }
+
+    /// Send a non-empty body with this media type instead of JSON. The body
+    /// digest stays bound by the operation.
+    pub fn with_content_type(mut self, content_type: &'static str) -> Self {
+        if !self.body.is_empty() {
+            self.content_type = Some(content_type);
+        }
+        self
     }
 
     pub fn operation(&self) -> &Operation {
@@ -254,7 +314,12 @@ impl Outbound {
             destination: destination.id().to_owned(),
             origin: destination.endpoint().origin(),
             method: binding.method.as_str().to_owned(),
-            route: binding.route.as_str().to_owned(),
+            route: match (&binding.artifact, &self.page_target) {
+                (Some(artifact), _) => format!("artifact/{}", artifact.key),
+                // The path only: a page's query string can be personal.
+                (None, Some(target)) => target.recorded_path(),
+                (None, None) => binding.route.as_str().to_owned(),
+            },
             body_sha256: hex(&binding.body_sha256),
             body_bytes: binding.body_len as u64,
             credential: false,
@@ -420,12 +485,14 @@ pub struct Failed {
 }
 
 /// The single network boundary. The transport worker starts on the first
-/// admitted request, so local-only operation never creates it.
+/// admitted request.
 pub struct NetworkBoundary {
     policy: Arc<Policy>,
     credentials: Arc<dyn CredentialSource>,
     config: Arc<transport::Config>,
     worker: Mutex<Option<Arc<transport::Worker>>>,
+    #[cfg(test)]
+    page_fixture: Mutex<Option<u16>>,
 }
 
 impl NetworkBoundary {
@@ -439,6 +506,8 @@ impl NetworkBoundary {
             credentials,
             config: Arc::new(transport::Config::new(config)),
             worker: Mutex::new(None),
+            #[cfg(test)]
+            page_fixture: Mutex::new(None),
         }
     }
 
@@ -476,6 +545,22 @@ impl NetworkBoundary {
         share: GrantId,
     ) -> Result<Streaming, Box<Failed>> {
         let mut record = request.record();
+        let artifact = match (&request.artifact_target, &request.binding().artifact) {
+            (None, None) => true,
+            (Some(target), Some(binding)) => target.matches(binding),
+            _ => false,
+        };
+        let page = match (&request.page_target, &request.binding().page) {
+            (None, None) => true,
+            (Some(target), Some(binding)) => target.matches(binding),
+            _ => false,
+        };
+        if !artifact || !page {
+            return Err(Box::new(Failed {
+                failure: Failure::Denied(Denial::Scope),
+                record,
+            }));
+        }
         if let Err(denial) = self.policy.admit(request.operation(), process, share) {
             return Err(Box::new(Failed {
                 failure: Failure::from_denial(denial),
@@ -542,6 +627,7 @@ pub struct Streaming {
     ended: bool,
     pub status: u16,
     pub content_type: Option<String>,
+    artifact_head: Option<http::Head>,
     body: futures_channel::mpsc::Receiver<Result<Vec<u8>, Failure>>,
     done: Option<futures_channel::oneshot::Receiver<()>>,
     record: Arc<Mutex<EgressRecord>>,

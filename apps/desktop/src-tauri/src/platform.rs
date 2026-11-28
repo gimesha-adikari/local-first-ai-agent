@@ -2,7 +2,9 @@
 
 use engine::{BackgroundTask, BlockingTask, Platform};
 
-pub struct TauriPlatform;
+use tauri::{AppHandle, Emitter};
+
+pub struct TauriPlatform(pub AppHandle);
 
 impl Platform for TauriPlatform {
     fn spawn_blocking(&self, task: BlockingTask) {
@@ -12,6 +14,17 @@ impl Platform for TauriPlatform {
 
     fn spawn(&self, task: BackgroundTask) {
         drop(tauri::async_runtime::spawn(task));
+    }
+
+    fn model_files(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<Box<dyn engine::downloads::ModelFiles>> {
+        crate::model_files::PrivateModelFiles::open(path)
+    }
+
+    fn model_library_changed(&self) {
+        let _ = self.0.emit_to("main", "model-library-changed", ());
     }
 
     fn available_memory(&self) -> Option<u64> {

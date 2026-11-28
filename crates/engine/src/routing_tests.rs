@@ -19,7 +19,7 @@ use super::{
 };
 
 fn library() -> (SqliteStore, i64) {
-    let mut db = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut db = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let mut chunks = Vec::new();
     append_chunks(
         &mut chunks,

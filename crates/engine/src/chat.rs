@@ -46,10 +46,14 @@ use crate::{
     semantic::SemanticState,
 };
 
+#[path = "attachment_turn.rs"]
+mod attachment_turn;
 #[path = "glance.rs"]
 pub mod glance;
 #[path = "remote_chat.rs"]
 mod remote;
+#[path = "research_turn.rs"]
+mod research_turn;
 
 /// Events streamed to the surface that started a Chat turn.
 #[derive(Serialize)]
@@ -66,6 +70,11 @@ pub enum ChatEvent {
         id: MessageId,
         text: String,
     },
+    /// Progress of a web research turn. Details are fetched separately.
+    Research {
+        id: MessageId,
+        stage: agent_core::research::ResearchStage,
+    },
 }
 
 /// Receives best-effort Chat events. Delivery failures and unwind panics do
@@ -77,6 +86,9 @@ pub trait ChatEventSink: Send + Sync + 'static {
 
 pub type ChatEvents = Arc<dyn ChatEventSink>;
 
+pub use attachment_turn::{AttachmentRequest, AttachmentSharing};
+pub(crate) use remote::ATTACHMENT_CLASSES;
+
 fn deliver(events: &ChatEvents, event: ChatEvent) {
     // A surface callback must not unwind through the transcript guard or
     // the dedicated inference worker.
@@ -86,10 +98,24 @@ fn deliver(events: &ChatEvents, event: ChatEvent) {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatOptions {
+    /// The Chat target shown at submission time.
+    expected_target: Option<ExpectedChatTarget>,
     #[serde(default)]
     enable_thinking: bool,
     max_tokens: Option<u32>,
     knowledge: Option<KnowledgeSelection>,
+    /// An explicitly authorized web research request for this message.
+    #[serde(default)]
+    research: Option<crate::research::ResearchOptions>,
+    /// Files attached to this message (Stage 04-D).
+    #[serde(default)]
+    attachments: Option<AttachmentRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExpectedChatTarget {
+    provider_id: Option<agent_core::provider::ProviderId>,
 }
 
 #[cfg(test)]
@@ -449,6 +475,8 @@ struct StreamContext {
     sources: Vec<KnowledgeHit>,
     coverage: Option<KnowledgeCoverage>,
     candidates: Candidates,
+    /// Transport records of research requests made for this turn.
+    external: Vec<agent_core::intelligence::EgressRecord>,
 }
 
 /// Everything a detached Chat turn needs, shared with the engine.
@@ -461,6 +489,8 @@ struct ChatRuntime {
     semantic: Arc<SemanticState>,
     boundary: Arc<NetworkBoundary>,
     glance_receipt: Option<glance::ReceiptSlot>,
+    research_results: crate::research::TransientResults,
+    attachments: Arc<crate::attachments::AttachmentStore>,
 }
 
 impl Engine {
@@ -495,6 +525,14 @@ impl Engine {
         events: ChatEvents,
     ) -> Result<Message> {
         let operation = self.reserve()?;
+        if let Some(target) = &options.expected_target
+            && self.intelligence_settings()?.active_provider != target.provider_id
+        {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "The Chat provider changed. Review the current target and send again.",
+            ));
+        }
         let cancellation = Cancellation::default();
         let active = ActiveChat::register(&self.chat_cancellation, cancellation.clone())?;
         let model_id = self.active_model();
@@ -516,6 +554,8 @@ impl Engine {
             semantic: Arc::clone(&self.semantic),
             boundary: Arc::clone(&self.boundary),
             glance_receipt: None,
+            research_results: self.research_results.clone(),
+            attachments: Arc::clone(&self.attachments),
         }
     }
 
@@ -612,7 +652,7 @@ impl ChatRuntime {
         &self,
         id: ConversationId,
         action: TurnAction,
-        options: ChatOptions,
+        mut options: ChatOptions,
         events: ChatEvents,
         cancellation: Cancellation,
         model_id: Option<ModelId>,
@@ -622,6 +662,46 @@ impl ChatRuntime {
             TurnAction::Regenerate => database(&self.database)?.chat_regeneration_prompt(id)?,
         };
         GenerationRequest::new(&question).validate()?;
+        if let Some(attachments) = options.attachments.take() {
+            return self
+                .run_attachments(
+                    id,
+                    action,
+                    question,
+                    attachments,
+                    options,
+                    events,
+                    cancellation,
+                    model_id,
+                )
+                .await;
+        }
+        // An answer that used attachments is never silently regenerated
+        // without them.
+        if matches!(action, TurnAction::Regenerate)
+            && database(&self.database)?
+                .latest_attachment_turn(id, 0)?
+                .is_some()
+        {
+            return Err(InferenceError::new(
+                ErrorCode::InvalidConfig,
+                "This answer used attachments that aren't attached now. Reattach them to regenerate it, or ask a new question.",
+            ));
+        }
+        if let Some(research) = options.research.take() {
+            return self
+                .run_research(
+                    id,
+                    action,
+                    question,
+                    research,
+                    options,
+                    events,
+                    cancellation,
+                    model_id,
+                )
+                .await;
+        }
         let strict = options
             .knowledge
             .as_ref()
@@ -667,11 +747,8 @@ impl ChatRuntime {
             );
         }
         let memory_question = matches!(memory_request, Some(MemoryRequest::Question));
-        // The saved selection decides the target. A remote provider is used
-        // only when local-only mode is off and it is explicitly selected;
-        // there is no fallback in either direction.
-        let selection =
-            crate::providers::effective_settings(&*database(&self.database)?, &self.policy)?;
+        // The explicitly selected Chat target is authoritative for the turn.
+        let selection = database(&self.database)?.intelligence_settings()?;
         let remote = crate::providers::remote_target(&self.database, selection)?;
         let local = match &remote {
             Some(_) => None,
@@ -866,6 +943,8 @@ impl ChatRuntime {
                             coverage: coverage.clone(),
                             memory_enabled: Some(memory_enabled),
                             fitted: None,
+                            research: None,
+                            attachments: None,
                         },
                     )?,
                     // Ordinary Chat with documents selected keeps its routing
@@ -987,6 +1066,8 @@ impl ChatRuntime {
                         max_tokens: options.max_tokens,
                         cancellation,
                         images: Vec::new(),
+                        external: Vec::new(),
+                        attachments: false,
                     },
                     target,
                     events,
@@ -1012,6 +1093,7 @@ impl ChatRuntime {
                 sources,
                 coverage,
                 candidates,
+                external: Vec::new(),
             },
         )
         .await
@@ -1105,13 +1187,16 @@ impl ChatRuntime {
             sources,
             coverage,
             candidates,
+            external,
         } = context;
         let mut assistant = turn.assistant;
         let message_id = assistant.id;
-        let session = Arc::new(Mutex::new(Some(
-            ChatSession::new(candidates, cancellation.clone(), MODEL_OUTPUT)
-                .ephemeral(self.glance_receipt.is_some()),
-        )));
+        let mut chat_session = ChatSession::new(candidates, cancellation.clone(), MODEL_OUTPUT)
+            .ephemeral(self.glance_receipt.is_some());
+        for record in external {
+            chat_session.record_external(record);
+        }
+        let session = Arc::new(Mutex::new(Some(chat_session)));
         let store = Arc::clone(&self.database);
         let context = assistant.context.clone();
         let fitted = Arc::clone(&session);
@@ -1320,6 +1405,7 @@ impl ChatRuntime {
                 sources: Vec::new(),
                 coverage: None,
                 candidates,
+                external: Vec::new(),
             },
         )
         .await

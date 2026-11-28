@@ -16,21 +16,26 @@ use agent_core::{
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 mod agent;
+pub mod attachments;
 pub mod chat_context;
 mod continuation;
 mod conversation;
 mod intelligence;
 pub mod knowledge;
 pub mod memory;
+pub mod model_downloads;
 pub mod models;
+pub mod profile;
 pub mod providers;
+pub mod research;
 pub mod semantic;
+mod visual;
 pub use continuation::ContinuationPlan;
 pub use conversation::{AgentTurnLink, ConversationTurn, TurnKind};
 #[cfg(test)]
 mod agent_tests;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 20;
 const MODEL_COLUMNS: &str = "id, file_name, settings, bundled_resource IS NOT NULL, settings_mode = 'automatic', artifact_key";
 const NEW_TITLE: &str = "New conversation";
 
@@ -38,11 +43,18 @@ const NEW_TITLE: &str = "New conversation";
 /// from marking another live instance's pending response as interrupted.
 pub struct SqliteStore {
     connection: Connection,
+    // Held until the SQLite connection has released its own lock.
+    _profile_lock: Option<std::sync::Arc<std::fs::File>>,
 }
 
 impl SqliteStore {
-    pub fn open(path: &Path) -> Result<Self> {
-        let mut connection = Connection::open(path).map_err(sql_error)?;
+    /// Opens an unencrypted synthetic fixture. Production profiles use `profile::Profile`.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn open_test_fixture(path: &Path) -> Result<Self> {
+        Self::initialize(Connection::open(path).map_err(sql_error)?)
+    }
+
+    fn initialize(mut connection: Connection) -> Result<Self> {
         connection
             .busy_timeout(Duration::from_millis(250))
             .map_err(sql_error)?;
@@ -51,6 +63,7 @@ impl SqliteStore {
                 "PRAGMA foreign_keys = ON;
                  PRAGMA trusted_schema = OFF;
                  PRAGMA secure_delete = ON;
+                 PRAGMA temp_store = MEMORY;
                  PRAGMA locking_mode = EXCLUSIVE;",
             )
             .map_err(sql_error)?;
@@ -158,12 +171,40 @@ impl SqliteStore {
             transaction
                 .execute_batch(include_str!("../migrations/015_glance_memory.sql"))
                 .map_err(sql_error)?;
+        }
+        if version < 16 {
+            transaction
+                .execute_batch(include_str!("../migrations/016_model_downloads.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 17 {
+            transaction
+                .execute_batch(include_str!("../migrations/017_web_research.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 18 {
+            transaction
+                .execute_batch(include_str!("../migrations/018_chat_attachments.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 19 {
+            transaction
+                .execute_batch(include_str!("../migrations/019_visual_intelligence.sql"))
+                .map_err(sql_error)?;
+        }
+        if version < 20 {
+            transaction
+                .execute_batch(include_str!(
+                    "../migrations/020_chat_provider_selection.sql"
+                ))
+                .map_err(sql_error)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(sql_error)?;
         }
         agent::recover_interrupted(&transaction, None).map_err(|_| storage_error())?;
         providers::settle_interrupted(&transaction)?;
+        model_downloads::settle_interrupted(&transaction)?;
         chat_context::recover_citations(&transaction)?;
         transaction
             .execute(
@@ -179,7 +220,10 @@ impl SqliteStore {
             )
             .map_err(sql_error)?;
         transaction.commit().map_err(sql_error)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            _profile_lock: None,
+        })
     }
 }
 
@@ -380,6 +424,7 @@ impl SqliteStore {
             chat_context::record_evidence(&transaction, message_id, candidates, usage.sources)?;
         }
         chat_context::mark_citations(&transaction, message_id, content)?;
+        attachments::mark_citations(&transaction, message_id, content)?;
         touch_conversation(&transaction, conversation, unix_ms()?)?;
         transaction.commit().map_err(sql_error)
     }
@@ -992,6 +1037,8 @@ fn touch_conversation(connection: &Connection, id: ConversationId, now: i64) -> 
 
 fn model_reference(row: &Row<'_>) -> rusqlite::Result<ModelReference> {
     Ok(ModelReference {
+        available: true,
+        managed: false,
         id: row.get(0)?,
         file_name: row.get(1)?,
         settings: json_column(row, 2)?,
@@ -1029,6 +1076,9 @@ fn sql_error(error: rusqlite::Error) -> InferenceError {
             ErrorCode::Busy,
             "The chat database is busy. Close any other app instance and try again.",
         );
+    }
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+        return InferenceError::new(ErrorCode::Storage, "The database disk is full.");
     }
     storage_error()
 }

@@ -209,10 +209,24 @@ impl Tesseract {
         languages: &[String],
         check: &dyn Fn() -> Result<(), OcrError>,
     ) -> Result<OcrOutput, OcrError> {
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(error(OcrErrorKind::Invalid));
+        }
+        self.recognize_image(png, languages, check)
+    }
+
+    /// Recognize text in a PNG or JPEG image that the caller has already
+    /// validated and bounded. Decoding happens only inside the sandbox.
+    pub fn recognize_image(
+        &self,
+        png: &[u8],
+        languages: &[String],
+        check: &dyn Fn() -> Result<(), OcrError>,
+    ) -> Result<OcrOutput, OcrError> {
         if png.len() > MAX_IMAGE_BYTES {
             return Err(error(OcrErrorKind::Limit));
         }
-        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") && !png.starts_with(&[0xff, 0xd8, 0xff]) {
             return Err(error(OcrErrorKind::Invalid));
         }
         let installed = self.languages();
@@ -381,6 +395,33 @@ print(" ".join(r))
         }
         assert!(
             !report.contains("HOME") && !report.contains("DBUS") && !report.contains("DISPLAY")
+        );
+    }
+
+    /// The shared filter of the PDF and OCR sandbox. An io_uring could open
+    /// sockets without the denied socket calls. Each call must fail with
+    /// EPERM: an allowed call with these arguments reports EFAULT or EBADF.
+    #[test]
+    #[ignore = "uses Bubblewrap with Linux namespace isolation and the system Python"]
+    fn sandbox_denies_every_io_uring_call() {
+        // io_uring_setup, _enter and _register share these numbers on the
+        // supported architectures.
+        let outcome = probe(
+            r#"
+import ctypes, errno
+libc = ctypes.CDLL(None, use_errno=True)
+for name, call in (("setup", (425, 4, None)), ("enter", (426, -1, 0, 0, 0, None, 0)),
+                   ("register", (427, -1, 0, None, 0))):
+    ctypes.set_errno(0)
+    result = libc.syscall(*call)
+    print(name, result, errno.errorcode.get(ctypes.get_errno(), "none"))
+"#,
+            None,
+        );
+        assert!(outcome.status.success(), "{:?}", outcome.status);
+        assert_eq!(
+            text(&outcome),
+            "setup -1 EPERM\nenter -1 EPERM\nregister -1 EPERM\n"
         );
     }
 

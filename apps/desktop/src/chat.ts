@@ -53,16 +53,19 @@ export type ModelReference = {
   automaticSettings: boolean;
   /** Curated manifest entry whose size and SHA-256 the file matched; null for an unverified import. */
   artifact?: string | null;
+  managed?: boolean;
+  available?: boolean;
 };
 
 export type Bootstrap = {
   preferences: Preferences;
   databasePath: string;
+  plaintextBackup: string | null;
   models: ModelReference[];
   activeModelId: number | null;
   inference: Status;
-  /** Local-only mode and the provider Chat uses. */
-  intelligence: { localOnly: boolean; activeProvider: number | null };
+  /** The provider Chat uses. */
+  intelligence: { activeProvider: number | null };
 };
 
 /** Result of verifying the model resource shipped with the app (Task 04-A). */
@@ -103,7 +106,8 @@ export type Conversation = ConversationSummary & {
 export type ChatEvent =
   | { kind: "started"; user: Message | null; assistant: Message }
   | { kind: "knowledge"; coverage: KnowledgeCoverage }
-  | { kind: "delta"; id: number; text: string };
+  | { kind: "delta"; id: number; text: string }
+  | { kind: "research"; id: number; stage: import("./research").ResearchStage };
 
 function upsert(messages: Message[], message: Message): Message[] {
   const next = messages.filter((current) => current.id !== message.id);
@@ -112,7 +116,7 @@ function upsert(messages: Message[], message: Message): Message[] {
 }
 
 export function applyChatEvent(messages: Message[], event: ChatEvent): Message[] {
-  if (event.kind === "knowledge") return messages;
+  if (event.kind === "knowledge" || event.kind === "research") return messages;
   if (event.kind === "started") {
     const withUser = event.user ? upsert(messages, event.user) : messages;
     return upsert(withUser, event.assistant);
@@ -194,10 +198,15 @@ export function validModelSettings(settings: ModelSettings): boolean {
 
 /** Per-request chat options accepted by `send_message` and `regenerate`. */
 export type ChatOptions = {
+  expectedTarget?: { providerId: number | null };
   enableThinking?: boolean;
   maxTokens?: number;
   /** Omitted or null for ordinary Chat. */
   knowledge?: { mode: RetrievalMode; documentIds: number[]; grounding?: "auto" | "documents" } | null;
+  /** One explicitly authorized web research request (Stage 04-C). */
+  research?: ReturnType<typeof import("./research").researchOptions>;
+  /** Attached files for this message and any per-message sharing (Stage 04-D). */
+  attachments?: ReturnType<typeof import("./attachments").attachmentRequest>;
 };
 
 /** Sampling defaults of the backend (agent-core GenerationRequest). */

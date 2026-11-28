@@ -10,6 +10,9 @@ publish = false
 agent-core = { path = "../agent-core" }
 futures-channel = { version = "0.3.34", features = ["sink"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
+encoding_rs = "0.8.44"
+getrandom = "=0.4.3"
+html5ever = "0.40.1"
 httparse = "1.10.1"
 inference = { path = "../inference", features = ["llama"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
@@ -26,4 +29,5 @@ zeroize = "1.9.2"
 [dev-dependencies]
 futures-executor = "0.3.34"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
-rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }
+rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled-sqlcipher"] }
+storage = { path = "../storage", features = ["test-fixtures"] }

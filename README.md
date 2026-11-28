@@ -9,18 +9,21 @@ deferred until v1.0.0. [v0.2.0 architecture](docs/architecture.md#local-knowledg
 
 ## Models
 
-| Model | How to get it | Chat | Thinking | Agent |
-| --- | --- | --- | --- | --- |
-| LFM2.5-1.2B-Instruct Q4_K_M | Included in the bundled Debian package | Yes | Disabled | Disabled |
-| Qwen3.5-4B | Optional local GGUF imported through **Models** | Yes | Yes | Yes |
-| BGE-small-en-v1.5 (F16 GGUF) | Optional local embedding model imported through **Models** for semantic Knowledge search | Not for Chat | No | No |
+| Model | Purpose | Download size |
+| --- | --- | --- |
+| LFM2.5-1.2B-Instruct Q4_K_M | Everyday Chat | 697 MiB |
+| Qwen3.5-4B UD-Q4_K_XL | Advanced Chat, Thinking and supported Agent tasks | 2.7 GiB |
+| BGE-small-en-v1.5 F16 | Semantic and hybrid Knowledge search in English | 64.2 MiB |
 
-LFM2.5 is the lightweight built-in assistant. The app verifies the
-bundled file by size and SHA-256 and loads it automatically in a fresh
-profile. Qwen3.5-4B takes more memory and CPU time. The verified build used
-the Unsloth `UD-Q4_K_XL` quantization. Use **Models → Import model…**,
-select an existing single-file GGUF, then load it. The app has no model
-download or automatic model switching. [Verified Qwen GGUF](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/blob/6727efff692673b7a2ebb4c6ba830ce4f5fb1309/Qwen3.5-4B-UD-Q4_K_XL.gguf)
+Open **Models → Discover** to see the exact file, license and estimated
+settings. **Download** starts the selected model’s transfer from Hugging Face.
+Use **Downloads** to cancel, resume or discard a partial file. The app
+checks the full SHA-256 before making the model available in **Installed**.
+Load a Chat model or choose **Use for Knowledge** when you're ready to use it.
+
+**Models → Manual import** opens a native picker for an existing Chat GGUF
+or the supported BGE file. You can also configure a cloud or self-hosted
+provider and use Chat without any local models.
 
 ## Install on Linux
 
@@ -91,6 +94,17 @@ build declares these dependencies automatically.
 - **Memory** is off by default. Save notes explicitly under Settings →
   Knowledge & Memory. When enabled, up to three relevant notes are added to
   later answers as background, separate from document evidence.
+- **Web research** starts when you choose a mode in Chat. The selected Chat
+  model plans the query and checks whether the results address the question.
+  The app can try one substantially different query. Only those generated
+  queries go to the configured search service. **Search and answer** can
+  read up to three public pages and cite passages verified against their
+  text. **Search results only** lists relevant links. **Read a webpage**
+  fetches the public HTTPS address you enter. Image-derived searches send
+  only the exact reviewed query and use a local model. Remote research
+  processing requires per-turn permission to share the question and public
+  sources. Purili requires personal, non-commercial use confirmation.
+  Queries and attempt details stay in memory for the app session.
 
 ## Known limitations
 
@@ -117,14 +131,41 @@ build declares these dependencies automatically.
   some grounded answers show sources as uncited.
 - Semantic search returns `busy` while Chat or Agent is generating. The
   library refreshes by polling rather than by push events.
-- Local SQLite is unencrypted. Saved answers, documents, and memories can
-  contain text from selected files. Raw tool previews are held in memory for
-  the current session. Deleting a conversation removes its saved messages and
-  linked task history. Content-free audit entries and external copies can
-  remain. Earlier answers may keep quotations from deleted documents or
-  memories.
+- The local personal database is encrypted with SQLCipher in Stage 04-A builds.
+  Saved answers, documents, and memories can contain text from selected files.
+  Raw tool previews are held in memory for the current session. Deleting a
+  conversation removes its saved messages and linked task history.
+  Content-free audit entries and external copies can remain. Earlier answers
+  may keep quotations from deleted documents or memories.
+- Web research reads HTTPS pages on port 443 only, at most 2 MiB each, and
+  does not read PDFs, run JavaScript or pass sign-in or paywalls. Evidence
+  ranking is lexical. Live compatibility with Brave Search and SearXNG has
+  been checked only against recorded request and response shapes.
+- Purili is a small independent service with no uptime guarantee. Its index is
+  limited: in a 2026-11-27 check, English and French queries returned relevant
+  results and a Japanese query returned none.
 - Downgrading to v0.1.0 requires the database backup taken before the
   upgrade. The v0.1.0 executable accepts only schema version 5 and below.
+
+## Encrypted personal storage
+
+The Linux desktop uses your unlocked system keyring to open the database at
+startup. Use **Settings → Privacy & Storage → Show recovery key** and confirm
+in the native dialog to record the key in a password manager or another secure
+location. The recovery key is specific to this database. Keep it separate from
+the database file. Losing both the keyring entry and the recovery key can make
+the database permanently inaccessible. If the keyring entry goes missing or
+the profile moves to a new path, use **Enter recovery key** at startup. The app
+checks the supplied key against the database before saving it to the keyring.
+
+On first opening a legacy profile, the app copies and verifies the database
+before switching to the encrypted file. **Privacy & Storage** shows the
+original file as `conversations.sqlite3.plaintext-backup`. Verify your records
+and record your recovery key, then quit the app and remove that backup through
+your file manager when you no longer need it. File removal does not guarantee
+erasure from SSDs, system snapshots, or earlier backups. Keep the backup if you
+need to open the pre-migration state with an older build. Changes made after
+migration live in the encrypted database.
 
 ## Development on Linux
 
@@ -141,6 +182,11 @@ sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libxdo-dev \
 npm --prefix apps/desktop ci --engine-strict
 npm --prefix apps/desktop run tauri -- dev
 ```
+
+Storage bundles SQLCipher Community Edition through rusqlite and links to the
+system OpenSSL `libcrypto` on Linux. The desktop requires a persistent Secret
+Service keyring. SQLite keeps temporary query data in memory, and SQLCipher
+encrypts database pages written to journals.
 
 Use the release profile to reuse native build output. On constrained
 machines, set `CARGO_BUILD_JOBS=1` and `CMAKE_BUILD_PARALLEL_LEVEL=1`.
@@ -179,12 +225,13 @@ are optional `tesseract-ocr-*` packages; the recommended set is listed in
 ### Providers
 
 Settings → Providers configures OpenAI-compatible cloud services and servers
-you run. Local-only mode, the default, makes no outbound connections. Every
+you run. Chat uses the local model until you select a provider. The app
+connects when you request an operation that needs a connection. Every
 remote request passes the Rust network boundary, carries only the categories
 you allow, and is checked against the monthly limit first. API keys are
 entered in a native dialog and kept in the system keyring (Secret Service);
 without a keyring, providers that need a key stay off.
-[Stage 03-C record](docs/stage-03-c-providers.md)
+[Stage 04 connectivity decision](docs/stage-04-connectivity-ux.md)
 
 ## Licenses and notices
 

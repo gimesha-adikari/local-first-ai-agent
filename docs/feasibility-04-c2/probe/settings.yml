@@ -1,0 +1,23 @@
+# Only the probe's engines are loaded. All of them are keyless APIs; no engine
+# that scrapes a results page, imitates a browser or solves a challenge.
+# Wikipedia is left out: SearXNG's engine requires a published contact URL.
+use_default_settings:
+  engines:
+    keep_only:
+      - arxiv
+      - github
+      - stackoverflow
+      - wiby
+general:
+  debug: false
+  enable_metrics: false
+server:
+  # No server is started; SearXNG requires a value.
+  secret_key: "unused-no-listener"
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 12.0
+  retries: 0
+engines:
+  - name: wiby
+    disabled: false

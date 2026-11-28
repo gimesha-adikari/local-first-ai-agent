@@ -113,9 +113,6 @@ pub fn set_intelligence_settings(
     state: State<'_, Desktop>,
     settings: IntelligenceSettings,
 ) -> Result<()> {
-    if settings.local_only {
-        return state.engine.enable_local_only();
-    }
     if let Some(id) = settings.active_provider {
         valid_id(id)?;
     }

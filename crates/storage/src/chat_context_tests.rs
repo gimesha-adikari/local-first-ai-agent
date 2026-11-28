@@ -293,7 +293,7 @@ fn memories_persist_and_retrieve_only_when_enabled_and_relevant() {
 }
 
 #[test]
-fn migrates_populated_schema_seven_without_changing_saved_state() {
+fn encrypts_populated_schema_seven_without_changing_saved_state() {
     let profile = TestDatabase::new();
     let mut db = profile.open();
     let conversation = db.create().unwrap().id;
@@ -324,7 +324,8 @@ fn migrates_populated_schema_seven_without_changing_saved_state() {
     .unwrap();
     db.connection
         .execute_batch(
-            "DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
+            "DROP TABLE visual_settings; DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
+         DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
         DROP TABLE chat_source_references; DROP TABLE chat_context_attempts;
         DROP TABLE memory_settings; DROP TABLE personal_memories;
@@ -334,7 +335,7 @@ fn migrates_populated_schema_seven_without_changing_saved_state() {
         )
         .unwrap();
     drop(db);
-    let db = profile.open();
+    let db = profile.open_encrypted();
     assert_eq!(
         db.connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -351,6 +352,16 @@ fn migrates_populated_schema_seven_without_changing_saved_state() {
             .indexed_documents,
         1
     );
+    let keyword = db
+        .retrieve_for_chat(
+            Some("legacy"),
+            &[doc],
+            RetrievalMode::Keyword,
+            BGE_KEY,
+            None,
+        )
+        .unwrap();
+    assert_eq!(keyword.sources[0].document_id, doc);
     assert!(!db.memory_enabled().unwrap());
     assert!(
         db.chat_source_references(turn.assistant.id)
@@ -386,6 +397,8 @@ fn fitted_evidence_and_coverage_survive_interruption_and_replacement() {
         coverage: Some(retrieved.coverage),
         memory_enabled: Some(false),
         fitted: None,
+        research: None,
+        attachments: None,
     };
     let first = db
         .begin_chat_with_context(
@@ -536,7 +549,8 @@ fn schema_eight_citation_remains_available_without_invented_historical_coverage(
     .unwrap();
     db.connection
         .execute_batch(
-            "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+            "DROP TABLE visual_settings; DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
+         ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
          DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
          ALTER TABLE chat_source_references DROP COLUMN cited;

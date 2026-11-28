@@ -25,7 +25,8 @@ fn schema_ten_classifies_recommended_rows_as_automatic() {
     store
         .connection
         .execute_batch(
-            "ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
+            "DROP TABLE visual_settings; DROP TABLE chat_attachments; DROP TABLE web_research_settings; DROP TABLE model_downloads;
+         ALTER TABLE personal_memories DROP COLUMN provenance; ALTER TABLE personal_memories DROP COLUMN classification;
          DROP TABLE provider_usage; DROP TABLE intelligence_settings; DROP TABLE providers;
          ALTER TABLE models DROP COLUMN artifact_key; DROP TABLE intelligence_receipts; ALTER TABLE messages DROP COLUMN classification;
              DROP TABLE chat_route_coverage; ALTER TABLE models DROP COLUMN content_sha256;
@@ -241,7 +242,7 @@ fn last_loaded_model_restores_unless_explicitly_unloaded() {
 
 #[test]
 fn a_row_whose_file_is_gone_moves_to_a_new_copy_and_keeps_settings() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let settings = ModelSettings::recommended(2048);
     let bundled = store
         .register_bundled_model(

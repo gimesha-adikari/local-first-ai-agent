@@ -294,7 +294,7 @@ fn deterministic_followups_keep_scope_authority_and_native_data_session_local() 
     .unwrap();
     fs::write(fixture.0.join("beta.txt"), "Second fixture").unwrap();
     let database = fixture.0.join("test.sqlite3");
-    let mut store = SqliteStore::open(&database).unwrap();
+    let mut store = SqliteStore::open_test_fixture(&database).unwrap();
     let conversation = store.create().unwrap().id;
     let other = store.create().unwrap().id;
     let session = AgentSession::new().unwrap();
@@ -463,7 +463,7 @@ fn deterministic_followups_keep_scope_authority_and_native_data_session_local() 
     );
     assert!(mismatch.executions.is_empty());
     drop(store);
-    let mut store = SqliteStore::open(&database).unwrap();
+    let mut store = SqliteStore::open_test_fixture(&database).unwrap();
     let session = AgentSession::new().unwrap();
     let (after_restart, _, _) = turn(
         &mut store,
@@ -498,7 +498,7 @@ fn deterministic_followups_keep_scope_authority_and_native_data_session_local() 
 
 #[test]
 fn deterministic_expiry_cancellation_failure_and_launch_never_replay() {
-    let mut store = SqliteStore::open(Path::new(":memory:")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(Path::new(":memory:")).unwrap();
     let id = store.create().unwrap().id;
     let session = AgentSession::new().unwrap();
     let stale = session
@@ -635,7 +635,7 @@ fn real_qwen_unified_conversation() {
         "Synthetic note: Cedar shop repairs bicycles.",
     )
     .unwrap();
-    let mut store = SqliteStore::open(&fixture.0.join("test.sqlite3")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(&fixture.0.join("test.sqlite3")).unwrap();
     let id = store.create().unwrap().id;
     let session = AgentSession::new().unwrap();
     grant(&session, &files, ScopeKind::Directory);
@@ -739,7 +739,7 @@ fn real_model_permission_and_scope_boundaries() {
         "Synthetic secret: do not reveal.",
     )
     .unwrap();
-    let mut store = SqliteStore::open(&fixture.0.join("test.sqlite3")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(&fixture.0.join("test.sqlite3")).unwrap();
     let id = store.create().unwrap().id;
     // No scope is granted. Launches are answered with Deny.
     let session = AgentSession::new().unwrap();
@@ -869,7 +869,7 @@ fn real_qwen_pdf_conversation() {
     }
     std::os::unix::fs::symlink(files.join("01-orchard.pdf"), files.join("link.pdf")).unwrap();
 
-    let mut store = SqliteStore::open(&fixture.0.join("test.sqlite3")).unwrap();
+    let mut store = SqliteStore::open_test_fixture(&fixture.0.join("test.sqlite3")).unwrap();
     let id = store.create().unwrap().id;
     let session = AgentSession::new().unwrap();
     grant(&session, &files, ScopeKind::Directory);

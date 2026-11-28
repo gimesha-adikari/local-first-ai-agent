@@ -65,7 +65,7 @@ fn bge_synthetic_retrieval_measurements() {
     }
     let _cleanup = Cleanup(dir.clone());
     let path = dir.join("corpus.sqlite3");
-    let mut db = SqliteStore::open(&path).unwrap();
+    let mut db = SqliteStore::open_test_fixture(&path).unwrap();
     let long = format!(
         "{} The aircraft deicing equipment uses propylene glycol.",
         "! ".repeat(700)
@@ -243,7 +243,7 @@ fn bge_synthetic_retrieval_measurements() {
 #[test]
 fn restore_handles_missing_unloaded_and_unremembered_choices_without_models() {
     let database = Arc::new(Mutex::new(
-        SqliteStore::open(std::path::Path::new(":memory:")).unwrap(),
+        SqliteStore::open_test_fixture(std::path::Path::new(":memory:")).unwrap(),
     ));
     let state = SemanticState::new(Arc::new(Policy::default())).unwrap();
     let restore = |state: &SemanticState| model_status(state).restore;
@@ -293,7 +293,7 @@ fn restore_reverifies_the_remembered_bge_file() {
         panic!("restore did not finish");
     };
     let database = Arc::new(Mutex::new(
-        SqliteStore::open(std::path::Path::new(":memory:")).unwrap(),
+        SqliteStore::open_test_fixture(std::path::Path::new(":memory:")).unwrap(),
     ));
     database
         .lock()

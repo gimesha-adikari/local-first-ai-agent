@@ -2,10 +2,13 @@ import {
   outputBudgetNote, responseNotice, splitReasoning, suggestedOutputLimit, type ContinuationStatus, type Message,
 } from "./chat";
 import { useCallback, useMemo, useState } from "react";
-import { ArrowDownIcon, BookIcon, ChevronRightIcon, RefreshIcon, Spinner, ThinkIcon } from "./icons";
+import { ArrowDownIcon, BookIcon, ChevronRightIcon, PaperclipIcon, RefreshIcon, Spinner, ThinkIcon } from "./icons";
 import { contextUsageLabel, coverageLines, coverageSummary, isContextual, type KnowledgeCoverage } from "./knowledge";
 import MarkdownMessage, { CopyButton } from "./MarkdownMessage";
 import { SourceList, useSourceReferences } from "./Sources";
+import { AttachmentSources } from "./AttachmentSources";
+import { researchUsageLabel, stageLabel, type ResearchStage } from "./research";
+import { WebSourceList, useResearchView } from "./WebSources";
 import { modelLabel } from "./models";
 import { Callout, IconButton } from "./ui";
 import type { UnifiedTurn } from "./unified";
@@ -42,6 +45,10 @@ export type KnowledgeContext = {
   documentName: (id: number) => string | null;
   /** Live coverage kept for this session when the attempt saved none (ordinary Chat routes). */
   liveCoverage: (messageId: number) => KnowledgeCoverage | null;
+  /** Progress of a running web research turn. */
+  researchStage?: (messageId: number) => ResearchStage | null;
+  /** Whether an attachment is still available in the open conversation. */
+  attachmentAvailable?: (id: string) => boolean;
 };
 
 function AssistantMessage({
@@ -73,17 +80,26 @@ function AssistantMessage({
   const usage = message.context?.fitted ?? legacyUsage ?? null;
   const coverage = message.context?.coverage ?? message.routeCoverage ?? knowledge.liveCoverage(message.id);
   const summary = coverageSummary(coverage);
-  const citations = useSourceReferences(message.id, !streaming && contextual, knowledge.revision);
+  const research = message.context?.research ?? null;
+  const attached = message.context?.attachments ?? null;
+  const citations = useSourceReferences(message.id, !streaming && contextual && !research && !attached, knowledge.revision);
+  const web = useResearchView(message.id, !streaming && !!research, knowledge.revision);
   const [focus, setFocus] = useState<{ id: string; at: number } | null>(null);
   const onSelect = useCallback((id: string) => setFocus({ id, at: Date.now() }), []);
   const citationProps = useMemo(() => {
-    const ids = new Set(citations.filter(({ cited }) => cited).map(({ citationId }) => citationId));
+    const ids = new Set(attached
+      ? attached.passages.slice(0, usage?.sources ?? 0).flatMap(({ cited }, index) => cited ? [`S${index + 1}`] : [])
+      : web
+        ? web.sources.filter(({ cited }) => cited).map(({ citationId }) => citationId)
+        : citations.filter(({ cited }) => cited).map(({ citationId }) => citationId));
     return ids.size ? { ids, onSelect } : undefined;
-  }, [citations, onSelect]);
+  }, [attached, usage?.sources, citations, web, onSelect]);
   const notes = coverageLines(coverage, streaming ? null : usage, (id) =>
     citations.find(({ documentId }) => documentId === id)?.documentName ?? knowledge.documentName(id),
   true);
-  const usageLabel = !streaming ? contextUsageLabel(usage) : null;
+  const usageLabel = streaming ? null : research
+    ? (research.synthesis !== "none" && usage ? researchUsageLabel(usage.sources) : null)
+    : contextUsageLabel(usage);
 
   return (
     <div className="assistant-turn" aria-label="Assistant">
@@ -96,6 +112,13 @@ function AssistantMessage({
       )}
       {reasoning !== null && <Reasoning text={reasoning} complete={reasoningComplete} streaming={streaming} />}
       {answer && <MarkdownMessage text={answer} citations={citationProps} />}
+      {!streaming && web && (
+        <WebSourceList messageId={message.id} view={web} modelName={modelName} focus={focus} onFocusHandled={() => setFocus(null)} />
+      )}
+      {!streaming && attached && (
+        <AttachmentSources messageId={message.id} record={attached} supplied={usage ? usage.sources : null}
+          available={knowledge.attachmentAvailable ?? (() => false)} focus={focus} onFocusHandled={() => setFocus(null)} />
+      )}
       {!streaming && citations.length > 0 && (
         <SourceList key={`${message.id}:${knowledge.revision}`} messageId={message.id} citations={citations} revision={knowledge.revision}
           focus={focus} onFocusHandled={() => setFocus(null)} />
@@ -107,7 +130,9 @@ function AssistantMessage({
         <ul className="coverage-notes">{notes.map((note) => <li key={note}>{note}</li>)}</ul>
       )}
       {streaming && !answer && reasoning === null && (
-        <p className="activity-live" role="status"><Spinner size={13} />Generating…</p>
+        <p className="activity-live" role="status"><Spinner size={13} />
+          {research ? stageLabel(knowledge.researchStage?.(message.id) ?? (research.mode === "search" ? "understanding" : "reading"), research.mode) : "Generating…"}
+        </p>
       )}
       {notice && !streaming && (
         <Callout tone={notice.tone} title={notice.title}
@@ -191,7 +216,17 @@ export function ChatTurnView({
   const attempts = turn.assistants;
   return (
     <>
-      <div className="user-turn" aria-label="You"><p>{turn.user.content}</p></div>
+      <div className="user-turn" aria-label="You">
+        <p>{turn.user.content}</p>
+        {(() => {
+          const used = attempts[attempts.length - 1]?.message.context?.attachments?.attachments ?? [];
+          return used.length > 0 && (
+            <ul className="user-attachments" aria-label="Attached files">
+              {used.map((item) => <li key={item.id}><PaperclipIcon size={11} />{item.name}</li>)}
+            </ul>
+          );
+        })()}
+      </div>
       {attempts.map((attempt, index) => {
         const last = index === attempts.length - 1;
         const body = (
