@@ -94,20 +94,17 @@ build declares these dependencies automatically.
 - **Memory** is off by default. Save notes explicitly under Settings →
   Knowledge & Memory. When enabled, up to three relevant notes are added to
   later answers as background, separate from document evidence.
-- **Web research** is off until you turn on Search for one message. It uses
-  your own Brave Search API key, a SearXNG instance you configure, or the
-  experimental Purili provider, all chosen under Settings → Web search, or
-  reads one public `https://` page you enter. Purili needs no account or key,
-  but its terms allow only personal, non-commercial use, which you must
-  confirm before selecting it; its results are never saved. Only
-  your message, or the query you edit, goes to the search provider. Up to
-  three public pages are read directly, without cookies, sign-in, scripts or
-  images. Choose **Search and answer**, **Search results only**, or **Read a webpage**
-  in the composer. Visual-derived queries require review before sending.
-  A cloud or self-hosted model receives page excerpts only
-  when you allow it for that message. Raw results and excerpts stay in
-  memory; cited links are saved only for direct pages or when you turn on
-  saving for Brave or your SearXNG instance.
+- **Web research** starts when you choose a mode in Chat. The selected Chat
+  model plans the query and checks whether the results address the question.
+  The app can try one substantially different query. Only those generated
+  queries go to the configured search service. **Search and answer** can
+  read up to three public pages and cite passages verified against their
+  text. **Search results only** lists relevant links. **Read a webpage**
+  fetches the public HTTPS address you enter. Image-derived searches send
+  only the exact reviewed query and use a local model. Remote research
+  processing requires per-turn permission to share the question and public
+  sources. Purili requires personal, non-commercial use confirmation.
+  Queries and attempt details stay in memory for the app session.
 
 ## Known limitations
 
