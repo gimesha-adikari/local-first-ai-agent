@@ -160,7 +160,7 @@ function AttachmentCard({ view, included, disabled, onToggle, onCancel, onRemove
  */
 export function AttachmentTray({
   views, included, disabled, error, rejected, plan, share, remoteName, onShareChange,
-  onToggle, onCancel, onRemove, onRetention, onDismissError, visual,
+  onToggle, onCancel, onRemove, onRetention, onDismissError, showSharing, onCancelReview, visual,
 }: {
   views: AttachmentView[];
   included: (id: string) => boolean;
@@ -176,9 +176,12 @@ export function AttachmentTray({
   onRemove: (id: string) => void;
   onRetention: (id: string, keep: boolean) => void;
   onDismissError: () => void;
+  showSharing: boolean;
+  onCancelReview?: () => void;
   visual?: VisualActions;
 }) {
-  if (views.length === 0 && !error && rejected.length === 0) return null;
+  const sharing = showSharing && plan.needed && remoteName;
+  if (views.length === 0 && !error && rejected.length === 0 && !sharing && !onCancelReview) return null;
   return (
     <div className="attachment-tray" role="group" aria-label="Attachments">
       {views.length > 0 && (
@@ -197,7 +200,7 @@ export function AttachmentTray({
           <button type="button" className="link-button" onClick={onDismissError}>Dismiss</button>
         </div>
       )}
-      {plan.needed && remoteName && (
+      {sharing && (
         <div className="attachment-share">
           <p className="research-label">Sent to {remoteName} with this message</p>
           <ul className="attachment-share-list">
@@ -228,6 +231,10 @@ export function AttachmentTray({
           <p className="hint">Original files are never sent. The provider's own retention applies to what it receives.</p>
         </div>
       )}
+      {onCancelReview && <div className="attachment-actions">
+        {sharing && <span className="hint">After confirming, choose Regenerate again.</span>}
+        <button type="button" className="link-button" onClick={onCancelReview}>Cancel review</button>
+      </div>}
       {views.length > 0 && (
         <p className="hint attachment-footnote">
           Attachments are read on this device and aren't added to your library or memory. Temporary ones last for this

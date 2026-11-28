@@ -889,6 +889,13 @@ fn attachment_generation(
             usage.sources
         ),
     })?;
+    if request
+        .prompt
+        .contains("the orchard team check the water tank")
+    {
+        // Let the WebView observe acceptance independently of completion.
+        thread::sleep(Duration::from_secs(1));
+    }
     Ok(GenerationStats {
         reason: FinishReason::EndOfGeneration,
         prompt_tokens: 20,
@@ -925,6 +932,11 @@ fn attachment_desktop_fixture() {
     )
     .unwrap();
     std::fs::write(files.join("fake.png"), "not really an image").unwrap();
+    let long_png = "very-long-visible-filename-for-testing-the-attachment-tray-orchard-notice.png";
+    std::fs::rename(files.join("ocr-latin-eng-14.png"), files.join(long_png)).unwrap();
+    for name in ["fresh-one.md", "fresh-two.md", "fresh-three.md"] {
+        std::fs::write(files.join(name), format!("A new document named {name}.")).unwrap();
+    }
     let picked = |names: &[&str]| {
         names
             .iter()
@@ -936,11 +948,12 @@ fn attachment_desktop_fixture() {
         queue.push_back(picked(&[
             "orchard notes.md",
             "conversation.pdf",
-            "ocr-latin-eng-14.png",
+            long_png,
             "ocr-latin-eng-14.jpg",
             "fake.png",
             "image-only.pdf",
         ]));
+        queue.push_back(picked(&["fresh-one.md", "fresh-two.md", "fresh-three.md"]));
     }
     run_webview_fixture_with_worker(
         profile,

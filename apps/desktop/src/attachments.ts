@@ -2,6 +2,8 @@
 // the pure presentation and request logic the composer and answers use.
 // The engine re-checks every rule here; this module only explains them.
 
+import type { UnifiedTurn } from "./unified";
+
 export type AttachmentKind = "text" | "markdown" | "pdf" | "png" | "jpeg";
 export type AttachmentRetention = "temporary" | "conversation";
 export type AttachmentPhase =
@@ -118,6 +120,7 @@ export function readySummary(view: AttachmentView): string {
 /** Why the current attachments can't be sent, if they can't. */
 export function sendProblem(views: AttachmentView[], included: (id: string) => boolean): string | null {
   const active = views.filter((view) => included(view.id));
+  if (active.length > maxAttachments) return `Use at most ${maxAttachments} attachments per message.`;
   const busy = active.find(preparing);
   if (busy) return `Wait for “${busy.name}” to finish preparing, or cancel it.`;
   const expired = active.find((view) => view.phase === "expired");
@@ -130,6 +133,27 @@ export function sendProblem(views: AttachmentView[], included: (id: string) => b
 /** Attachments that will be used by the next message. */
 export const readyAttachments = (views: AttachmentView[], included: (id: string) => boolean) =>
   views.filter((view) => view.phase === "ready" && included(view.id));
+
+/** Only files referenced by an accepted Chat attempt leave the composer. */
+export function pendingAttachments(
+  views: readonly AttachmentView[],
+  turns: readonly UnifiedTurn[],
+): AttachmentView[] {
+  const submitted = new Set<string>();
+  for (const turn of turns) {
+    if (turn.kind !== "chat") continue;
+    for (const { message } of turn.assistants) {
+      for (const file of message.context?.attachments?.attachments ?? []) submitted.add(file.id);
+    }
+  }
+  return views.filter((view) => !submitted.has(view.id));
+}
+
+/** Recover the exact files of a sent attempt in its original order. */
+export function recordedAttachments(views: readonly AttachmentView[], record: AttachmentRecord | null | undefined): AttachmentView[] {
+  const available = new Map(views.filter((view) => view.phase === "ready").map((view) => [view.id, view]));
+  return (record?.attachments ?? []).flatMap(({ id }) => available.get(id) ?? []);
+}
 
 export type RemoteTarget = { id: number; name: string; imageInput: boolean } | null;
 

@@ -48,7 +48,7 @@ import { AttachButton, AttachmentTray, type VisualActions } from "./AttachmentCo
 import { useChatCamera } from "./ChatCamera";
 import { suggestQuery } from "./visual";
 import {
-  attachmentRequest, emptyShare, preparing, readyAttachments, sendProblem, sharePlan,
+  attachmentRequest, emptyShare, pendingAttachments, preparing, readyAttachments, recordedAttachments, sendProblem, sharePlan,
   type AttachmentView, type Chosen, type RemoteTarget, type ShareDraft,
 } from "./attachments";
 import {
@@ -159,10 +159,14 @@ export default function App() {
   const [researchStages, setResearchStages] = useState<ReadonlyMap<number, ResearchStage>>(() => new Map());
   const [researching, setResearching] = useState(false);
   const [providersBusy, setProvidersBusy] = useState(false);
-  // Attachments of the open draft (no conversation yet) or conversation.
+  // Both the open conversation’s files and the composer’s pending draft.
   const [attachments, setAttachments] = useState<AttachmentView[]>([]);
   const [pausedAttachments, setPausedAttachments] = useState<ReadonlySet<string>>(() => new Set());
   const [share, setShare] = useState<ShareDraft>(emptyShare);
+  const [confirmedAttachmentSelection, setConfirmedAttachmentSelection] = useState<string | null>(null);
+  const [usePreviousFiles, setUsePreviousFiles] = useState(true);
+  const [reviewRegeneration, setReviewRegeneration] = useState(false);
+  const attachmentRefresh = useRef(0);
   const [attaching, setAttaching] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [rejectedFiles, setRejectedFiles] = useState<Chosen["rejected"]>([]);
@@ -187,26 +191,34 @@ export default function App() {
   const scopeId = view.kind === "conversation" ? view.id : null;
 
   async function refreshAttachments(scope: number | null) {
+    const sequence = ++attachmentRefresh.current;
+    const isCurrent = () => attachmentScope.current === scope && attachmentRefresh.current === sequence;
     try {
-      const list = await invoke<AttachmentView[]>("attachment_list", { conversationId: scope });
-      if (attachmentScope.current === scope) setAttachments(list);
+      const [pending, bound] = await Promise.all([
+        invoke<AttachmentView[]>("attachment_list", { conversationId: null }),
+        scope === null ? [] : invoke<AttachmentView[]>("attachment_list", { conversationId: scope }),
+      ]);
+      if (isCurrent()) setAttachments([...new Map([...pending, ...bound].map((file) => [file.id, file])).values()]);
     } catch (failure) {
-      if (attachmentScope.current === scope) setAttachmentError(errorMessage(failure));
+      if (isCurrent()) setAttachmentError(errorMessage(failure));
     }
   }
 
-  // Each draft or conversation shows only its own attachments.
   useEffect(() => {
     attachmentScope.current = scopeId;
-    setAttachments([]);
-    setPausedAttachments(new Set());
-    setShare(emptyShare);
-    setAttachmentError(null);
-    setRejectedFiles([]);
+    setAttachments((current) => current.filter((file) => file.draft));
+    if (operationRef.current !== "generating") {
+      setUsePreviousFiles(true);
+      setShare(emptyShare);
+      setReviewRegeneration(false);
+      setAttachmentError(null);
+      setRejectedFiles([]);
+    }
     if (initialized) void refreshAttachments(scopeId);
   }, [scopeId, initialized]);
 
-  const attachmentsPreparing = attachments.some(preparing);
+  const composerAttachments = pendingAttachments(attachments, conversation?.turns ?? []);
+  const attachmentsPreparing = composerAttachments.some(preparing);
   useEffect(() => {
     if (!attachmentsPreparing) return;
     const timer = window.setInterval(() => void refreshAttachments(attachmentScope.current), 400);
@@ -214,16 +226,17 @@ export default function App() {
   }, [attachmentsPreparing]);
 
   async function attachFiles() {
-    const scope = attachmentScope.current;
     setAttaching(true);
     setAttachmentError(null);
     setRejectedFiles([]);
     try {
-      const chosen = await invoke<Chosen>("attachment_choose", { conversationId: scope, retention: "temporary" });
-      if (attachmentScope.current !== scope) return;
+      const chosen = await invoke<Chosen>("attachment_choose", { conversationId: null, retention: "temporary" });
       setRejectedFiles(chosen.rejected);
-      if (chosen.attachments.length) setShare((current) => ({ ...current, confirmed: false }));
-      await refreshAttachments(scope);
+      if (chosen.attachments.length) {
+        setShare(emptyShare);
+        setReviewRegeneration(false);
+      }
+      await refreshAttachments(attachmentScope.current);
     } catch (failure) {
       setAttachmentError(errorMessage(failure));
     } finally {
@@ -233,11 +246,12 @@ export default function App() {
 
   async function changeAttachment(action: "cancel" | "remove" | "keep" | "temporary", id: string) {
     const scope = attachmentScope.current;
+    const conversationId = attachments.find((file) => file.id === id)?.draft ? null : scope;
     setAttachmentError(null);
     try {
-      if (action === "cancel") await invoke("attachment_cancel", { conversationId: scope, id });
-      else if (action === "remove") await invoke("attachment_remove", { conversationId: scope, id });
-      else await invoke("attachment_set_retention", { conversationId: scope, id, retention: action === "keep" ? "conversation" : "temporary" });
+      if (action === "cancel") await invoke("attachment_cancel", { conversationId, id });
+      else if (action === "remove") await invoke("attachment_remove", { conversationId, id });
+      else await invoke("attachment_set_retention", { conversationId, id, retention: action === "keep" ? "conversation" : "temporary" });
       if (action === "remove") setShare((current) => ({ confirmed: false, images: current.images.filter((item) => item !== id) }));
     } catch (failure) {
       setAttachmentError(errorMessage(failure));
@@ -402,15 +416,24 @@ export default function App() {
     : research.enabled ? plan.problem : null;
   const researchReady = research.enabled && plan.canSend && !researchProblem;
   const includedAttachment = (id: string) => !pausedAttachments.has(id);
-  const readyForNext = mode === "chat" ? readyAttachments(attachments, includedAttachment) : [];
+  const previousRecord = latestChatAttempt(conversation?.turns ?? [])?.context?.attachments;
+  const previousAttachments = recordedAttachments(attachments, previousRecord);
+  const previousAvailable = mode === "chat" && composerAttachments.length === 0
+    && !research.enabled && !selection.enabled && previousAttachments.length > 0;
+  const draftReady = readyAttachments(composerAttachments, includedAttachment);
+  const readyForNext = mode !== "chat" ? []
+    : previousAvailable && usePreviousFiles ? previousAttachments : draftReady;
   const remoteTarget: RemoteTarget = remote && remoteReady
     ? { id: remote.id, name: remote.settings.name, imageInput: remote.settings.imageInput } : null;
-  const attachmentPlan = sharePlan(readyForNext, remoteTarget, share);
+  const sharingFiles = reviewRegeneration ? previousAttachments : readyForNext;
+  const sharingSelection = JSON.stringify([remoteTarget?.id, sharingFiles.map((file) => file.id)]);
+  const effectiveShare = confirmedAttachmentSelection === sharingSelection ? share : { ...share, confirmed: false };
+  const attachmentPlan = sharePlan(sharingFiles, remoteTarget, effectiveShare);
   const attachmentProblem = mode !== "chat" ? null
-    : sendProblem(attachments, includedAttachment)
-      ?? (readyForNext.length && research.enabled ? "Web search can't be combined with attachments yet. Turn off Search, or pause the attachments."
-        : readyForNext.length && selection.enabled ? "Library documents can't be combined with attachments yet. Turn off Knowledge, or pause the attachments."
-          : attachmentPlan.needed && !attachmentPlan.canSend ? `Review what will be sent to ${remoteTarget?.name ?? "the provider"} and confirm it below the attachments.`
+    : sendProblem(composerAttachments, includedAttachment)
+      ?? (draftReady.length && research.enabled ? "Web search can't be combined with attachments yet. Turn off Search, or pause the attachments."
+        : draftReady.length && selection.enabled ? "Library documents can't be combined with attachments yet. Turn off Knowledge, or pause the attachments."
+          : !reviewRegeneration && attachmentPlan.needed && !attachmentPlan.canSend && draft.trim() ? `Review what will be sent to ${remoteTarget?.name ?? "the provider"} and confirm it below the attachments.`
             : null);
   const activeReference = snapshot?.models.find((model) => model.id === snapshot.activeModelId) ?? null;
   const supportsThinking = !research.enabled && !remote && !!modelInfo?.supportsThinking;
@@ -485,12 +508,13 @@ export default function App() {
   }, []);
 
   const camera = useChatCamera({
-    scope: () => attachmentScope.current,
-    count: attachments.length,
+    scope: () => null,
+    count: composerAttachments.length,
     disabled: !!agent.activeApproval || !snapshot || generating,
-    onAttached: (scope) => {
-      setShare((current) => ({ ...current, confirmed: false }));
-      void refreshAttachments(scope);
+    onAttached: () => {
+      setShare(emptyShare);
+      setReviewRegeneration(false);
+      void refreshAttachments(attachmentScope.current);
     },
   });
 
@@ -504,7 +528,9 @@ export default function App() {
     return next;
   });
   const visualActions: VisualActions = {
-    loadText: (id) => invoke<string>("attachment_text", { conversationId: attachmentScope.current, id }),
+    loadText: (id) => invoke<string>("attachment_text", {
+      conversationId: attachments.find((file) => file.id === id)?.draft ? null : attachmentScope.current, id,
+    }),
     useText: (view, text) => {
       setDraft((current) => current.trim() ? `${current}\n\n${text}` : text);
       setDraftImageSources((current) => [...new Set([...current, view.id])]);
@@ -645,19 +671,29 @@ export default function App() {
 
   async function generate(kind: "send" | "regenerate" | "continue", regenerate: RegenerateRequest = {}, messageId?: number) {
     if (!snapshot || knowledge.holdsLease) return;
-    const wantsResearch = kind !== "continue" && research.enabled;
+    const regenerateAttachments = kind === "regenerate" && previousRecord;
+    const wantsResearch = kind !== "continue" && !regenerateAttachments && research.enabled;
     if (wantsResearch && !researchReady) return;
     if (kind === "continue" ? !modelReady : !(chatReady || wantsResearch)) return;
     const content = draft;
-    if (kind === "send" && !content.trim()) return;
+    if (kind === "send" && (!content.trim() || reviewRegeneration)) return;
     if (kind === "regenerate" && !canRegenerateLatest(conversation)) return;
     if (kind === "continue" && (!conversation || messageId === undefined
       || latestChatAttempt(conversation.turns)?.id !== messageId
       || isContextual(latestChatAttempt(conversation.turns)))) return;
     if (Number.isNaN(parsedOverride)) return;
-    // Send and Regenerate use the current selection; Continue never searches.
-    const knowledgeRequest = kind === "continue" ? null : knowledgeOption(selection);
-    if (kind !== "continue" && selection.enabled && readiness.blocked) {
+    if (regenerateAttachments && previousAttachments.length !== previousRecord.attachments.length) {
+      setError("Some files from this answer are no longer available. Attach them again to ask a new question.");
+      return;
+    }
+    if (regenerateAttachments && remoteTarget && (!reviewRegeneration || !effectiveShare.confirmed)) {
+      if (!reviewRegeneration) setShare(emptyShare);
+      setReviewRegeneration(true);
+      return;
+    }
+    const selectedAttachments = regenerateAttachments ? previousAttachments : kind === "regenerate" ? draftReady : readyForNext;
+    const knowledgeRequest = kind === "continue" || regenerateAttachments ? null : knowledgeOption(selection);
+    if (kind !== "continue" && !regenerateAttachments && selection.enabled && readiness.blocked) {
       setChatNotice({ tone: "warning", title: readiness.blocked.title, detail: readiness.blocked.detail, fix: readiness.blocked.fix });
       return;
     }
@@ -681,7 +717,7 @@ export default function App() {
     if (kind !== "continue") options.expectedTarget = { providerId: snapshot.intelligence.activeProvider };
     const researchRequest = wantsResearch ? researchOptions(searchDraft, webResearch, content) : undefined;
     if (researchRequest) options.research = researchRequest;
-    const attachmentOption = kind === "continue" ? undefined : attachmentRequest(readyForNext, remoteTarget, share);
+    const attachmentOption = kind === "continue" ? undefined : attachmentRequest(selectedAttachments, remoteTarget, effectiveShare);
     if (attachmentOption) options.attachments = attachmentOption;
     setResearching(!!researchRequest);
     const generation = ++request.current;
@@ -723,7 +759,11 @@ export default function App() {
         // Search applies to one message; the next one is ordinary Chat again.
         if (researchRequest) setResearch(emptyResearch);
         // Sharing is authorized for one message at a time.
-        if (attachmentOption?.share) setShare(emptyShare);
+        if (attachmentOption) {
+          setShare(emptyShare);
+          setReviewRegeneration(false);
+          void refreshAttachments(id);
+        }
         setOutputOverride("");
         setPendingChat(null);
       }
@@ -776,6 +816,9 @@ export default function App() {
         if (kind === "send" && (sent || saved.turns.some((turn) =>
           turn.user.content === content && !before.has(turn.id)))) {
           setDraft((current) => (current === content ? "" : current));
+        }
+        if (attachmentOption && (started || sent || saved.turns.some((turn) => !before.has(turn.id)))) {
+          await refreshAttachments(id);
         }
         // A first message that never started leaves no empty conversation behind.
         if (ensured.created && !started && saved.turns.length === 0) {
@@ -1113,6 +1156,8 @@ export default function App() {
       if (sequence !== providerRefresh.current) return;
       setSnapshot((current) => current && { ...current, intelligence });
       setResearch((current) => current.share ? { ...current, share: false } : current);
+      setShare(emptyShare);
+      setReviewRegeneration(false);
       const list = await listProviders();
       if (sequence === providerRefresh.current) setProviders(list);
     } finally {
@@ -1202,7 +1247,7 @@ export default function App() {
 
   const canSend = !busy && !!draft.trim() && (mode === "agent"
     ? agentAvailable && validTimeout(Number(taskTimeout))
-    : !!snapshot && !Number.isNaN(parsedOverride) && !attachmentProblem && (research.enabled
+    : !!snapshot && !reviewRegeneration && !Number.isNaN(parsedOverride) && !attachmentProblem && (research.enabled
       ? researchReady
       : chatReady && !knowledgeBlocked));
 
@@ -1221,7 +1266,7 @@ export default function App() {
             : `${remote.settings.name} isn’t ready. Open Providers in Settings.`) : "Loading the selected provider…")
           : !modelReady ? (bundled === "checking" && !snapshot.models.length ? "Checking the built-in assistant…"
             : phase === "loading" ? "Loading model…" : "Load a local model, or select a provider in Settings, to start")
-            : mode === "agent" ? (agentUnavailable ?? (attachments.length
+            : mode === "agent" ? (agentUnavailable ?? (composerAttachments.length
               ? "Agent doesn't read Chat attachments. Switch to Chat to ask about them."
               : "Agent runs on this device with the tools and files you allow"))
               : knowledgeBlocked ? `${readiness.blocked!.title}. ${readiness.blocked!.detail}`
@@ -1495,21 +1540,36 @@ export default function App() {
             attachmentControl={(
               <>
                 <AttachButton disabled={!!agent.activeApproval || !snapshot || generating} busy={attaching}
-                  count={attachments.length} onAttach={() => void attachFiles()} />
+                  count={composerAttachments.length} onAttach={() => void attachFiles()} />
                 {camera.button}
+                {previousAvailable && (
+                  <button type="button" className="composer-pill" aria-pressed={usePreviousFiles}
+                    disabled={generating || reviewRegeneration} title={previousAttachments.map((file) => file.name).join(", ")}
+                    onClick={() => { setUsePreviousFiles(!usePreviousFiles); setShare(emptyShare); }}>
+                    Previous files
+                  </button>
+                )}
               </>
             )}
             attachmentTray={(
               <>
               {camera.panel}
-              <AttachmentTray views={attachments} included={includedAttachment} disabled={generating} visual={visualActions}
-                error={attachmentError} rejected={rejectedFiles} plan={attachmentPlan} share={share}
-                remoteName={remoteTarget?.name ?? null} onShareChange={setShare}
-                onToggle={(id) => setPausedAttachments((current) => {
-                  const next = new Set(current);
-                  if (next.has(id)) next.delete(id); else next.add(id);
-                  return next;
-                })}
+              <AttachmentTray views={composerAttachments} included={includedAttachment} disabled={generating} visual={visualActions}
+                error={attachmentError} rejected={rejectedFiles} plan={attachmentPlan} share={effectiveShare}
+                showSharing={reviewRegeneration || !!draft.trim() || composerAttachments.length > 0}
+                onCancelReview={reviewRegeneration ? () => { setReviewRegeneration(false); setShare(emptyShare); } : undefined}
+                remoteName={remoteTarget?.name ?? null} onShareChange={(next) => {
+                  setShare(next);
+                  setConfirmedAttachmentSelection(next.confirmed ? sharingSelection : null);
+                }}
+                onToggle={(id) => {
+                  setShare(emptyShare);
+                  setPausedAttachments((current) => {
+                    const next = new Set(current);
+                    if (next.has(id)) next.delete(id); else next.add(id);
+                    return next;
+                  });
+                }}
                 onCancel={(id) => void changeAttachment("cancel", id)}
                 onRemove={(id) => void changeAttachment("remove", id)}
                 onRetention={(id, keep) => void changeAttachment(keep ? "keep" : "temporary", id)}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  attachmentRequest, emptyShare, formatBytes, passageLabel, phaseLabel, readyAttachments, recordNotes, sendProblem, sharePlan,
+  attachmentRequest, emptyShare, formatBytes, passageLabel, phaseLabel, pendingAttachments, readyAttachments, recordedAttachments, recordNotes, sendProblem, sharePlan,
 } from "./attachments.ts";
 
 const view = (patch = {}) => ({
@@ -66,4 +66,21 @@ test("answer notes report sampled coverage, OCR limits and availability", () => 
   assert.ok(notes.some((note) => /didn't see the image/.test(note)));
   assert.ok(notes.some((note) => /big.pdf was temporary and is no longer available/.test(note)));
   assert.ok(!notes.some((note) => /sign.png is no longer/.test(note)));
+});
+
+test("only accepted attachment IDs leave the tray, including on refresh and reopen", () => {
+  const sent = view();
+  const paused = view({ id: "paused" });
+  const later = view({ id: "later", phase: "reading" });
+  const retained = { ...sent, draft: false, saved: true };
+  const record = { attachments: [{ id: sent.id }] };
+  const attempt = { message: { context: { attachments: record } } };
+  const accepted = [{ kind: "chat", assistants: [attempt] }];
+
+  // A refusal before acceptance leaves no attempt record to hide the draft.
+  assert.deepEqual(pendingAttachments([sent, paused], []), [sent, paused]);
+  assert.deepEqual(pendingAttachments([sent, paused], accepted), [paused]);
+  assert.deepEqual(pendingAttachments([retained, paused, later], accepted), [paused, later]);
+  assert.deepEqual(recordedAttachments([retained, paused, later], record), [retained]);
+  assert.deepEqual(recordedAttachments([view({ ...retained, phase: "expired" })], record), []);
 });
