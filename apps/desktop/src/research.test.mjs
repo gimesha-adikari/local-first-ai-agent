@@ -37,20 +37,22 @@ test("the plan discloses provider, outgoing query and where the answer is writte
   const local = researchPlan({ draft, message: "When did  it open?", view: view(), remoteName: null, modelReady: true });
   assert.equal(local.canSend, true);
   assert.equal(local.destination, "Brave Search");
-  assert.equal(local.outgoing, "When did it open?");
+  assert.equal(local.outgoing, null);
   assert.equal(local.answer, "local");
-  assert.match(local.answerNote, /still use the internet/);
+  assert.match(local.answerNote, /plans and checks the search on this device/);
 
   const edited = researchPlan({ draft: { ...draft, query: "bridge opening" }, message: "private text", view: view(), remoteName: null, modelReady: true });
-  assert.equal(edited.outgoing, "bridge opening");
+  assert.equal(edited.outgoing, null);
 
   const remote = researchPlan({ draft, message: "q", view: view(), remoteName: "Cloud", modelReady: false });
   assert.equal(remote.answer, "none");
-  assert.match(remote.answerNote, /Allow Cloud/);
+  assert.equal(remote.canSend, false);
+  assert.match(remote.answerNote, /Cloud receives your question and the public material/);
   assert.equal(researchPlan({ draft: { ...draft, share: true }, message: "q", view: view(), remoteName: "Cloud", modelReady: false }).answer, "remote");
 
   const noModel = researchPlan({ draft, message: "q", view: view(), remoteName: null, modelReady: false });
-  assert.equal(noModel.canSend, true);
+  assert.equal(noModel.canSend, false);
+  assert.match(noModel.problem, /Load a Chat model/);
   assert.equal(noModel.answer, "none");
 
   assert.match(researchPlan({ draft, message: "q", view: view({ braveKey: "missing" }), remoteName: null, modelReady: true }).problem, /API key/);
@@ -118,4 +120,17 @@ test("image-derived queries need review of the exact query and search provider",
   assert.deepEqual(researchOptions(confirmed, view(), "Reviewed image text"), {
     mode: "search", provider: "brave", query: "Reviewed image text", queryAttachments: ["image-id"], reviewedQuery: "Reviewed image text",
   });
+});
+
+test("results-only uses the selected model without a written answer and labels an actual retry", () => {
+  const draft = { ...emptyResearch, enabled: true, resultsOnly: true };
+  const context = { draft, message: "Question", view: view(), remoteName: null, modelReady: true };
+  assert.equal(researchPlan(context).canSend, true);
+  assert.equal(researchPlan(context).answer, "none");
+  assert.equal(researchPlan({ ...context, modelReady: false }).canSend, false);
+  assert.equal(researchPlan({ ...context, draft: { ...draft, query: "" } }).canSend, true);
+  assert.equal(researchOptions({ ...draft, query: "" }, view()).query, undefined);
+  assert.equal(stageLabel("understanding"), "Understanding your question…");
+  assert.equal(stageLabel("checking"), "Checking sources…");
+  assert.equal(stageLabel("refining"), "Refining search…");
 });

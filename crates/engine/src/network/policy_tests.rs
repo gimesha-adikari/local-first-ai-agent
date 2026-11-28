@@ -376,7 +376,8 @@ fn search_requests_admit_visual_query_classes_but_never_history_memory_or_docume
         capability::WEB_SEARCH,
         classification::{
             ATTACHMENT, ATTACHMENT_IMAGE, ATTACHMENT_TEXT, CAMERA_IMAGE, CAMERA_TEXT, HISTORY,
-            LIBRARY, MODEL_OUTPUT, PDF_EXCERPT, QUERY, SCREEN_TEXT, SYSTEM_TEXT, TEXT_EXCERPT,
+            LIBRARY, MODEL_OUTPUT, PDF_EXCERPT, PUBLIC_WEB, QUERY, SCREEN_TEXT, SYSTEM_TEXT,
+            TEXT_EXCERPT,
         },
     };
     let search = destination("search/fixture", "https://search.example/res");
@@ -459,6 +460,25 @@ fn search_requests_admit_visual_query_classes_but_never_history_memory_or_docume
             Err(Denial::Scope)
         );
     }
+    let purpose = crate::research::GENERATED_QUERY_PURPOSE;
+    let generated = query(purpose, &[MODEL_OUTPUT, SYSTEM_TEXT, PUBLIC_WEB]);
+    assert!(
+        authority
+            .grant(Permission::Share, generated.operation(), future())
+            .is_ok()
+    );
+    for forbidden in [MEMORY, HISTORY, LIBRARY, ATTACHMENT_IMAGE] {
+        let mixed = query(purpose, &[MODEL_OUTPUT, SYSTEM_TEXT, forbidden]);
+        assert_eq!(
+            authority.grant(Permission::Share, mixed.operation(), future()),
+            Err(Denial::Scope)
+        );
+    }
+    let ungenerated = query(purpose, &[SYSTEM_TEXT]);
+    assert_eq!(
+        authority.grant(Permission::Share, ungenerated.operation(), future()),
+        Err(Denial::Scope)
+    );
     // A search request must carry the query class.
     let bare = Outbound::new(
         &session,

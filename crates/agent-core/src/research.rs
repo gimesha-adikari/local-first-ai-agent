@@ -122,10 +122,8 @@ impl WebResearchSettings {
     }
 }
 
-/// A validated search query: the user's own question or their explicit
-/// edit of it, never augmented with context. A visual-assisted search may
-/// start from recognized text or a suggested description, but only the text
-/// the user reviewed and authorized becomes the query.
+/// A bounded query. Chat uses a model-generated query for typed searches
+/// and the explicitly reviewed text for visual searches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchQuery(String);
 
@@ -241,7 +239,7 @@ pub enum ResearchMode {
 pub enum Synthesis {
     Local,
     Remote,
-    /// Results only: no model was asked.
+    /// No written answer was produced.
     None,
 }
 
@@ -275,7 +273,7 @@ pub struct ResearchRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<SearchProviderKind>,
     pub synthesis: Synthesis,
-    /// Results returned by the search provider after de-duplication.
+    /// Results returned by the search provider across the attempts.
     pub discovered: u32,
     /// Pages fetched and extracted successfully.
     pub retrieved: u32,
@@ -293,7 +291,10 @@ pub struct ResearchRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResearchStage {
+    Understanding,
     Searching,
+    Checking,
+    Refining,
     Reading,
     Ranking,
     Answering,

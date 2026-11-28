@@ -147,7 +147,12 @@ impl InferenceProvider for Scripted {
                 0,
             )?;
         }
-        let reason = if request.prompt.contains("wait") {
+        let reason = if let Some(output) =
+            crate::research_tests::model_output(&request.history.system, &request.prompt)
+        {
+            emit(TextDelta { text: output })?;
+            FinishReason::EndOfGeneration
+        } else if request.prompt.contains("wait") {
             emit(TextDelta {
                 text: "Partial".into(),
             })?;

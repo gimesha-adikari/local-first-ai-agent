@@ -131,7 +131,7 @@ function AssistantMessage({
       )}
       {streaming && !answer && reasoning === null && (
         <p className="activity-live" role="status"><Spinner size={13} />
-          {research ? stageLabel(knowledge.researchStage?.(message.id) ?? "searching", research.mode) : "Generating…"}
+          {research ? stageLabel(knowledge.researchStage?.(message.id) ?? (research.mode === "search" ? "understanding" : "reading"), research.mode) : "Generating…"}
         </p>
       )}
       {notice && !streaming && (

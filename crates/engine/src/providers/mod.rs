@@ -144,10 +144,13 @@ pub(crate) fn consent(
             agent_core::classification::CAMERA_IMAGE,
         ]);
     }
-    // Public web evidence is admitted only for a research answer whose
-    // sharing the user authorized for that one request.
-    if operation.purpose() == "web-research" {
-        allowed.push(agent_core::classification::PUBLIC_WEB);
+    // A research turn explicitly authorized this provider to process
+    // public evidence and its own query from the previous step.
+    if operation.purpose() == crate::research::MODEL_PURPOSE {
+        allowed.extend([
+            agent_core::classification::PUBLIC_WEB,
+            agent_core::classification::MODEL_OUTPUT,
+        ]);
     }
     // Attached content is admitted only for a Chat answer whose sharing the
     // user authorized for the message's exact attachments (Stage 04-D).

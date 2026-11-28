@@ -17,7 +17,7 @@ use agent_core::{
         Cancellation, ErrorCode, FinishReason, GenerationStats, InferenceError, OutputBudget,
         Result,
     },
-    intelligence::{SessionState, Transmission, UsageBasis},
+    intelligence::{EgressRecord, SessionState, Transmission, UsageBasis},
     provider::ProviderSettings,
 };
 use storage::{
@@ -31,6 +31,7 @@ use crate::{
     chat_session::{Candidates, ChatSession, policy_error},
     database,
     network::{Destination, Failed, Method, Outbound, Streaming},
+    policy::Session,
     providers::{consent, failure_error, offer, openai},
     usage,
 };
@@ -49,9 +50,6 @@ pub(super) struct RemoteTurn {
     pub images: Vec<(ImageInput, (u32, u32))>,
     /// Transport records of research requests made for this turn.
     pub external: Vec<agent_core::intelligence::EgressRecord>,
-    /// The user separately authorized sending web evidence to this provider
-    /// for this request.
-    pub web: bool,
     /// The user authorized sending this message's attachment content to
     /// this provider for this request (Stage 04-D).
     pub attachments: bool,
@@ -147,6 +145,12 @@ fn fit(
     }
 }
 
+struct RemoteBudget {
+    id: i64,
+    tokens: u64,
+    cost: Option<u64>,
+}
+
 struct Outcome {
     reason: Option<FinishReason>,
     done: bool,
@@ -171,7 +175,6 @@ impl ChatRuntime {
             cancellation,
             images: attached,
             external,
-            web,
             attachments,
         } = remote;
         let (saved, destination) = target;
@@ -189,9 +192,6 @@ impl ChatRuntime {
                 agent_core::classification::CAMERA_TEXT,
                 agent_core::classification::CAMERA_IMAGE,
             ]);
-        }
-        if web {
-            allowed.push(agent_core::classification::PUBLIC_WEB);
         }
         if attachments {
             allowed.extend(ATTACHMENT_CLASSES);
@@ -311,8 +311,6 @@ impl ChatRuntime {
             GENERATE,
             if ephemeral {
                 "glance"
-            } else if web {
-                "web-research"
             } else if attachments {
                 "chat-attachments"
             } else {
@@ -333,30 +331,15 @@ impl ChatRuntime {
                 .map(|(_, (width, height))| usage::estimate_image(*width, *height))
                 .sum::<u64>(),
         );
-        let reserved_tokens = input_estimate.saturating_add(output.into());
-        let reserved_cost =
-            usage::estimate_cost(settings.pricing.as_ref(), input_estimate, output.into());
-        let period = usage::current_period();
-        let reservation = database(&self.database).and_then(|mut db| {
-            db.reserve_usage(
-                &period,
-                Reservation {
-                    provider: saved.id,
-                    tokens: reserved_tokens,
-                    cost: reserved_cost,
-                },
-                limits(&settings),
-            )
-        });
-        let reservation = match reservation {
-            Ok(reservation) => reservation,
+        let budget = match self.reserve_remote(&saved, input_estimate, output) {
+            Ok(budget) => budget,
             Err(error) => return self.fail_unsent(session, message_id, "", error),
         };
         let until = Instant::now() + Duration::from_secs(600);
         let (process, share) = match consent(&self.policy, &settings, outbound.operation(), until) {
             Ok(grants) => grants,
             Err(denial) => {
-                self.release(reservation, message_id);
+                self.release(budget.id, message_id);
                 return self.fail_unsent(session, message_id, "", policy_error(denial));
             }
         };
@@ -373,7 +356,7 @@ impl ChatRuntime {
                 )
             })
         {
-            self.release(reservation, message_id);
+            self.release(budget.id, message_id);
             return self.fail_unsent(session, message_id, "", error);
         }
         session.submitted(&offer);
@@ -402,9 +385,22 @@ impl ChatRuntime {
             }
             Ok(streaming) => {
                 let mut streaming = streaming;
-                let result = self
-                    .read_stream(&mut streaming, &transcript, &events, message_id, started)
-                    .await;
+                let result = read_stream(&mut streaming, started, |text| {
+                    transcript_lock(&transcript)?.push(
+                        &text,
+                        &self.database,
+                        self.glance_receipt.is_none().then_some(message_id),
+                    )?;
+                    deliver(
+                        &events,
+                        ChatEvent::Delta {
+                            id: message_id,
+                            text,
+                        },
+                    );
+                    Ok(())
+                })
+                .await;
                 let (record, live) = streaming.finish_checked().await;
                 (
                     result
@@ -419,45 +415,13 @@ impl ChatRuntime {
 
         // Settle usage from the transport record and the provider's report.
         let reported = result.as_ref().ok().and_then(|outcome| outcome.usage);
-        let transmission = record.transmission;
-        let (basis, charged_tokens, charged_cost, input, output_tokens) =
-            match (transmission, reported) {
-                (_, Some(usage)) => (
-                    LedgerBasis::ProviderReported,
-                    usage.input.saturating_add(usage.output),
-                    usage::estimate_cost(settings.pricing.as_ref(), usage.input, usage.output),
-                    Some(usage.input),
-                    Some(usage.output),
-                ),
-                (Transmission::Unsent, None) => (
-                    LedgerBasis::None,
-                    0,
-                    reserved_cost.is_some().then_some(0),
-                    None,
-                    None,
-                ),
-                (_, None) => (
-                    LedgerBasis::Estimated,
-                    reserved_tokens,
-                    reserved_cost,
-                    None,
-                    None,
-                ),
-            };
-        let settled = database(&self.database).and_then(|mut db| {
-            db.settle_usage(
-                reservation,
-                Settlement {
-                    transmission: ledger(transmission),
-                    input_tokens: input,
-                    output_tokens,
-                    basis,
-                    charged_tokens,
-                    charged_cost,
-                    message: self.glance_receipt.is_none().then_some(message_id),
-                },
-            )
-        });
+        let (basis, settled) = self.settle_remote(
+            &settings,
+            budget,
+            record.transmission,
+            reported,
+            self.glance_receipt.is_none().then_some(message_id),
+        );
         let (usage_basis, measured_input, measured_output) = match (basis, reported) {
             (LedgerBasis::ProviderReported, Some(usage)) => {
                 (UsageBasis::ProviderReported, usage.input, usage.output)
@@ -554,112 +518,182 @@ impl ChatRuntime {
         Ok(assistant)
     }
 
-    async fn read_stream(
+    /// A private, bounded model step. It never publishes raw model output to Chat.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn complete_research_step(
         &self,
-        streaming: &mut Streaming,
-        transcript: &std::sync::Mutex<Transcript>,
-        events: &ChatEvents,
-        message_id: agent_core::chat::MessageId,
-        started: Instant,
-    ) -> Result<Outcome> {
-        let status = streaming.status;
-        let event_stream = streaming
-            .content_type
-            .as_deref()
-            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"));
-        let mut outcome = Outcome {
-            reason: None,
-            done: false,
-            usage: None,
-            first_token: None,
-        };
-        let mut parser = openai::Stream::default();
-        let mut whole = Vec::new();
-        let successful = (200..300).contains(&status);
-        loop {
-            let piece = match streaming.next().await {
-                None => break,
-                Some(piece) => piece.map_err(|failure| failure_error(&failure))?,
-            };
-            if !successful || !event_stream {
-                if whole.len() + piece.len() > openai::MAX_JSON_BYTES {
-                    return Err(InferenceError::new(
-                        ErrorCode::ProviderInvalidResponse,
-                        "The provider's response exceeded this app's size limits.",
-                    ));
-                }
-                whole.extend(piece);
-                continue;
-            }
-            let parsed = parser.feed(&piece)?;
-            self.apply(
-                streaming,
-                parsed,
-                &mut outcome,
-                transcript,
-                events,
-                message_id,
-                started,
-            )?;
-            if parser.is_done() {
-                return Ok(outcome);
-            }
+        target: &(SavedProvider, Destination),
+        session: &Session,
+        system: &str,
+        prompt: &str,
+        labels: &Labels,
+        output: u32,
+        message_id: i64,
+        external: &mut Vec<EgressRecord>,
+    ) -> Result<String> {
+        let (saved, destination) = target;
+        let settings = &saved.settings;
+        let messages = [
+            PromptMessage {
+                role: MessageRole::System,
+                content: system,
+            },
+            PromptMessage {
+                role: MessageRole::User,
+                content: prompt,
+            },
+        ];
+        let output = output.min(settings.max_output_tokens);
+        let input = usage::estimate_messages(&messages);
+        if input.saturating_add(output.into()) > u64::from(settings.context_tokens) {
+            return Err(InferenceError::new(
+                ErrorCode::ContextLimit,
+                "Research exceeds the selected provider's context window.",
+            ));
         }
-        if !successful {
-            return Err(openai::error_response(status, &whole));
-        }
-        let parsed = if event_stream {
-            parser.finish()?
-        } else {
-            openai::complete_events(&whole)?
+        let body = openai::chat_body(&openai::ChatRequest {
+            model: &settings.model,
+            messages: &messages,
+            images: &[],
+            max_tokens: output,
+            temperature: 0.0,
+            stream_usage: settings.stream_usage,
+        });
+        let outbound = Outbound::new(
+            session,
+            GENERATE,
+            crate::research::MODEL_PURPOSE,
+            destination.locality(),
+            destination.clone(),
+            Method::Post,
+            openai::CHAT_COMPLETIONS,
+            Classified::derived(body, [labels], USER_INPUT),
+            settings.retention.retention(),
+        );
+        let budget = self.reserve_remote(saved, input, output)?;
+        let (process, share) = match consent(
+            &self.policy,
+            settings,
+            outbound.operation(),
+            Instant::now() + Duration::from_secs(90),
+        ) {
+            Ok(grants) => grants,
+            Err(denial) => {
+                self.release(budget.id, message_id);
+                return Err(policy_error(denial));
+            }
         };
-        self.apply(
-            streaming,
-            parsed,
-            &mut outcome,
-            transcript,
-            events,
-            message_id,
-            started,
-        )?;
-        Ok(outcome)
+
+        let mut text = String::new();
+        let (result, record) = match self.boundary.send(outbound, process, share).await {
+            Ok(mut streaming) => {
+                let result = read_stream(&mut streaming, Instant::now(), |delta| {
+                    crate::research::push_step_output(&mut text, &delta)
+                })
+                .await;
+                let (record, live) = streaming.finish_checked().await;
+                (
+                    result
+                        .and_then(|outcome| live.map(|()| outcome).map_err(|f| failure_error(&f))),
+                    record,
+                )
+            }
+            Err(failed) => {
+                let Failed { failure, record } = *failed;
+                (Err(failure_error(&failure)), record)
+            }
+        };
+        let _ = self.policy.revoke(process);
+        let _ = self.policy.revoke(share);
+        let reported = result.as_ref().ok().and_then(|outcome| outcome.usage);
+        let (_, settled) = self.settle_remote(
+            settings,
+            budget,
+            record.transmission,
+            reported,
+            Some(message_id),
+        );
+        external.push(record);
+        let outcome = result?;
+        settled?;
+        if outcome.reason == Some(FinishReason::EndOfGeneration)
+            || (outcome.done && outcome.reason.is_none())
+        {
+            return Ok(text);
+        }
+        Err(InferenceError::new(
+            ErrorCode::ProviderInvalidResponse,
+            "The provider did not finish the research step.",
+        ))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn apply(
+    fn reserve_remote(
         &self,
-        streaming: &Streaming,
-        parsed: Vec<openai::Event>,
-        outcome: &mut Outcome,
-        transcript: &std::sync::Mutex<Transcript>,
-        events: &ChatEvents,
-        message_id: agent_core::chat::MessageId,
-        started: Instant,
-    ) -> Result<()> {
-        for event in parsed {
-            streaming.check_live().map_err(|f| failure_error(&f))?;
-            match event {
-                openai::Event::Delta(text) => {
-                    outcome.first_token.get_or_insert_with(|| started.elapsed());
-                    transcript_lock(transcript)?.push(
-                        &text,
-                        &self.database,
-                        self.glance_receipt.is_none().then_some(message_id),
-                    )?;
-                    deliver(
-                        events,
-                        ChatEvent::Delta {
-                            id: message_id,
-                            text,
-                        },
-                    );
-                }
-                openai::Event::Finish(reason) => outcome.reason = Some(reason),
-                openai::Event::Usage(usage) => outcome.usage = Some(usage),
-                openai::Event::Done => outcome.done = true,
-            }
-        }
-        Ok(())
+        saved: &SavedProvider,
+        input: u64,
+        output: u32,
+    ) -> Result<RemoteBudget> {
+        let tokens = input.saturating_add(output.into());
+        let cost = usage::estimate_cost(saved.settings.pricing.as_ref(), input, output.into());
+        let id = database(&self.database)?.reserve_usage(
+            &usage::current_period(),
+            Reservation {
+                provider: saved.id,
+                tokens,
+                cost,
+            },
+            limits(&saved.settings),
+        )?;
+        Ok(RemoteBudget { id, tokens, cost })
+    }
+
+    fn settle_remote(
+        &self,
+        settings: &ProviderSettings,
+        budget: RemoteBudget,
+        transmission: Transmission,
+        reported: Option<openai::ReportedUsage>,
+        message: Option<i64>,
+    ) -> (LedgerBasis, Result<()>) {
+        let (basis, charged_tokens, charged_cost, input_tokens, output_tokens) =
+            match (transmission, reported) {
+                (_, Some(usage)) => (
+                    LedgerBasis::ProviderReported,
+                    usage.input.saturating_add(usage.output),
+                    usage::estimate_cost(settings.pricing.as_ref(), usage.input, usage.output),
+                    Some(usage.input),
+                    Some(usage.output),
+                ),
+                (Transmission::Unsent, None) => (
+                    LedgerBasis::None,
+                    0,
+                    budget.cost.is_some().then_some(0),
+                    None,
+                    None,
+                ),
+                (_, None) => (
+                    LedgerBasis::Estimated,
+                    budget.tokens,
+                    budget.cost,
+                    None,
+                    None,
+                ),
+            };
+        let result = database(&self.database).and_then(|mut db| {
+            db.settle_usage(
+                budget.id,
+                Settlement {
+                    transmission: ledger(transmission),
+                    input_tokens,
+                    output_tokens,
+                    basis,
+                    charged_tokens,
+                    charged_cost,
+                    message,
+                },
+            )
+        });
+        (basis, result)
     }
 
     fn release(&self, reservation: i64, message_id: agent_core::chat::MessageId) {
@@ -716,4 +750,78 @@ fn limits(settings: &ProviderSettings) -> Limits {
                 .max(pricing.output_micros_per_million)
         }),
     }
+}
+
+async fn read_stream(
+    streaming: &mut Streaming,
+    started: Instant,
+    mut emit: impl FnMut(String) -> Result<()>,
+) -> Result<Outcome> {
+    let status = streaming.status;
+    let event_stream = streaming
+        .content_type
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"));
+    let mut outcome = Outcome {
+        reason: None,
+        done: false,
+        usage: None,
+        first_token: None,
+    };
+    let mut parser = openai::Stream::default();
+    let mut whole = Vec::new();
+    let successful = (200..300).contains(&status);
+    loop {
+        let piece = match streaming.next().await {
+            None => break,
+            Some(piece) => piece.map_err(|failure| failure_error(&failure))?,
+        };
+        if !successful || !event_stream {
+            if whole.len() + piece.len() > openai::MAX_JSON_BYTES {
+                return Err(InferenceError::new(
+                    ErrorCode::ProviderInvalidResponse,
+                    "The provider's response exceeded this app's size limits.",
+                ));
+            }
+            whole.extend(piece);
+            continue;
+        }
+        let parsed = parser.feed(&piece)?;
+        apply_events(streaming, parsed, &mut outcome, started, &mut emit)?;
+        if parser.is_done() {
+            return Ok(outcome);
+        }
+    }
+    if !successful {
+        return Err(openai::error_response(status, &whole));
+    }
+    let parsed = if event_stream {
+        parser.finish()?
+    } else {
+        openai::complete_events(&whole)?
+    };
+    apply_events(streaming, parsed, &mut outcome, started, &mut emit)?;
+    Ok(outcome)
+}
+
+fn apply_events(
+    streaming: &Streaming,
+    parsed: Vec<openai::Event>,
+    outcome: &mut Outcome,
+    started: Instant,
+    emit: &mut impl FnMut(String) -> Result<()>,
+) -> Result<()> {
+    for event in parsed {
+        streaming.check_live().map_err(|f| failure_error(&f))?;
+        match event {
+            openai::Event::Delta(text) => {
+                outcome.first_token.get_or_insert_with(|| started.elapsed());
+                emit(text)?;
+            }
+            openai::Event::Finish(reason) => outcome.reason = Some(reason),
+            openai::Event::Usage(usage) => outcome.usage = Some(usage),
+            openai::Event::Done => outcome.done = true,
+        }
+    }
+    Ok(())
 }

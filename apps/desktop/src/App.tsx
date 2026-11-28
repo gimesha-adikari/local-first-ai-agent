@@ -413,7 +413,7 @@ export default function App() {
           : attachmentPlan.needed && !attachmentPlan.canSend ? `Review what will be sent to ${remoteTarget?.name ?? "the provider"} and confirm it below the attachments.`
             : null);
   const activeReference = snapshot?.models.find((model) => model.id === snapshot.activeModelId) ?? null;
-  const supportsThinking = !remote && !!modelInfo?.supportsThinking;
+  const supportsThinking = !research.enabled && !remote && !!modelInfo?.supportsThinking;
   const supportsAgent = !!modelInfo?.supportsAgent;
   const agentUnavailable = !agent.eventReady ? "Connecting to Agent events…"
     : !modelReady ? "Load a model to use Agent mode"
@@ -688,7 +688,7 @@ export default function App() {
     follow.current = true;
     const count = knowledgeRequest?.documentIds.length ?? 0;
     if (researchRequest) {
-      setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: "Preparing web research…" });
+      setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: researchRequest.mode === "search" ? "Understanding your question…" : "Reading the page…" });
     } else if (attachmentOption) {
       const n = attachmentOption.ids.length;
       setPendingChat({ conversationId: id, prompt: kind === "send" ? content : null, label: `Reading ${n} ${n === 1 ? "attachment" : "attachments"}…` });

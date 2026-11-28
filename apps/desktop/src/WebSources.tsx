@@ -125,6 +125,19 @@ export function WebSourceList({ messageId, view, modelName, focus, onFocusHandle
           {view.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}
         </ul>
       )}
+      {view.attempts?.length > 0 && (
+        <details className="web-discovered">
+          <summary><ChevronRightIcon size={13} />Search details</summary>
+          <ol>
+            {view.attempts.map((attempt, index) => (
+              <li key={index}>
+                <span className="source-name">{attempt.query}</span>
+                <p className="hint">{attempt.results} results · {attempt.outcome}</p>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
       {view.discovered.length > 0 && (
         <details className="web-discovered">
           <summary><ChevronRightIcon size={13} />Other results ({view.discovered.length}), not supplied to the model</summary>

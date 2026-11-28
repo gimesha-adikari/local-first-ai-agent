@@ -3,7 +3,7 @@
 
 export type SearchProviderKind = "brave" | "searxng" | "purili";
 export type ResearchMode = "search" | "page";
-export type ResearchStage = "searching" | "reading" | "ranking" | "answering" | "done";
+export type ResearchStage = "understanding" | "searching" | "checking" | "refining" | "reading" | "ranking" | "answering" | "done";
 export type CredentialStatus = "stored" | "missing" | "locked" | "unavailable";
 
 export type WebResearchSettings = {
@@ -73,6 +73,7 @@ export type ResearchView = {
   discovered: DiscoveredView[];
   limitations: string[];
   query: string | null;
+  attempts: { query: string; results: number; outcome: string }[];
   transient: boolean;
 };
 
@@ -80,7 +81,7 @@ export type ResearchView = {
 export type ResearchDraft = {
   enabled: boolean;
   mode: ResearchMode;
-  /** An explicit edit of the outgoing query; null sends the message itself. */
+  /** Optional focus for query planning, or the exact reviewed image query. */
   query: string | null;
   url: string;
   resultsOnly: boolean;
@@ -173,40 +174,34 @@ export function researchPlan({ draft, message, view, remoteName, modelReady }: {
   let reviewRequired = false;
   let destination: string;
   let outgoing: string | null = null;
-  if (draft.mode === "search") {
+  const search = draft.mode === "search";
+  const derived = draft.queryAttachments.length > 0;
+  if (search) {
     destination = providerLabel(provider);
-    outgoing = normalizeQuery(draft.query ?? message);
+    if (derived) outgoing = normalizeQuery(draft.query ?? message);
     if (!provider) problem = "Choose a search provider.";
-    else if (provider === "brave" && view?.braveKey !== "stored") problem ??= "Add your Brave Search API key in Settings → Web search.";
+    else if (provider === "brave" && view?.braveKey !== "stored") problem = "Add your Brave Search API key in Settings → Web search.";
     else if (provider === "searxng" && !view?.searxngOrigin) problem = "Enter your SearXNG address in Settings → Web search.";
     else if (provider === "purili" && !view?.settings.puriliPersonalUse) problem = "Confirm Purili’s personal-use terms in Settings.";
     setupRequired = problem !== null;
-    reviewRequired = draft.queryAttachments.length > 0 && !approvedQuery(draft, provider, outgoing);
-    if (message.trim() || draft.query !== null) problem ??= queryProblem(draft.query ?? message);
+    reviewRequired = derived && !approvedQuery(draft, provider, outgoing ?? "");
+    if (derived || draft.query?.trim()) problem ??= queryProblem(draft.query ?? message);
+    if (derived && remoteName) problem ??= "Select a local Chat model for image-derived searches.";
+    else if (!remoteName && !modelReady) problem ??= "Load a Chat model to plan and check web searches.";
   } else {
-    destination = "the webpage's own site";
+    destination = "the webpage’s site";
     if (draft.url.trim()) problem = urlProblem(draft.url);
   }
-  const pages = draft.mode === "search" ? `up to ${maxPages} public pages` : "the page";
-  let answer: ResearchPlan["answer"];
-  let answerNote: string;
-  if (draft.resultsOnly) {
-    answer = "none";
-    answerNote = `Results only: ${pages} will be read and listed without asking a model.`;
-  } else if (remoteName) {
-    answer = draft.share ? "remote" : "none";
-    answerNote = draft.share
-      ? `${remoteName} receives your question and selected page excerpts to write the answer.`
-      : `Sources will be listed. Allow ${remoteName} to receive the excerpts to get a written answer.`;
-  } else if (modelReady) {
-    answer = "local";
-    answerNote = "The answer is written on this device. Searching and reading pages still use the internet.";
-  } else {
-    answer = "none";
-    answerNote = "No model is loaded, so you'll get the sources without a written answer.";
-  }
+  const answer = draft.resultsOnly ? "none" : remoteName && draft.share ? "remote" : modelReady ? "local" : "none";
+  const answerNote = search
+    ? remoteName
+      ? `${remoteName} receives your question and the public material used to check sources.`
+      : "The selected model plans and checks the search on this device."
+    : answer === "remote" ? `${remoteName} receives your question and page excerpts to write the answer.`
+      : answer === "local" ? "The selected model answers on this device." : "The app lists the page without a written answer.";
+  const shareRequired = search && !!remoteName && !draft.share;
   return {
-    canSend: !problem && !reviewRequired && !!message.trim() && (draft.mode !== "page" || !!draft.url.trim()),
+    canSend: !problem && !reviewRequired && !shareRequired && !!message.trim() && (draft.mode !== "page" || !!draft.url.trim()),
     problem, setupRequired, reviewRequired, destination, outgoing, answer, answerNote,
   };
 }
@@ -230,7 +225,7 @@ export function researchOptions(draft: ResearchDraft, view: WebResearchView | nu
   return {
     mode: "search" as const,
     provider: provider ?? undefined,
-    ...(query !== null ? { query } : {}),
+    ...(query ? { query } : {}),
     ...(draft.queryAttachments.length ? { queryAttachments: draft.queryAttachments } : {}),
     ...(query !== null && draft.queryAttachments.length && approvedQuery(draft, provider, query) ? { reviewedQuery: query } : {}),
     ...(draft.resultsOnly ? { resultsOnly: true } : {}),
@@ -240,10 +235,13 @@ export function researchOptions(draft: ResearchDraft, view: WebResearchView | nu
 
 export function stageLabel(stage: ResearchStage, mode: ResearchMode = "search"): string {
   switch (stage) {
-    case "searching": return "Searching the web…";
+    case "understanding": return "Understanding your question…";
+    case "searching": return "Searching for relevant information…";
+    case "checking": return "Checking sources…";
+    case "refining": return "Refining search…";
     case "reading": return mode === "page" ? "Reading the page…" : "Reading public pages…";
-    case "ranking": return "Selecting relevant evidence…";
-    case "answering": return "Writing the answer from sources…";
+    case "ranking": return "Checking sources…";
+    case "answering": return "Preparing answer…";
     case "done": return "Done";
   }
 }

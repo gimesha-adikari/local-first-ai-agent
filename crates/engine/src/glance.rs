@@ -598,7 +598,6 @@ impl ChatRuntime {
                             .map(|image| vec![(image.image, image.size)])
                             .unwrap_or_default(),
                         external: Vec::new(),
-                        web: false,
                         attachments: false,
                     },
                     target,

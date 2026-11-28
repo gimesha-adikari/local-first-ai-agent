@@ -240,6 +240,7 @@ function researchFixture(research: Json, question: string) {
       { title: "Fernhill bridge timeline", url: "https://city.example.gov/projects/fernhill", host: "city.example.gov", snippet: "Project milestones from 2022 to 2026.", published: null, attempted: false },
       { title: "Bridge photos", url: "https://photos.example.com/fernhill", host: "photos.example.com", snippet: "A gallery of the opening day.", published: null, attempted: false },
     ],
+    attempts: page ? [] : [{ query: "rainwater collection garden storage", results: 3, outcome: "Relevant results" }],
     limitations: page ? [] : ["paywall.example.com requires sign-in or blocks automated reading (access restricted)."],
     query: page ? null : String(research.query ?? question), transient: true,
   };
@@ -275,7 +276,7 @@ async function streamChat(args: Json, regenerate: boolean): Promise<Message> {
     const fixture = researchFixture(research, turn.user.content);
     assistant.context = { coverage: null, memoryEnabled: null, fitted: null, research: fixture.record };
     deliver(args.events, index++, { kind: "started", user, assistant: { ...assistant } });
-    for (const stage of research.mode === "page" ? ["reading", "ranking"] : ["searching", "reading", "ranking"]) {
+    for (const stage of research.mode === "page" ? ["reading", "ranking"] : ["understanding", "searching", "checking"]) {
       deliver(args.events, index++, { kind: "research", id: assistant.id, stage });
       await wait(700);
     }

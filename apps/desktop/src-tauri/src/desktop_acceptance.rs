@@ -44,6 +44,41 @@ impl InferenceProvider for Fixture {
         cancellation: &Cancellation,
         emit: &mut dyn FnMut(TextDelta) -> Result<()>,
     ) -> Result<GenerationStats> {
+        let system = &request.history.system;
+        if system.starts_with("Research query planner.")
+            || system.starts_with("Research result evaluator.")
+        {
+            let input: Value = serde_json::from_str(&request.prompt).unwrap();
+            let output = if system.starts_with("Research result evaluator.") {
+                json!({"sources": [1]})
+            } else {
+                let query = if input["question"] == "Typed fixture results only" {
+                    "historical bridge opening dates"
+                } else if input["previousQuery"].is_string() {
+                    "railway crossing access timetable"
+                } else {
+                    assert_eq!(input["focus"], "Edited fixture focus");
+                    "municipal bridge construction files"
+                };
+                json!({"query": query})
+            };
+            emit(TextDelta {
+                text: output.to_string(),
+            })?;
+            return Ok(GenerationStats {
+                reason: FinishReason::EndOfGeneration,
+                prompt_tokens: 15,
+                prompt_tokens_per_second: None,
+                generated_tokens: 8,
+                time_to_first_token_ms: Some(1),
+                elapsed_ms: 2,
+                tokens_per_second: 1.0,
+                excluded_turns: 0,
+                output_budget: None,
+                assistant_replay: None,
+                context_usage: None,
+            });
+        }
         if request.prompt.contains("quoted_context") {
             return glance_generation(request, cancellation, emit);
         }
@@ -649,15 +684,25 @@ fn openai_fixture() -> u16 {
                     Ok(read) => request.extend_from_slice(&buffer[..read]),
                 }
             }
-            if text.starts_with("POST /search ") {
-                let body = &request[head..];
-                let valid = body.starts_with(b"q=Edited+fixture+query&")
-                    || body.starts_with(b"q=Typed+results+only&");
-                let (status, response) = if valid {
-                    ("200 OK", r#"{"results":[]}"#)
-                } else {
-                    ("400 Bad Request", r#"{"error":"unexpected fixture query"}"#)
+            if text.starts_with("POST /api/search ") {
+                let query: Value = serde_json::from_slice(&request[head..]).unwrap();
+                let (status, response) = match query["q"].as_str() {
+                    Some(
+                        "municipal bridge construction files" | "railway crossing access timetable",
+                    ) => ("200 OK", json!({"results": []})),
+                    Some("historical bridge opening dates") => (
+                        "200 OK",
+                        json!({"results": [{
+                            "title": "Historic bridge", "url": "https://news.fixture-site.org/bridge",
+                            "description": "The historic bridge opened to traffic in March 2026.", "source": "crawled"
+                        }]}),
+                    ),
+                    _ => (
+                        "400 Bad Request",
+                        json!({"error":"unexpected fixture query"}),
+                    ),
                 };
+                let response = response.to_string();
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{response}",
@@ -1406,9 +1451,35 @@ fn research_desktop_fixture() {
     let port = openai_fixture();
     run_webview_fixture_with_worker(
         isolated_profile(),
-        include_str!("research_acceptance.js").replace("__PORT__", &port.to_string()),
+        include_str!("research_acceptance.js"),
         "document.documentElement.dataset.researchResult || ''",
-        |webview| prepare_glance_profile(webview.app_handle()),
+        move |webview| {
+            use agent_core::{
+                capability::Locality,
+                research::{SearchProviderKind, WebResearchSettings},
+            };
+            use engine::network::{Destination, Endpoint};
+            prepare_glance_profile(webview.app_handle());
+            let desktop = webview.state::<crate::commands::Desktop>();
+            tauri::async_runtime::block_on(desktop.engine.save_web_research(WebResearchSettings {
+                provider: Some(SearchProviderKind::Purili),
+                purili_personal_use: true,
+                ..Default::default()
+            }))
+            .unwrap();
+            desktop
+                .engine
+                .intelligence_policy()
+                .register_destination(
+                    Destination::new(
+                        "search/purili",
+                        Endpoint::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+                        Locality::SelfHosted,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        },
         || InferenceWorker::spawn(|| Fixture),
         Duration::from_secs(25),
     );

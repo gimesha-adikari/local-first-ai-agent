@@ -433,7 +433,6 @@ impl ChatRuntime {
                         cancellation,
                         images,
                         external: Vec::new(),
-                        web: false,
                         attachments: true,
                     },
                     target,

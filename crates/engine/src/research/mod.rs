@@ -51,8 +51,8 @@ pub struct ResearchOptions {
     /// The provider the user saw; it must still be the configured one.
     #[serde(default)]
     pub provider: Option<SearchProviderKind>,
-    /// The user's explicit edit of the outgoing query. Omitted means the
-    /// message itself is the query.
+    /// An optional focus for planning. For a reviewed image query this
+    /// is the exact reviewed text.
     #[serde(default)]
     pub query: Option<String>,
     /// Attachments whose recognized or extracted text the query was built
@@ -66,7 +66,7 @@ pub struct ResearchOptions {
     /// The public page to read in page mode.
     #[serde(default)]
     pub url: Option<String>,
-    /// List results without asking any model.
+    /// Stop after ranking the results, without composing an answer.
     #[serde(default)]
     pub results_only: bool,
     /// Separate authorization to send the question and selected excerpts to
@@ -129,14 +129,39 @@ pub struct ResearchView {
     pub discovered: Vec<DiscoveredView>,
     pub limitations: Vec<String>,
     pub query: Option<String>,
+    pub attempts: Vec<SearchAttempt>,
     /// Transient details from this app session are still available.
     pub transient: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchAttempt {
+    pub query: String,
+    pub results: usize,
+    pub outcome: &'static str,
+}
+
+pub(crate) const MODEL_PURPOSE: &str = "web-research-model";
+pub(crate) const GENERATED_QUERY_PURPOSE: &str = "web-search-generated";
+pub(crate) const MODEL_OUTPUT_LIMIT: usize = 8 * 1024;
+
+pub(crate) fn push_step_output(output: &mut String, delta: &str) -> Result<()> {
+    if output.len() + delta.len() > MODEL_OUTPUT_LIMIT {
+        return Err(InferenceError::new(
+            ErrorCode::GenerationFailed,
+            "The research model exceeded the response limit.",
+        ));
+    }
+    output.push_str(delta);
+    Ok(())
 }
 
 /// Details kept only in memory for the life of the app process.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Transient {
     pub query: Option<String>,
+    pub attempts: Vec<SearchAttempt>,
     pub sources: Vec<TransientSource>,
     pub discovered: Vec<DiscoveredView>,
     pub limitations: Vec<String>,
@@ -301,7 +326,16 @@ impl NetworkBoundary {
             })
         })?;
         let request = providers::request(provider, query);
-        let purpose = if sources.ids().any(|id| id != USER_INPUT.id) {
+        use agent_core::classification::{MODEL_OUTPUT, PUBLIC_WEB, SYSTEM_TEXT};
+        let generated = sources.contains(MODEL_OUTPUT)
+            && sources.ids().all(|id| {
+                [USER_INPUT, MODEL_OUTPUT, PUBLIC_WEB, SYSTEM_TEXT]
+                    .iter()
+                    .any(|class| id == class.id)
+            });
+        let purpose = if generated {
+            GENERATED_QUERY_PURPOSE
+        } else if sources.ids().any(|id| id != USER_INPUT.id) {
             crate::policy::VISUAL_SEARCH_PURPOSE
         } else {
             "web-search"
@@ -611,6 +645,10 @@ impl Engine {
                 .map(|details| details.limitations.clone())
                 .unwrap_or_default(),
             query: transient.as_ref().and_then(|details| details.query.clone()),
+            attempts: transient
+                .as_ref()
+                .map(|details| details.attempts.clone())
+                .unwrap_or_default(),
             transient: transient.is_some(),
             record,
         }))

@@ -209,7 +209,7 @@ pub(crate) fn select(page: &ExtractedPage, terms: &[String], budget: usize) -> S
         parts.push(description.clone());
     }
     parts.extend(chosen.into_iter().map(|index| passages[index].text.clone()));
-    let text = cut(&parts.join(" … "), budget);
+    let text = cut(&parts.join("\n\n"), budget);
     Selection {
         coverage: coverage(&text, terms),
         text,
@@ -276,7 +276,7 @@ mod tests {
         };
         let selection = select(&page, &terms("summarize"), 400);
         assert!(selection.lead);
-        assert!(selection.text.starts_with("Summary line. … Sentence one"));
+        assert!(selection.text.starts_with("Summary line.\n\nSentence one"));
         assert!(selection.text.chars().count() <= 400);
         assert!(
             passages(&page.blocks)

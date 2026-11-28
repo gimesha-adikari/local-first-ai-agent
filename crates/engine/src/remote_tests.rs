@@ -305,7 +305,11 @@ fn choosing_the_local_model_keeps_chat_off_the_network() {
             settings,
         )
         .unwrap();
-    futures_executor::block_on(r.engine.load_model(model.id, settings)).unwrap();
+    let explicit = agent_core::chat::ModelSettings {
+        temperature: 0.0,
+        ..settings
+    };
+    futures_executor::block_on(r.engine.load_model(model.id, explicit)).unwrap();
     let id = r.conversation();
     let answer = r
         .send(

@@ -392,6 +392,7 @@ impl Policy {
         }
         if operation.capability == WEB_SEARCH {
             let visual = operation.purpose == VISUAL_SEARCH_PURPOSE;
+            let generated = operation.purpose == crate::research::GENERATED_QUERY_PURPOSE;
             let labels = &operation.labels;
             // A model's visual description also inherits the built-in prompt
             // class. Keep that label without accepting standalone system text.
@@ -399,13 +400,21 @@ impl Policy {
                 && [SCREEN_IMAGE, CAMERA_IMAGE, ATTACHMENT_IMAGE]
                     .into_iter()
                     .any(|class| labels.contains(class));
-            if (!visual && operation.purpose != "web-search")
+            if (!visual && !generated && operation.purpose != "web-search")
+                || (generated
+                    && (!labels.contains(MODEL_OUTPUT)
+                        || !labels.contains(USER_INPUT)
+                        || !labels.contains(SYSTEM_TEXT)))
                 || !labels.contains(QUERY)
                 || ((labels.contains(ATTACHMENT) || labels.contains(ATTACHMENT_TEXT))
                     && !labels.contains(ATTACHMENT_IMAGE))
                 || !labels.ids().all(|id| {
                     id == USER_INPUT.id
                         || id == QUERY.id
+                        || (generated
+                            && (id == MODEL_OUTPUT.id
+                                || id == SYSTEM_TEXT.id
+                                || id == PUBLIC_WEB.id))
                         || (visual
                             && ((description && (id == MODEL_OUTPUT.id || id == SYSTEM_TEXT.id))
                                 || VISUAL_QUERY_CLASSES.iter().any(|class| class.id == id)))
@@ -417,6 +426,16 @@ impl Policy {
             {
                 return Err(Denial::Scope);
             }
+        }
+        if operation.purpose == crate::research::MODEL_PURPOSE
+            && (operation.capability != GENERATE
+                || !operation.labels.ids().all(|id| {
+                    [USER_INPUT, SYSTEM_TEXT, PUBLIC_WEB, MODEL_OUTPUT]
+                        .iter()
+                        .any(|class| id == class.id)
+                }))
+        {
+            return Err(Denial::Scope);
         }
         match (
             &operation.destination,
@@ -506,6 +525,9 @@ impl Policy {
                 Ok("builtin.chat/1")
             }
             (Permission::Process, GENERATE, "glance", Retention::Session) => Ok("builtin.glance/1"),
+            (Permission::Process, GENERATE, "web-research-step", Retention::Session) => {
+                Ok("builtin.web-research/1")
+            }
             (Permission::Retain, GENERATE, "glance-remember", Retention::SavedLocally) => {
                 Ok("explicit.glance-remember/1")
             }

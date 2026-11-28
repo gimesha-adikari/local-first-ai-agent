@@ -59,7 +59,8 @@ export function ResearchBar({ draft, onChange, plan, view, remoteName, remoteLoc
   const searchLocality = provider === "searxng" ? "Self-hosted" : provider ? "Web service" : null;
   const derived = search && draft.queryAttachments.length > 0;
   const title = search ? (draft.resultsOnly ? "Search results" : "Search and answer") : "Read a webpage";
-  const answer = plan.answer === "local" ? "Answer on this device"
+  const answer = search && remoteName ? `${remoteName} · ${remoteLocality}`
+    : plan.answer === "local" ? "Answer on this device"
     : plan.answer === "remote" ? `Answer by ${remoteName} · ${remoteLocality}`
       : search && draft.resultsOnly ? null : "Sources only";
 
@@ -73,7 +74,7 @@ export function ResearchBar({ draft, onChange, plan, view, remoteName, remoteLoc
         <span className="spacer" />
         {search && draft.query === null && !plan.setupRequired && (
           <button type="button" className="link-button" disabled={disabled}
-            onClick={() => onChange({ ...draft, query: normalizeQuery(message) })}>Edit query</button>
+            onClick={() => onChange({ ...draft, query: derived ? normalizeQuery(message) : "" })}>{derived ? "Edit query" : "Add search focus"}</button>
         )}
         {search && plan.setupRequired && (
           <button type="button" className="link-button" onClick={onOpenSettings}>Set up search</button>
@@ -81,18 +82,19 @@ export function ResearchBar({ draft, onChange, plan, view, remoteName, remoteLoc
         <details className="research-privacy">
           <summary>Privacy</summary>
           <p className="hint">{search
-            ? "The search service receives the query. The app reads up to three public pages without cookies or sign-in."
+            ? (derived ? "The search service receives the exact image-derived query you review."
+              : "The search service receives only the model’s generated queries. Search and answer can read up to three public pages.")
             : "The app reads the public page directly over HTTPS without cookies, scripts or images."}
             {" "}{plan.answerNote}</p>
         </details>
       </div>
       {search && draft.query !== null && (
         <div className="research-edit">
-          <label className="sr-only" htmlFor={inputId}>Search query</label>
+          <label className="sr-only" htmlFor={inputId}>{derived ? "Search query" : "Search focus"}</label>
           <input id={inputId} type="text" maxLength={maxQueryChars} value={draft.query} disabled={disabled}
-            placeholder="Search query" onChange={(event) => onChange({ ...draft, query: event.currentTarget.value, reviewedQuery: null })} />
+            placeholder={derived ? "Search query" : "Search focus"} onChange={(event) => onChange({ ...draft, query: event.currentTarget.value, reviewedQuery: null })} />
           <button type="button" className="link-button" disabled={disabled}
-            onClick={() => onChange({ ...draft, query: null, queryAttachments: [], reviewedQuery: null })}>Use my message</button>
+            onClick={() => onChange({ ...draft, query: null, queryAttachments: [], reviewedQuery: null })}>{derived ? "Use my message" : "Clear focus"}</button>
         </div>
       )}
       {derived && provider && (
@@ -111,11 +113,11 @@ export function ResearchBar({ draft, onChange, plan, view, remoteName, remoteLoc
             placeholder="https://example.org/article" onChange={(event) => onChange({ ...draft, url: event.currentTarget.value })} />
         </div>
       )}
-      {remoteName && !draft.resultsOnly && (
+      {remoteName && !derived && (search || !draft.resultsOnly) && (
         <label className="check-row">
           <input type="checkbox" checked={draft.share} disabled={disabled}
             onChange={(event) => onChange({ ...draft, share: event.currentTarget.checked })} />
-          <span>Let {remoteName} answer using my question and page excerpts</span>
+          <span>{search ? `Let ${remoteName} process my question and public sources` : `Let ${remoteName} answer using my question and page excerpts`}</span>
         </label>
       )}
       {plan.problem && <p className="error-text" role="status">{plan.problem}</p>}
